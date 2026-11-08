@@ -1,7 +1,7 @@
 [package]
 name = "concordance"
 description = "One behaviour definition per feature; native implementations checked against it on every platform"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 rust-version = "1.85"
