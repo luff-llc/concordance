@@ -1,0 +1,22 @@
+[package]
+name = "concordance"
+description = "One behaviour definition per feature; native implementations checked against it on every platform"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.85"
+repository = "https://github.com/luff-llc/concordance"
+
+[dependencies]
+serde = { version = "=1.0.228", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "=1.0.145", default-features = false, features = ["std", "float_roundtrip"] }
+serde_yaml = "=0.9.34"
+clap = { version = "=4.6.7", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
+toml = { version = "=1.2.1", default-features = false, features = ["parse", "serde"] }
+
+[[bin]]
+name = "concordance"
+path = "src/main.rs"
+
+[lints.clippy]
+unwrap_used = "deny"

@@ -1,0 +1,68 @@
+[
+  {
+    "id": "library.open-library",
+    "title": "Open a library",
+    "summary": "Open saved reading material with native controls.",
+    "surfaces": [
+      "library"
+    ],
+    "interactions": [
+      {
+        "trigger": "Tap Open",
+        "result": "The selected book opens."
+      }
+    ],
+    "states": [
+      "ready",
+      "empty",
+      "unavailable"
+    ],
+    "settings": [],
+    "data": {
+      "reads": [
+        "book"
+      ],
+      "writes": [
+        "reading position"
+      ]
+    },
+    "copy": [
+      "Open",
+      "No books yet"
+    ],
+    "accessibility": {
+      "label": "Open",
+      "identifier": "",
+      "notes": [
+        "Announce the selected title."
+      ]
+    },
+    "design": [],
+    "depends_on": [],
+    "impact": "low",
+    "platforms": {
+      "ios": {
+        "status": "shipped",
+        "source": [
+          "Reader.swift"
+        ],
+        "tests": [
+          "ReaderTests.swift#ReaderTests.testOpen"
+        ]
+      },
+      "android": {
+        "status": "missing",
+        "source": [],
+        "tests": [],
+        "gap": "Implement the native journey."
+      }
+    },
+    "acceptance": [
+      {
+        "given": "a saved book",
+        "when": "the reader taps Open",
+        "then": "the selected book is displayed"
+      }
+    ]
+  }
+]

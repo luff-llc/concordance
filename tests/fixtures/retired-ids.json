@@ -1,0 +1,8 @@
+{
+  "reader.old-open": {
+    "replaced_by": [
+      "reader.open-book"
+    ],
+    "reason": "Renamed before publication; reserve the old identity."
+  }
+}

@@ -1,0 +1,7 @@
+[platforms]
+ios = "native"
+android = "native"
+
+[report]
+title = "Reader native parity"
+area_order = ["library", "reader", "search"]

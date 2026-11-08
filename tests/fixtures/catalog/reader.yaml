@@ -1,0 +1,139 @@
+[
+  {
+    "id": "reader.open-book",
+    "title": "Open a book",
+    "summary": "Open saved reading material with native controls.",
+    "surfaces": [
+      "library"
+    ],
+    "interactions": [
+      {
+        "trigger": "Tap Open",
+        "result": "The selected book opens."
+      }
+    ],
+    "states": [
+      "ready",
+      "empty",
+      "unavailable"
+    ],
+    "settings": [],
+    "data": {
+      "reads": [
+        "book"
+      ],
+      "writes": [
+        "reading position"
+      ]
+    },
+    "copy": [
+      "Open",
+      "No books yet"
+    ],
+    "accessibility": {
+      "label": "Open",
+      "identifier": "reader.open",
+      "notes": [
+        "Announce the selected title."
+      ]
+    },
+    "design": [],
+    "depends_on": [
+      "library.open-library"
+    ],
+    "impact": "critical",
+    "platforms": {
+      "ios": {
+        "status": "shipped",
+        "source": [
+          "Reader.swift"
+        ],
+        "tests": [
+          "ReaderTests.swift#ReaderTests.testOpen"
+        ]
+      },
+      "android": {
+        "status": "partial",
+        "source": [
+          "Reader.kt"
+        ],
+        "tests": [],
+        "gap": "Implement the native journey."
+      }
+    },
+    "acceptance": [
+      {
+        "given": "a saved book",
+        "when": "the reader taps Open",
+        "then": "the selected book is displayed"
+      },
+      {
+        "given": "a missing book",
+        "when": "the reader taps Open",
+        "then": "an error explains how to recover"
+      }
+    ]
+  },
+  {
+    "id": "reader.native-menu",
+    "title": "Use a native menu",
+    "summary": "Open saved reading material with native controls.",
+    "surfaces": [
+      "library"
+    ],
+    "interactions": [
+      {
+        "trigger": "Tap Open",
+        "result": "The selected book opens."
+      }
+    ],
+    "states": [
+      "ready",
+      "empty",
+      "unavailable"
+    ],
+    "settings": [],
+    "data": {
+      "reads": [
+        "book"
+      ],
+      "writes": [
+        "reading position"
+      ]
+    },
+    "copy": [
+      "Open",
+      "No books yet"
+    ],
+    "accessibility": {
+      "label": "Open",
+      "identifier": "",
+      "notes": [
+        "Announce the selected title."
+      ]
+    },
+    "design": [],
+    "depends_on": [],
+    "impact": "medium",
+    "platforms": {
+      "ios": {
+        "status": "not-applicable",
+        "source": [],
+        "tests": []
+      },
+      "android": {
+        "status": "shipped",
+        "source": [],
+        "tests": [],
+        "gap": "Implement the native journey."
+      }
+    },
+    "acceptance": [
+      {
+        "given": "a saved book",
+        "when": "the reader taps Open",
+        "then": "the selected book is displayed"
+      }
+    ]
+  }
+]

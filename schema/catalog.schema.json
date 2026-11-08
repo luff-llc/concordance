@@ -1,0 +1,229 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:concordance:catalog:1",
+  "title": "Native product catalog area",
+  "description": "An area contains an array of native behavior contracts, in YAML or JSON.",
+  "type": "array",
+  "minItems": 1,
+  "items": {
+    "$ref": "#/$defs/entry"
+  },
+  "$defs": {
+    "text": {
+      "type": "string",
+      "minLength": 1
+    },
+    "texts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/text"
+      },
+      "uniqueItems": true
+    },
+    "nonemptyTexts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/text"
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*\\.[a-z][a-z0-9-]*$"
+    },
+    "interaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trigger",
+        "result"
+      ],
+      "properties": {
+        "trigger": {
+          "$ref": "#/$defs/text"
+        },
+        "result": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "acceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "given",
+        "when",
+        "then"
+      ],
+      "properties": {
+        "given": {
+          "$ref": "#/$defs/text"
+        },
+        "when": {
+          "$ref": "#/$defs/text"
+        },
+        "then": {
+          "$ref": "#/$defs/text"
+        }
+      }
+    },
+    "platform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "shipped",
+            "partial",
+            "missing",
+            "not-applicable"
+          ]
+        },
+        "source": {
+          "$ref": "#/$defs/texts"
+        },
+        "tests": {
+          "$ref": "#/$defs/texts"
+        },
+        "gap": {
+          "type": "string"
+        },
+        "notes": {
+          "type": "string"
+        }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "title",
+        "summary",
+        "surfaces",
+        "interactions",
+        "states",
+        "settings",
+        "data",
+        "copy",
+        "accessibility",
+        "design",
+        "depends_on",
+        "impact",
+        "platforms",
+        "acceptance"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "title": {
+          "$ref": "#/$defs/text"
+        },
+        "summary": {
+          "$ref": "#/$defs/text"
+        },
+        "surfaces": {
+          "$ref": "#/$defs/nonemptyTexts"
+        },
+        "interactions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/interaction"
+          }
+        },
+        "states": {
+          "$ref": "#/$defs/nonemptyTexts"
+        },
+        "settings": {
+          "$ref": "#/$defs/texts"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "reads",
+            "writes"
+          ],
+          "properties": {
+            "reads": {
+              "$ref": "#/$defs/texts"
+            },
+            "writes": {
+              "$ref": "#/$defs/texts"
+            }
+          }
+        },
+        "copy": {
+          "$ref": "#/$defs/texts"
+        },
+        "accessibility": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "label",
+            "identifier",
+            "notes"
+          ],
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "identifier": {
+              "type": "string"
+            },
+            "notes": {
+              "$ref": "#/$defs/texts"
+            }
+          }
+        },
+        "design": {
+          "$ref": "#/$defs/texts"
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/id"
+          },
+          "uniqueItems": true
+        },
+        "impact": {
+          "enum": [
+            "critical",
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "description": "Optional product ordering within an impact tier; lower numbers come first."
+        },
+        "platforms": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "$ref": "#/$defs/platform"
+          }
+        },
+        "acceptance": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/acceptance"
+          }
+        },
+        "notes": {
+          "$ref": "#/$defs/texts"
+        }
+      }
+    }
+  }
+}
