@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/luff-llc/concordance/schema/screens.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "anatomy": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/region"
+      },
+      "minItems": 1
+    },
+    "states": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "theme": {
+            "enum": [
+              "light",
+              "dark"
+            ]
+          },
+          "font_scale": {
+            "type": "number",
+            "minimum": 0.1,
+            "maximum": 10
+          },
+          "captures": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minProperties": 1
+          },
+          "absent": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 0,
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "theme",
+          "captures"
+        ]
+      },
+      "minProperties": 1
+    },
+    "tolerances": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "geometry": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "delta_e": {
+          "type": "number",
+          "minimum": 0
+        },
+        "text_size": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "required": []
+    },
+    "notes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      },
+      "minProperties": 0
+    }
+  },
+  "required": [
+    "id",
+    "entries",
+    "anatomy",
+    "states"
+  ],
+  "$defs": {
+    "region": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "tokens": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "color": {
+              "type": "string",
+              "minLength": 1
+            },
+            "typography": {
+              "type": "string",
+              "minLength": 1
+            },
+            "spacing": {
+              "type": "string",
+              "minLength": 1
+            },
+            "radius": {
+              "type": "string",
+              "minLength": 1
+            },
+            "material": {
+              "type": "string",
+              "minLength": 1
+            },
+            "motion": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sample": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "minItems": 2,
+              "maxItems": 2
+            }
+          },
+          "required": []
+        },
+        "layout": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "min_width": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "max_width": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "min_height": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "max_height": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "below": {
+              "type": "string",
+              "minLength": 1
+            },
+            "right_of": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": []
+        },
+        "notes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minProperties": 0
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/region"
+          },
+          "minItems": 0
+        }
+      },
+      "required": [
+        "id",
+        "role",
+        "priority"
+      ]
+    }
+  }
+}

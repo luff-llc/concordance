@@ -1,0 +1,19 @@
+colors:
+  accent: {light: '#336699', dark: '#99CCFF'}
+  paper: {light: '#FFFFFF', dark: '#FFFFFF'}
+  artwork-tint:
+    light: '#336699'
+    dark: '#99CCFF'
+    rule: Dominant artwork hue adjusted to contrast 4.5 against the surface.
+typography:
+  body: {size: 16, line_height: 20, weight: 400, dynamic_type: body}
+spacing:
+  regular: 8
+radii:
+  artwork: 4
+materials:
+  floating-glass: {swift: ultraThinMaterial, elevation: 8, blur: 12, opacity: 0.8}
+  paper: {swift: regularMaterial, elevation: 0, blur: 0, opacity: 1}
+motions:
+  settle: {response: 0.4, damping: 0.8}
+  fade: {duration: 0.2}

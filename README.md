@@ -3,6 +3,10 @@
 Concordance describes what a product does, once, so every platform can build it natively
 and prove it.
 
+Optional UI contracts add shared design tokens and screen anatomy. Each platform
+uses native components; capture comparison checks visual structure and token use.
+See [the UI workflow](docs/ui.md).
+
 A concordance is the index of every word in a book; the word also means agreement.
 This tool is both: a catalog of every feature and interaction in an app, and a check that
 each platform's native implementation agrees with it.
@@ -22,6 +26,10 @@ concordance next path/to/catalog --platform android --limit 10
 concordance entry path/to/catalog player.skip-forward --format brief
 concordance ids path/to/catalog --platform kotlin --out Ids.kt --package org.example
 concordance journeys path/to/catalog --platform swift --out Tests/Journeys
+concordance tokens path/to/catalog --platform swift --out DesignTokens.swift
+concordance capture-plan path/to/catalog --platform android
+concordance compare path/to/catalog --captures captures --out ui-report --check
+concordance ui-report path/to/catalog --captures captures
 ```
 
 The format is in [docs/format.md](docs/format.md) and the JSON Schema in

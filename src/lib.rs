@@ -3,6 +3,7 @@ mod generate;
 mod model;
 mod report;
 pub mod schema;
+pub mod ui;
 
 pub use generate::{JourneyResult, Language};
 pub use model::*;
@@ -67,7 +68,10 @@ impl Catalog {
         let mut files = fs::read_dir(&data_dir)?
             .map(|e| e.map(|e| e.path()))
             .collect::<std::io::Result<Vec<_>>>()?;
-        files.retain(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("yaml" | "yml")));
+        files.retain(|p| {
+            matches!(p.extension().and_then(|e| e.to_str()), Some("yaml" | "yml"))
+                && (nested || p.file_name().and_then(|s| s.to_str()) != Some("tokens.yaml"))
+        });
         files.sort();
         if files.is_empty() {
             return fail(format!("no catalog YAML files in {}", data_dir.display()));

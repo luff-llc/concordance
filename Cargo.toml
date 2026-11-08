@@ -8,6 +8,7 @@ rust-version = "1.85"
 repository = "https://github.com/luff-llc/concordance"
 
 [dependencies]
+png = "=0.17.16"
 serde = { version = "=1.0.228", default-features = false, features = ["derive", "std"] }
 serde_json = { version = "=1.0.145", default-features = false, features = ["std", "float_roundtrip"] }
 serde_yaml = "=0.9.34"

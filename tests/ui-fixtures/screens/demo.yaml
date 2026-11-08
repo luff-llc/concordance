@@ -1,0 +1,37 @@
+id: demo
+entries: [demo.open-screen]
+tolerances: {geometry: 0.05, delta_e: 3, text_size: 1}
+notes:
+  ios: Use a native sheet with medium and large detents.
+  android: Use a native modal bottom sheet.
+anatomy:
+  - id: content
+    role: surface
+    priority: 1
+    children:
+      - id: artwork
+        role: artwork-surface
+        priority: 1
+        tokens: {color: accent, radius: artwork, spacing: regular}
+        layout: {min_width: 0.4}
+      - id: title
+        role: title-block
+        priority: 1
+        tokens: {typography: body}
+        layout: {below: artwork}
+      - id: transport
+        role: primary-action
+        priority: 2
+        tokens: {color: paper, material: floating-glass, motion: settle}
+        layout: {below: title}
+states:
+  populated:
+    theme: light
+    captures:
+      ios: captures/demo.populated.ios.png
+      android: captures/demo.populated.android.png
+  dark:
+    theme: dark
+    captures:
+      ios: captures/demo.dark.ios.png
+      android: captures/demo.dark.android.png

@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/luff-llc/concordance/schema/tokens.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "colors": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "light": {
+            "type": "string",
+            "minLength": 1
+          },
+          "dark": {
+            "type": "string",
+            "minLength": 1
+          },
+          "rule": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "light",
+          "dark"
+        ]
+      },
+      "minProperties": 1
+    },
+    "typography": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "size": {
+            "type": "number",
+            "minimum": 0.1
+          },
+          "line_height": {
+            "type": "number",
+            "minimum": 0.1
+          },
+          "weight": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
+          },
+          "dynamic_type": {
+            "enum": [
+              "largeTitle",
+              "title1",
+              "title2",
+              "title3",
+              "headline",
+              "subheadline",
+              "body",
+              "callout",
+              "footnote",
+              "caption1",
+              "caption2"
+            ]
+          }
+        },
+        "required": [
+          "size",
+          "line_height",
+          "weight",
+          "dynamic_type"
+        ]
+      },
+      "minProperties": 1
+    },
+    "spacing": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "number",
+        "minimum": 0
+      },
+      "minProperties": 0
+    },
+    "radii": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "number",
+        "minimum": 0
+      },
+      "minProperties": 0
+    },
+    "materials": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "swift": {
+            "enum": [
+              "ultraThinMaterial",
+              "thinMaterial",
+              "regularMaterial",
+              "thickMaterial",
+              "ultraThickMaterial"
+            ]
+          },
+          "elevation": {
+            "type": "number",
+            "minimum": 0
+          },
+          "blur": {
+            "type": "number",
+            "minimum": 0
+          },
+          "opacity": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "required": [
+          "swift",
+          "elevation",
+          "blur",
+          "opacity"
+        ]
+      },
+      "minProperties": 0
+    },
+    "motions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "duration": {
+            "type": "number",
+            "minimum": 0.001
+          },
+          "response": {
+            "type": "number",
+            "minimum": 0.001
+          },
+          "damping": {
+            "type": "number",
+            "minimum": 0.001
+          }
+        },
+        "required": []
+      },
+      "minProperties": 0
+    }
+  },
+  "required": [
+    "colors",
+    "typography",
+    "spacing",
+    "radii",
+    "materials",
+    "motions"
+  ],
+  "$defs": {}
+}

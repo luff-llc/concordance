@@ -14,7 +14,11 @@ pub fn valid_id(id: &str) -> bool {
 }
 
 pub fn validate(value: &Value) -> Result<()> {
-    let root: Value = serde_json::from_str(SCHEMA)?;
+    validate_document(value, SCHEMA)
+}
+
+pub fn validate_document(value: &Value, document: &str) -> Result<()> {
+    let root: Value = serde_json::from_str(document)?;
     check(value, &root, &root, "$")
 }
 
@@ -42,6 +46,7 @@ fn check(value: &Value, rule: &Value, root: &Value, at: &str) -> Result<()> {
             "items",
             "enum",
             "minItems",
+            "maxItems",
             "minLength",
             "pattern",
             "uniqueItems",
@@ -70,6 +75,8 @@ fn check(value: &Value, rule: &Value, root: &Value, at: &str) -> Result<()> {
             "object" => value.is_object(),
             "string" => value.is_string(),
             "integer" => value.is_u64() || value.is_i64(),
+            "number" => value.is_number(),
+            "boolean" => value.is_boolean(),
             _ => return fail(format!("unsupported schema type: {kind}")),
         };
         if !matches {
@@ -112,6 +119,13 @@ fn check(value: &Value, rule: &Value, root: &Value, at: &str) -> Result<()> {
     if let Some(array) = value.as_array() {
         if array.len() < rule.get("minItems").and_then(Value::as_u64).unwrap_or(0) as usize {
             return fail(format!("{at}: too few items"));
+        }
+        if rule
+            .get("maxItems")
+            .and_then(Value::as_u64)
+            .is_some_and(|max| array.len() > max as usize)
+        {
+            return fail(format!("{at}: too many items"));
         }
         for (i, child) in array.iter().enumerate() {
             if rule.get("uniqueItems") == Some(&Value::Bool(true)) && array[..i].contains(child) {

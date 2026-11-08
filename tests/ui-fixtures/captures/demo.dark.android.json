@@ -1,0 +1,48 @@
+{
+  "width": 32,
+  "height": 32,
+  "scale": 1,
+  "nodes": [
+    {
+      "identifier": "content",
+      "role": "surface",
+      "frame": {
+        "x": 0,
+        "y": 0,
+        "width": 32,
+        "height": 32
+      }
+    },
+    {
+      "identifier": "title",
+      "role": "title-block",
+      "frame": {
+        "x": 0,
+        "y": 0,
+        "width": 32,
+        "height": 8
+      },
+      "text_size": 24
+    },
+    {
+      "identifier": "artwork",
+      "role": "artwork-surface",
+      "frame": {
+        "x": 0,
+        "y": 8,
+        "width": 8,
+        "height": 8
+      }
+    },
+    {
+      "identifier": "transport",
+      "role": "primary-action",
+      "frame": {
+        "x": 0,
+        "y": 8,
+        "width": 32,
+        "height": 8
+      }
+    }
+  ]
+}

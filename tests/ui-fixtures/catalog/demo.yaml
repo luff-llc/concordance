@@ -1,0 +1,17 @@
+- id: demo.open-screen
+  title: Open screen
+  summary: Show the native screen.
+  surfaces: [main]
+  interactions: [{trigger: Tap open, result: Show screen}]
+  states: [ready]
+  settings: []
+  data: {reads: [], writes: []}
+  copy: []
+  accessibility: {label: Open, identifier: demo.open, notes: []}
+  design: []
+  depends_on: []
+  impact: high
+  platforms:
+    ios: {status: shipped}
+    android: {status: shipped}
+  acceptance: [{given: Ready, when: Open, then: Show screen}]

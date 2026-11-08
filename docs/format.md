@@ -5,6 +5,10 @@ with native navigation, controls, accessibility, and input conventions. A catalo
 a contract for outcomes and interactions, not a shared UI framework or a collection
 of screenshots. Apps do not need to parse it at runtime.
 
+Optional `tokens.yaml` and `screens/*.yaml` add design contracts and native capture
+comparison. See [UI contracts](ui.md) for their schemas, commands and reviewer workflow.
+`tokens.yaml` is reserved and excluded from flat behavior area discovery.
+
 The Rust library exposes serde types, `Catalog::load`, `validate_paths`, `entry`,
 `brief`, `next`, `report`, `identifiers`, and `journeys`. The binary provides the same workflow to implementing agents and CI.
 
@@ -72,7 +76,7 @@ set `--repo` to their common parent and map platform roots to the sibling names.
 
 ## Entry format
 
-The bundled [JSON Schema](../crates/concordance/schema/catalog.schema.json)
+The bundled [JSON Schema](../schema/catalog.schema.json)
 is authoritative for area files. Ordinary YAML and JSON-subset YAML are accepted;
 duplicate mapping keys, unknown fields, and invalid types are rejected. There is
 no catalog-local schema override. Validation uses a small evaluator limited to the
