@@ -31,11 +31,11 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
-    /// Generate native design tokens, preserving every existing file.
+    /// Generate design tokens (swift, kotlin or css), preserving every existing file.
     Tokens {
         dir: PathBuf,
         #[arg(long, value_enum)]
-        platform: Native,
+        platform: TokenPlatform,
         #[arg(long)]
         out: PathBuf,
     },
@@ -126,6 +126,12 @@ enum Native {
     Kotlin,
     Swift,
 }
+#[derive(Clone, Copy, ValueEnum)]
+enum TokenPlatform {
+    Css,
+    Kotlin,
+    Swift,
+}
 impl From<Native> for Language {
     fn from(value: Native) -> Self {
         match value {
@@ -169,7 +175,12 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Tokens { dir, platform, out } => {
             Catalog::load(&dir)?;
-            let result = Tokens::load(&dir)?.write_native(platform.into(), &out)?;
+            let tokens = Tokens::load(&dir)?;
+            let result = match platform {
+                TokenPlatform::Css => tokens.write_css(&dir.display().to_string(), &out)?,
+                TokenPlatform::Kotlin => tokens.write_native(Language::Kotlin, &out)?,
+                TokenPlatform::Swift => tokens.write_native(Language::Swift, &out)?,
+            };
             print_generation(result);
         }
         Command::CapturePlan {
