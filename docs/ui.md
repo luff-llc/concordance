@@ -84,6 +84,7 @@ native interpretations of the same intent; their trajectories can differ.
 ```sh
 concordance tokens spec/product --platform swift --out apple/DesignTokens.swift
 concordance tokens spec/product --platform kotlin --out android/DesignTokens.kt
+concordance tokens spec/product --platform css --out web/tokens.css
 ```
 
 The object is `DesignTokens`. Members use category prefixes such as `color_surface`,
@@ -93,7 +94,24 @@ Swift line-height metadata is for the app to apply; a `Font` alone has no line-h
 setting. Kotlin outputs have no package declaration; place a generated copy in the
 appropriate package or add the declaration when adopting it.
 
-Both commands use exclusive file creation, just like `journeys`. Existing files
+### CSS output
+
+`--platform css` writes one file of custom properties named `--<category>-<name>`, with
+dots in token names written as hyphens (`--color-accent`, `--spacing-regular`). Two
+tokens that map to the same property are an error. Light colors and every non-color
+token go under `:root`; dark colors go under
+`@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { … } }` and again
+under `:root[data-theme="dark"]`; light colors repeat under `:root[data-theme="light"]`,
+so an explicit `data-theme` wins over the system setting either way. Colors are lowercase
+`#rrggbb`, spacing, radius, type size, line height, blur and elevation are `px`, weight
+and opacity are unitless, and durations are `ms`. Typography emits `-size`,
+`-line-height` and `-weight`; materials emit `-elevation`, `-blur` and `-opacity`. Spring
+motions, `dynamic_type` and the Swift material name have no CSS form and are skipped
+with a comment line naming them. The file starts with a header comment naming the
+catalog path as given, and uses the same never-overwrite rule below. The token schema is
+unchanged: it already carries light and dark values.
+
+Both Swift/Kotlin commands use exclusive file creation, just like `journeys`. Existing files
 are **never overwritten**, including stale generated files. Reruns report created,
 unchanged and preserved paths. Generate into a fresh path to review token changes.
 Parent directories for token files must already exist.

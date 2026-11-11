@@ -27,6 +27,7 @@ concordance entry path/to/catalog player.skip-forward --format brief
 concordance ids path/to/catalog --platform kotlin --out Ids.kt --package org.example
 concordance journeys path/to/catalog --platform swift --out Tests/Journeys
 concordance tokens path/to/catalog --platform swift --out DesignTokens.swift
+concordance tokens path/to/catalog --platform css --out tokens.css
 concordance capture-plan path/to/catalog --platform android
 concordance compare path/to/catalog --captures captures --out ui-report --check
 concordance ui-report path/to/catalog --captures captures
