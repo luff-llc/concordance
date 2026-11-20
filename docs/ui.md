@@ -231,6 +231,28 @@ A harness that cannot produce a capture (no fixture, unsupported state) writes a
 `.skip` marker whose first nonblank line is the reason, so coverage separates a
 deliberate skip from a forgotten capture.
 
+A capture run can instead (or also) write a manifest, `<captures>/<platform>/manifest.json`
+or `<captures>/manifest.<platform>.json`:
+
+```json
+{
+  "platform": "android", "device": "Pixel 8 API 35", "commit": "0123abc",
+  "fixture_pack": "fixtures-2026-11-20",
+  "captures": [
+    {"screen": "detail", "state": "populated", "status": "produced"},
+    {"screen": "detail", "state": "dark", "status": "skipped", "reason": "No dark artwork fixture"}
+  ]
+}
+```
+
+Files on disk win: a PNG/JSON pair is produced regardless of the manifest. Otherwise a
+manifest `skipped` entry is skipped with its reason, a `.skip` marker is next, and a
+manifest `produced` entry whose files are absent is missing with that explanation.
+Coverage lists each platform's device, commit and fixture pack. When the baseline and
+target manifests name different `fixture_pack` IDs, `compare` prints
+`WARNING: fixtures differ: visual comparison is structural only` on stderr, at the top
+of its summary and as a banner in `index.html`; `ui-report` and coverage repeat it.
+
 ### Capture coverage
 
 ```sh
@@ -308,7 +330,9 @@ agent or human reviewer; judge whether it expresses the same product design.
 ### Reviewer notes and proposed verification
 
 Each pair in `index.html` has a verdict (`unreviewed`, `same`, `differs`) and a
-**Differences noted** field. The page autosaves to the browser and **Save review.json**
+**Differences noted** field. From a terminal, edit the same file with
+`concordance review set <compare-out-dir> <screen.state> --verdict differs --note "…"`
+(optionally `--reviewer`, `--at`, `--commit`, `--baseline-commit`). The page autosaves to the browser and **Save review.json**
 downloads the notes; place the file next to the page (or edit `review.json`, which
 `compare` writes once as a template and never overwrites). Rerunning `compare` reads
 an existing `review.json` and pre-fills the form.
@@ -339,6 +363,9 @@ each entry and the review's target platform it proposes one action:
   existing journeys, and the reviewer's notes.
 - `needs-work`: some pair `differs`; proposes a `gap` from the noted differences.
 - `not-implemented`: the target status is not implemented; differences become a gap.
+- `incomplete`: the proposal would not verify yet, because `implemented_by` is not
+  recorded or the entry's `verify_requires` asks for a journey (or capture) the
+  record lacks; the proposed record is included with what to add.
 - `rejected`: the reviewer is the entry's `implemented_by`.
 
 Unreviewed pairs are ignored. Pairs whose baseline or target capture is skipped or

@@ -29,7 +29,15 @@
 - `compare` writes side-by-side `pairs/<screen>.<state>.png` images (no new
   dependencies), a review form, and a `review.json` template; `concordance verify
   --review` turns reviewer verdicts into a proposed verification patch without
-  editing the catalog.
+  editing the catalog; `concordance review set` edits `review.json` from a terminal.
+- The tool writes `implemented`; `shipped` remains a deprecated read alias.
+  `verification` requires `implemented_by`. Entries may declare `verify_requires`;
+  by default state-changing entries (non-empty `data.writes`) need a capture and a
+  journey, visual ones a capture. `verify` proposes `incomplete` when unmet.
+- Capture-run manifests (`manifest.json`: produced/skipped with reasons, device,
+  commit, fixture pack). `compare`, coverage and `ui-report` warn when fixture packs
+  differ.
+- Report area and README links are relative to the output file's directory.
 
 ## 0.2.0
 

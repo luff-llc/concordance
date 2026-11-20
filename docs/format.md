@@ -145,7 +145,7 @@ keywords in the bundled schema, avoiding a general JSON Schema dependency.
   priority: 10
   platforms:
     ios:
-      status: shipped
+      status: implemented
       source: [Screens/Reader.swift]
       tests: [Tests/ReaderTests.swift#ReaderTests.testOpen]
     android:
@@ -182,8 +182,9 @@ can only be detected for IDs actually recorded in this file.
 from 1 through 1000, with lower numbers first. The priority of remaining work can
 differ from the importance of the entire feature.
 
-Platform status is always one of `shipped` (or its synonym `implemented`), `partial`,
-`missing`, or `not-applicable`. Status records implementation only; whether anyone
+Platform status is always one of `implemented`, `partial`, `missing`, or
+`not-applicable`. `shipped` is a **deprecated** read alias for `implemented`; the tool
+writes `implemented` in all output. Status records implementation only; whether anyone
 independently checked it is recorded separately (see
 [Implemented versus verified](#implemented-versus-verified)). `source`, `tests`, `gap`, and `notes` are optional on a platform
 record, allowing a device variant to record status before evidence is collected.
@@ -206,8 +207,8 @@ or from the implementing agent. Verification is a separate, optional record:
 ```yaml
 platforms:
   android:
-    status: shipped              # or: implemented
-    implemented_by: sol          # optional agent or person ID
+    status: implemented          # `shipped` is a deprecated read alias
+    implemented_by: sol          # agent or person ID; required with verification
     source: [app/src/main/kotlin/Player.kt]
     verification:
       by: agy                    # reviewer ID; must differ from implemented_by
@@ -220,16 +221,21 @@ platforms:
 ```
 
 `verified` is derived, never stored. A record is verified only when its status is
-implemented, `verification` is present with at least one capture or journey, and
-`by` differs from `implemented_by` (when that is recorded). A capture is either a
+implemented, `implemented_by` is recorded, `verification` is present, `by` differs
+from `implemented_by`, and the record has the evidence the entry requires.
+
+An entry's optional `verify_requires: [capture, journey]` names that evidence. The
+default is inferred: an entry whose interactions change state (non-empty
+`data.writes`) needs at least one capture **and** one journey; a purely visual entry
+(no writes) verifies on a capture. Detail items need at least one capture or journey. A capture is either a
 capture key `screen.state` (for the record's platform, resolved through UI contracts)
 or a file path relative to the repository root. In UI reports, a capture key whose
 capture is skipped or missing withdraws verification (see [UI contracts](ui.md)).
 
-`validate` rejects a verifier equal to `implemented_by`, verification on a `missing`
+`validate` rejects verification without `implemented_by`, a verifier equal to it, verification on a `missing`
 or `not-applicable` record, invalid dates, non-hexadecimal commits, missing capture
 files, missing journey files, and capture keys that are not declared screen states.
-Existing catalogs need no change: `shipped` without `verification` is simply
+Existing catalogs need no change: `shipped` without `verification` reads as
 implemented and unverified.
 
 Reports never print a single "shipped" total. The summary and area table show
@@ -370,9 +376,9 @@ concordance report spec/product --out spec/product/parity.md
 ```
 
 The default output is `<dir>/parity.md`; explicit output paths are relative to the
-current working directory. `--check` compares exact contents, exits nonzero for a
-missing/stale file, and never writes it. Report links are relative to the catalog
-directory, so keep the output beside `catalog.toml` for working area links.
+current working directory. Area and README links are written relative to the output
+file's directory, so they resolve wherever the report is placed. `--check` compares exact contents, exits nonzero for a
+missing/stale file, and never writes it. 
 
 Reports count entries shipped on the configured baseline, tally target statuses
 (implemented, verified, partial, missing) by area, list implemented-but-unverified

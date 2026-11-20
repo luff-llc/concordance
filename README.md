@@ -33,6 +33,7 @@ concordance tokens path/to/catalog --platform css --out tokens.css
 concordance capture-plan path/to/catalog --platform android
 concordance capture-plan path/to/catalog --platform ios,android --coverage --captures captures
 concordance compare path/to/catalog --captures captures --out ui-report --check
+concordance review set ui-report detail.dark --verdict differs --note "Title wraps"
 concordance verify path/to/catalog --review ui-report/review.json --out proposal.yaml
 concordance ui-report path/to/catalog --captures captures
 ```
@@ -44,7 +45,7 @@ Declared external roots are optional unless `--require-roots` is set. Git baseli
 pins let `drift` identify entries whose evidence changed and uncatalogued source
 changes; parity reports also flag baseline drift when the checkout is available.
 
-Status records what is implemented; an optional `verification` record (reviewer,
+Status records what is `implemented` (`shipped` is a deprecated alias); an optional `verification` record (reviewer,
 date, commits, captures, journeys) records independent proof, and `verified` is
 derived from it. Reports show implemented and verified counts separately and list
 claimed-but-unverified work. Entries can carry `details` (motion, haptic, gesture,
