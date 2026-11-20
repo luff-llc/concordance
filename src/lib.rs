@@ -1,7 +1,11 @@
 //! Product behavior catalogs shared by native implementations and their tests.
+mod drift;
 mod generate;
 mod model;
 mod report;
+mod validation;
+pub use drift::*;
+pub use validation::*;
 pub mod schema;
 pub mod ui;
 
@@ -32,6 +36,14 @@ impl Catalog {
     /// Enforces the bundled schema, IDs, retirement records and dependency DAG.
     /// Evidence existence is separate so inspection/generation works without source checkouts.
     pub fn load(directory: impl AsRef<Path>) -> Result<Self> {
+        let (catalog, report) = Self::load_collect(directory)?;
+        report.into_result()?;
+        Ok(catalog)
+    }
+
+    /// Load recoverable entries and collect independent structural problems.
+    pub fn load_collect(directory: impl AsRef<Path>) -> Result<(Self, ValidationReport)> {
+        let mut report = ValidationReport::default();
         let directory = directory.as_ref().to_path_buf();
         let config_path = directory.join("catalog.toml");
         let config: Config = toml::from_str(
@@ -39,13 +51,17 @@ impl Catalog {
                 .map_err(|e| format!("{}: {e}", config_path.display()))?,
         )?;
         if config.platforms.is_empty() {
-            return fail("catalog.toml: platforms must not be empty");
+            report.error(
+                "config",
+                "",
+                "",
+                "catalog.toml",
+                "platforms must not be empty",
+            );
         }
         for (name, root) in &config.platforms {
             if name.is_empty() || !safe_relative(root, true) {
-                return fail(format!(
-                    "catalog.toml: unsafe platform root {name} = {root:?}"
-                ));
+                report.error("config", "", name, root, "unsafe platform root");
             }
         }
         for (name, prefix) in &config.path_prefixes {
@@ -53,11 +69,31 @@ impl Catalog {
                 || !prefix.ends_with('/')
                 || !safe_relative(prefix, false)
             {
-                return fail(format!("catalog.toml: invalid path prefix for {name}"));
+                report.error("config", "", name, prefix, "invalid path prefix");
             }
         }
         if Path::new(&config.repo_root).is_absolute() {
-            return fail("catalog.toml: repo_root must be relative to the catalog directory");
+            report.error(
+                "config",
+                "",
+                "",
+                "repo_root",
+                "repo_root must be relative to the catalog directory",
+            );
+        }
+        for (group, names) in [
+            (
+                "external_roots",
+                config.external_roots.keys().collect::<Vec<_>>(),
+            ),
+            ("baselines", config.baselines.keys().collect()),
+            ("source_globs", config.source_globs.keys().collect()),
+        ] {
+            for name in names {
+                if !config.platforms.contains_key(name) {
+                    report.error("config", "", name, group, "unknown platform");
+                }
+            }
         }
         let nested = directory.join("catalog").is_dir();
         let data_dir = if nested {
@@ -74,7 +110,13 @@ impl Catalog {
         });
         files.sort();
         if files.is_empty() {
-            return fail(format!("no catalog YAML files in {}", data_dir.display()));
+            report.error(
+                "schema",
+                "",
+                "",
+                &data_dir.display().to_string(),
+                "no catalog YAML files",
+            );
         }
         let mut catalog = Self {
             config,
@@ -90,10 +132,18 @@ impl Catalog {
                 .ok_or("non-UTF8 area name")?
                 .to_owned();
             if !safe_area(&area) {
-                return fail(format!("invalid area filename: {}", file.display()));
+                report.error(
+                    "schema",
+                    "",
+                    "",
+                    &file.display().to_string(),
+                    "invalid area filename",
+                );
+                continue;
             }
             if catalog.area_files.contains_key(&area) {
-                return fail(format!("duplicate area filename: {area}"));
+                report.error("schema", "", "", &area, "duplicate area filename");
+                continue;
             }
             let name = file
                 .file_name()
@@ -103,23 +153,59 @@ impl Catalog {
                 area.clone(),
                 format!("{}{name}", if nested { "catalog/" } else { "" }),
             );
-            // Deserialize YAML first: unlike serde_json::Value, this rejects duplicate map keys.
-            let value: serde_yaml::Value = serde_yaml::from_str(&fs::read_to_string(&file)?)
-                .map_err(|e| format!("{}: {e}", file.display()))?;
-            let value = serde_json::to_value(value)?;
-            schema::validate(&value).map_err(|e| format!("{}: {e}", file.display()))?;
-            let entries: Vec<Entry> = serde_json::from_value(value)?;
-            for entry in entries {
+            // Parsing failures affect this document only; other files still contribute issues.
+            let values = (|| -> Result<serde_json::Value> {
+                let value: serde_yaml::Value = serde_yaml::from_str(&fs::read_to_string(&file)?)?;
+                Ok(serde_json::to_value(value)?)
+            })();
+            let reference = file.display().to_string();
+            let value = match values {
+                Ok(value) => value,
+                Err(error) => {
+                    report.error("schema", "", "", &reference, &error.to_string());
+                    continue;
+                }
+            };
+            let Some(values) = value.as_array() else {
+                report.error("schema", "", "", &reference, "expected array");
+                continue;
+            };
+            if values.is_empty() {
+                report.error("schema", "", "", &reference, "too few items");
+            }
+            for (index, value) in values.iter().enumerate() {
+                let id = value
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let errors = schema::validate_all(&serde_json::json!([value]));
+                for error in &errors {
+                    report.error(
+                        "schema",
+                        id,
+                        "",
+                        &reference,
+                        &error.replace("$[0]", &format!("$[{index}]")),
+                    );
+                }
+                let entry: Entry = match serde_json::from_value(value.clone()) {
+                    Ok(entry) => entry,
+                    Err(_) => continue,
+                };
                 for platform in entry.platforms.keys() {
                     if !catalog.config.platforms.contains_key(platform) {
-                        return fail(format!(
-                            "{}: platform {platform} has no configured repo root",
-                            entry.id
-                        ));
+                        report.error(
+                            "identity",
+                            &entry.id,
+                            platform,
+                            "",
+                            "platform has no configured repo root",
+                        );
                     }
                 }
                 if catalog.entries.contains_key(&entry.id) {
-                    return fail(format!("duplicate ID: {}", entry.id));
+                    report.error("identity", &entry.id, "", &reference, "duplicate ID");
+                    continue;
                 }
                 catalog.areas.insert(entry.id.clone(), area.clone());
                 catalog.entries.insert(entry.id.clone(), entry);
@@ -128,13 +214,35 @@ impl Catalog {
         for entry in catalog.entries.values() {
             for dependency in &entry.depends_on {
                 if !catalog.entries.contains_key(dependency) {
-                    return fail(format!("{}: unresolved depends_on {dependency}", entry.id));
+                    report.error(
+                        "dependencies",
+                        &entry.id,
+                        "",
+                        dependency,
+                        "unresolved depends_on",
+                    );
                 }
             }
         }
-        catalog.dependency_order(None)?;
-        catalog.validate_retired()?;
-        Ok(catalog)
+        // Find every node participating in a cycle without hiding independent missing dependencies.
+        for id in catalog.entries.keys() {
+            let mut pending = catalog.entries[id].depends_on.clone();
+            let mut seen = BTreeSet::new();
+            while let Some(next) = pending.pop() {
+                if &next == id {
+                    report.error("dependencies", id, "", "", "dependency cycle");
+                    break;
+                }
+                if seen.insert(next.clone()) {
+                    if let Some(entry) = catalog.entries.get(&next) {
+                        pending.extend(entry.depends_on.iter().cloned());
+                    }
+                }
+            }
+        }
+        catalog.validate_retired(&mut report)?;
+        report.sort();
+        Ok((catalog, report))
     }
 
     pub fn entry(&self, id: &str) -> Result<&Entry> {
@@ -143,7 +251,7 @@ impl Catalog {
             .ok_or_else(|| format!("unknown entry: {id}").into())
     }
 
-    fn validate_retired(&self) -> Result<()> {
+    fn validate_retired(&self, report: &mut ValidationReport) -> Result<()> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Retirement {
@@ -154,20 +262,40 @@ impl Catalog {
         if !path.exists() {
             return Ok(());
         }
-        let value: serde_yaml::Value = serde_yaml::from_str(&fs::read_to_string(path)?)?;
-        let retired: BTreeMap<String, Retirement> = serde_yaml::from_value(value)?;
-        for (id, record) in retired {
+        let retired = (|| -> Result<BTreeMap<String, serde_yaml::Value>> {
+            let value: serde_yaml::Value = serde_yaml::from_str(&fs::read_to_string(&path)?)?;
+            Ok(serde_yaml::from_value(value)?)
+        })();
+        let retired = match retired {
+            Ok(retired) => retired,
+            Err(error) => {
+                report.error("retired", "", "", "retired-ids.json", &error.to_string());
+                return Ok(());
+            }
+        };
+        for (id, value) in retired {
+            let record: Retirement = match serde_yaml::from_value(value) {
+                Ok(record) => record,
+                Err(error) => {
+                    report.error("retired", &id, "", "retired-ids.json", &error.to_string());
+                    continue;
+                }
+            };
             if !schema::valid_id(&id) || record.reason.trim().is_empty() {
-                return fail(format!("invalid retirement record: {id}"));
+                report.error("retired", &id, "", "", "invalid retirement record");
             }
             if self.entries.contains_key(&id) {
-                return fail(format!("retired ID cannot be reused: {id}"));
+                report.error("retired", &id, "", "", "retired ID cannot be reused");
             }
             for replacement in record.replaced_by {
                 if !self.entries.contains_key(&replacement) {
-                    return fail(format!(
-                        "{id}: unresolved retired-ID replacement {replacement}"
-                    ));
+                    report.error(
+                        "retired",
+                        &id,
+                        "",
+                        &replacement,
+                        "unresolved retired-ID replacement",
+                    );
                 }
             }
         }
@@ -177,61 +305,11 @@ impl Catalog {
     /// Check referenced source/test files, including unqualified test file paths.
     /// `path#Suite.method` checks the file, not language declarations or test coverage.
     pub fn validate_paths(&self, repo: Option<&Path>) -> Result<()> {
-        let repo = repo
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| self.directory.join(&self.config.repo_root))
-            .canonicalize()?;
-        let mut checked = BTreeSet::new();
-        for entry in self.entries.values() {
-            for (platform, evidence) in &entry.platforms {
-                for reference in evidence
-                    .source
-                    .iter()
-                    .chain(evidence.tests.iter().filter(|s| is_test_path(s)))
-                {
-                    if !checked.insert((platform, reference)) {
-                        continue;
-                    }
-                    let relative = reference
-                        .split_once('#')
-                        .map(|(p, _)| p)
-                        .unwrap_or(reference);
-                    let relative = if let Some(prefix) = self.config.path_prefixes.get(platform) {
-                        relative.strip_prefix(prefix).ok_or_else(|| {
-                            format!(
-                                "{}: {platform} path must start with {prefix}: {reference}",
-                                entry.id
-                            )
-                        })?
-                    } else {
-                        relative
-                    };
-                    if !safe_relative(relative, false) {
-                        return fail(format!(
-                            "{}: unsafe {platform} evidence path: {reference}",
-                            entry.id
-                        ));
-                    }
-                    let root = repo
-                        .join(&self.config.platforms[platform])
-                        .canonicalize()
-                        .map_err(|e| format!("{platform} root: {e}"))?;
-                    if !root.starts_with(&repo) {
-                        return fail(format!("{platform} root escapes repo: {}", root.display()));
-                    }
-                    let target = root.join(relative).canonicalize().map_err(|e| {
-                        format!("{}: missing {platform} evidence {reference}: {e}", entry.id)
-                    })?;
-                    if !target.starts_with(&root) || !target.is_file() {
-                        return fail(format!(
-                            "{}: evidence is not a file within {platform} root: {reference}",
-                            entry.id
-                        ));
-                    }
-                }
-            }
-        }
-        Ok(())
+        self.validate_evidence(&RootOptions {
+            repo: repo.map(Path::to_path_buf),
+            ..RootOptions::default()
+        })
+        .into_result()
     }
 
     pub(crate) fn gap_key<'a>(&'a self, entry: &'a Entry) -> (Impact, u16, usize, &'a str) {

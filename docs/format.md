@@ -9,7 +9,8 @@ Optional `tokens.yaml` and `screens/*.yaml` add design contracts and native capt
 comparison. See [UI contracts](ui.md) for their schemas, commands and reviewer workflow.
 `tokens.yaml` is reserved and excluded from flat behavior area discovery.
 
-The Rust library exposes serde types, `Catalog::load`, `validate_paths`, `entry`,
+The Rust library exposes serde types, `Catalog::load`, `Catalog::validate`,
+`ValidationReport`, `RootOptions`, `validate_evidence`, `drift`, `validate_paths`, `entry`,
 `brief`, `next`, `report`, `identifiers`, and `journeys`. The binary provides the same workflow to implementing agents and CI.
 
 ```sh
@@ -71,8 +72,45 @@ ios = "apple-reference/"
 ```
 
 All iOS source and file-based test references must then start with that prefix.
-This mapping does not rewrite the stored catalog. To use several sibling repositories,
-set `--repo` to their common parent and map platform roots to the sibling names.
+This mapping does not rewrite the stored catalog. An explicitly supplied platform root
+is the checkout directory **after** prefix stripping: `ios-reference/Sources/Player.swift`
+with `--root ios=/checkouts/apple` resolves to `/checkouts/apple/Sources/Player.swift`.
+
+### External checkouts
+
+Declare a checkout that is not part of the repository:
+
+```toml
+[external_roots]
+ios = "Read-only Apple reference checkout"
+
+# Alternatively, include repository and revision hints:
+# [external_roots.ios]
+# description = "Read-only Apple reference checkout"
+# git = "https://example.com/apple.git"
+# commit = "0123456789abcdef0123456789abcdef01234567"
+```
+
+Supply actual paths with repeatable `--root <platform>=<path>` on `validate`,
+`report`, `next`, `entry`, `ui-report`, and `drift`. Relative paths are relative to
+the current working directory. Explicit roots may live anywhere; evidence paths
+must still be safe relative paths and cannot escape their platform root via symlinks.
+An explicit root overrides the platform's configured directory, including for
+platforms not declared external. Nothing is cloned, checked out, or modified.
+
+`CONCORDANCE_ROOT_IOS=/checkouts/apple` is equivalent to `--root ios=/checkouts/apple`.
+Environment names uppercase the platform and replace `-` with `_`. CLI options take
+precedence over the environment; the last repeated option for a platform wins.
+Unknown platform overrides and malformed options are errors.
+
+A declared external platform without an override has evidence marked
+`unchecked (root not supplied)`, with its description, Git hint, and the exact
+option/environment name to supply. This does not fail validation. `--require-roots`
+turns missing external roots into errors. Unsafe evidence paths remain errors even
+without a checkout. An explicitly supplied nonexistent root is always an error.
+Undeclared platform roots retain the repository containment and existence checks.
+For several sibling repositories, `--repo` and platform directories under a common
+parent remain supported; explicit roots avoid requiring a common parent.
 
 ## Entry format
 
@@ -183,6 +221,27 @@ complete. An unrecorded dependency status is an error. The default limit is 10;
 zero emits no rows. Unknown platforms and areas are errors. All commands reject
 unresolved dependencies and cycles before producing output.
 
+`validate` collects every recoverable schema, ID, dependency graph, retirement, and
+evidence error instead of stopping at the first missing file. Errors are grouped
+by category and sorted by entry ID, platform, reference, and message, with a final
+error and unchecked-reference count. Every entry citing a bad file is reported.
+Malformed YAML affects its document; other documents are still validated. An entry
+that cannot be deserialized cannot undergo further semantic or evidence checks;
+an unreadable or unparseable configuration prevents catalog loading.
+Validation exits nonzero if any errors are present.
+
+`Catalog::load_collect` returns a partial catalog and a `ValidationReport`;
+`Catalog::validate(dir, &RootOptions)` combines structural and evidence issues in a
+structured report. `ValidationReport.errors` and `.unchecked` contain serializable
+`Issue` records (`group`, `entry`, `platform`, `reference`, `message`).
+`report.into_result()` provides a convenient failure wrapper, and `Catalog::load`
+and `validate_paths` retain their `Result` interfaces. `validate_evidence` returns
+a report for an already loaded catalog. Library callers can opt into environment
+resolution with `RootOptions::with_env(&catalog)`; explicit roots still win.
+The CLI also checks optional UI contracts and includes UI loading errors.
+Parity reports include an Evidence roots section for declared external checkouts
+that were not supplied.
+
 `validate` additionally checks evidence files. `path#Suite.method` verifies the file,
 not the declaration or assertions. Plain file paths, even without `#`, are checked.
 Bare test-runner labels without a slash, dot, or `#` remain permitted and are not
@@ -226,6 +285,58 @@ Projects migrating an existing report can also configure these `[report]` fields
 
 No project prose or area names are hard-coded into the crate. The generator credit
 always names `concordance report`.
+
+## Git baselines and drift
+
+```toml
+# Shared pin for the configured report baseline platform.
+[baseline]
+commit = "0123456789abcdef0123456789abcdef01234567"
+
+# A per-platform pin takes precedence over [baseline].
+[baselines.ios]
+commit = "abcdef0123456789abcdef0123456789abcdef0123"
+
+# Root-relative source globs used to identify changes with no evidence citation.
+[source_globs]
+ios = ["Sources/**/*.swift", "Tests/**/*.swift"]
+android = ["src/**/*.kt", "src/**/*.xml"]
+```
+
+The `commit` hint in an external-root record is also a fallback baseline pin.
+`[baseline]` applies only to `[report].baseline`; `[baselines.<platform>]` supplies
+pins for other platforms. Prefer full commit SHAs for stable historical baselines.
+
+```sh
+concordance drift spec/product --root ios=../apple --platform ios
+concordance drift spec/product --root ios=../apple --since <sha> --to HEAD
+concordance drift spec/product --root ios=../apple --platform ios --format json
+```
+
+`drift` compares the baseline commit to `HEAD` by default. `--since` overrides the
+catalog pin and `--to` selects the end revision. With no `--platform`, it considers
+all configured platforms and marks those without pins or external roots unchecked.
+Revision and Git failures return nonzero; drift itself is informational. Both
+revisions are resolved as commits. The comparison uses `git diff --name-only`,
+includes deletions and both sides of renames, and excludes uncommitted changes.
+Git is read-only and never fetches revisions.
+
+Every entry citing a changed source or file-based test is listed, regardless of its
+status. Test anchors are stripped and runner labels ignored. Evidence paths and
+globs are relative to the resolved platform root, even when that root is a Git
+subdirectory. Uncited changed files matching `source_globs` appear as
+**Uncatalogued changes**. Without source globs, only cited evidence is examined.
+Globs support `*` within a path component, `?` for one character, and `**` across
+components; `**/` also matches zero directories. JSON contains `platforms` with
+`platform`, `since`, `to`, `entries` (`id`, `files`), and `uncatalogued`, plus
+`unchecked` messages. Output is sorted by platform, ID, and file.
+
+`report` and `ui-report` append a Baseline drift section when the configured baseline
+has both a pin and an available root. Changed baseline evidence signals that the
+target status may be stale; the tool does not change any recorded status. A missing
+undeclared source checkout leaves ordinary report generation available. A supplied
+root with an invalid pin or unavailable Git history produces an error. `--check`
+includes the drift section when checking report freshness.
 
 ## Native identifiers and journeys
 

@@ -1,8 +1,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use concordance::{
     ui::{Tokens, UiCatalog},
-    Catalog, Language, Result,
+    Catalog, Language, Result, RootOptions,
 };
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -20,12 +21,16 @@ enum Command {
     /// Validate schema, IDs, dependency DAG, retirement records and evidence files.
     Validate {
         dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
         #[arg(long)]
         repo: Option<PathBuf>,
     },
     /// Generate the configured baseline-to-target parity report.
     Report {
         dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
         #[arg(long)]
         out: Option<PathBuf>,
         #[arg(long)]
@@ -69,6 +74,8 @@ enum Command {
     /// Generate parity.md with a fresh screen summary for every platform.
     UiReport {
         dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
         #[arg(long)]
         captures: Option<PathBuf>,
         #[arg(long)]
@@ -82,6 +89,8 @@ enum Command {
     /// Print an entry or a native implementation brief.
     Entry {
         dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
         id: String,
         #[arg(long, value_enum, default_value = "json")]
         format: Format,
@@ -89,12 +98,28 @@ enum Command {
     /// Pull missing/partial work, prerequisites first, then highest impact.
     Next {
         dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
         #[arg(long)]
         platform: String,
         #[arg(long)]
         area: Option<String>,
         #[arg(long, default_value_t = 10)]
         limit: usize,
+    },
+    /// List entries with changed baseline evidence and uncatalogued source changes.
+    Drift {
+        dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
+        #[arg(long)]
+        platform: Option<String>,
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long, default_value = "HEAD")]
+        to: String,
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: DriftFormat,
     },
     /// Generate native accessibility-identifier constants.
     Ids {
@@ -114,6 +139,54 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+}
+#[derive(clap::Args)]
+struct Roots {
+    /// Evidence checkout root, PLATFORM=PATH; repeat for multiple platforms.
+    #[arg(long = "root", value_parser = parse_root)]
+    roots: Vec<(String, PathBuf)>,
+    /// Fail when a declared external checkout has not been supplied.
+    #[arg(long)]
+    require_roots: bool,
+}
+fn parse_root(value: &str) -> std::result::Result<(String, PathBuf), String> {
+    match value.split_once('=') {
+        Some((platform, path)) if !platform.is_empty() && !path.is_empty() => {
+            Ok((platform.into(), path.into()))
+        }
+        _ => Err("expected PLATFORM=PATH".into()),
+    }
+}
+impl Roots {
+    fn options(self, catalog: &Catalog) -> Result<RootOptions> {
+        let options = RootOptions {
+            repo: None,
+            roots: self.roots.into_iter().collect::<BTreeMap<_, _>>(),
+            require_roots: self.require_roots,
+        }
+        .with_env(catalog);
+        for platform in options.roots.keys() {
+            if !catalog.config.platforms.contains_key(platform) {
+                return Err(format!("unknown platform: {platform}").into());
+            }
+        }
+        if options.require_roots {
+            for platform in catalog.config.external_roots.keys() {
+                if !options.roots.contains_key(platform) {
+                    return Err(format!(
+                        "{platform}: root not supplied; use --root {platform}=<path>"
+                    )
+                    .into());
+                }
+            }
+        }
+        Ok(options)
+    }
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum DriftFormat {
+    Markdown,
+    Json,
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum Format {
@@ -142,22 +215,66 @@ impl From<Native> for Language {
 }
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Validate { dir, repo } => {
-            let catalog = Catalog::load(&dir)?;
-            if dir.join("tokens.yaml").exists() || dir.join("screens").exists() {
-                UiCatalog::load(&dir)?;
+        Command::Validate { dir, repo, roots } => {
+            let (catalog, mut report) = Catalog::load_collect(&dir)?;
+            // Validation accumulates missing roots per reference, rather than failing in option parsing.
+            let options = RootOptions {
+                repo,
+                roots: roots.roots.into_iter().collect(),
+                require_roots: roots.require_roots,
             }
-            catalog.validate_paths(repo.as_deref())?;
+            .with_env(&catalog);
+            let evidence = catalog.validate_evidence(&options);
+            report.errors.extend(evidence.errors);
+            report.unchecked.extend(evidence.unchecked);
+            if dir.join("tokens.yaml").exists() || dir.join("screens").exists() {
+                if let Err(error) = UiCatalog::load(&dir) {
+                    report.errors.push(concordance::Issue {
+                        group: "ui".into(),
+                        entry: String::new(),
+                        platform: String::new(),
+                        reference: String::new(),
+                        message: error.to_string(),
+                    });
+                }
+            }
+            report.sort();
+            let failed = !report.errors.is_empty();
+            if failed {
+                return Err(Box::new(report));
+            }
+            println!("{report}");
             println!(
                 "Valid: {} entries in {} areas.",
                 catalog.entries.len(),
                 catalog.area_files.len()
             );
         }
-        Command::Report { dir, out, check } => {
+        Command::Drift {
+            dir,
+            roots,
+            platform,
+            since,
+            to,
+            format,
+        } => {
+            let catalog = Catalog::load(&dir)?;
+            let options = roots.options(&catalog)?;
+            let drift = catalog.drift(&options, platform.as_deref(), since.as_deref(), &to)?;
+            match format {
+                DriftFormat::Markdown => print!("{}", drift.markdown()),
+                DriftFormat::Json => println!("{}", serde_json::to_string_pretty(&drift)?),
+            }
+        }
+        Command::Report {
+            dir,
+            out,
+            check,
+            roots,
+        } => {
             let catalog = Catalog::load(&dir)?;
             let out = out.unwrap_or_else(|| dir.join("parity.md"));
-            let report = catalog.report()?;
+            let report = catalog.report_with_roots(&roots.options(&catalog)?)?;
             if check {
                 if fs::read_to_string(&out).ok().as_deref() != Some(&report) {
                     return Err(format!(
@@ -240,6 +357,7 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::UiReport {
             dir,
+            roots,
             captures,
             baseline,
             out,
@@ -250,7 +368,10 @@ fn run(cli: Cli) -> Result<()> {
             let baseline = baseline
                 .as_deref()
                 .unwrap_or(&ui.catalog.config.report.baseline);
-            let report = ui.ui_report(&captures, baseline)?;
+            let options = roots.options(&ui.catalog)?;
+            let report = ui.ui_report(&captures, baseline)?
+                + &ui.catalog.evidence_roots_section(&options)?
+                + &ui.catalog.baseline_drift_section(&options)?;
             let out = out.unwrap_or_else(|| dir.join("parity.md"));
             if check {
                 if fs::read_to_string(&out).ok().as_deref() != Some(&report) {
@@ -265,8 +386,14 @@ fn run(cli: Cli) -> Result<()> {
                 out.display()
             );
         }
-        Command::Entry { dir, id, format } => {
+        Command::Entry {
+            dir,
+            id,
+            format,
+            roots,
+        } => {
             let catalog = Catalog::load(dir)?;
+            roots.options(&catalog)?;
             match format {
                 Format::Yaml => print!("{}", serde_yaml::to_string(catalog.entry(&id)?)?),
                 Format::Json => println!("{}", serde_json::to_string_pretty(catalog.entry(&id)?)?),
@@ -275,11 +402,13 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::Next {
             dir,
+            roots,
             platform,
             area,
             limit,
         } => {
             let catalog = Catalog::load(dir)?;
+            roots.options(&catalog)?;
             for entry in catalog.next(&platform, area.as_deref(), limit)? {
                 println!(
                     "{}\t{}\t{}\t{}",

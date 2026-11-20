@@ -21,7 +21,9 @@ exactly what is missing where.
 ```sh
 cargo install --path .
 concordance validate path/to/catalog
+concordance validate path/to/catalog --root ios=../apple-reference --require-roots
 concordance report path/to/catalog --out parity.md
+concordance drift path/to/catalog --root ios=../apple-reference --platform ios
 concordance next path/to/catalog --platform android --limit 10
 concordance entry path/to/catalog player.skip-forward --format brief
 concordance ids path/to/catalog --platform kotlin --out Ids.kt --package org.example
@@ -32,6 +34,13 @@ concordance capture-plan path/to/catalog --platform android
 concordance compare path/to/catalog --captures captures --out ui-report --check
 concordance ui-report path/to/catalog --captures captures
 ```
+
+Validation collects schema, identity, dependency, retirement, and evidence problems in
+one sorted report. External checkouts can be supplied with repeatable
+`--root platform=path` options or `CONCORDANCE_ROOT_<PLATFORM>` environment variables.
+Declared external roots are optional unless `--require-roots` is set. Git baseline
+pins let `drift` identify entries whose evidence changed and uncatalogued source
+changes; parity reports also flag baseline drift when the checkout is available.
 
 The format is in [docs/format.md](docs/format.md) and the JSON Schema in
 [schema/catalog.schema.json](schema/catalog.schema.json).

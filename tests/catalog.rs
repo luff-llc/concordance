@@ -421,3 +421,315 @@ fn generators_are_deterministic_and_never_overwrite_edited_or_stale_files() {
         );
     }
 }
+
+#[test]
+fn validation_collects_schema_dependencies_retirements_and_every_path() {
+    let fixture = Fixture::new();
+    fixture.mutate("reader", |v| {
+        v[0]["title"] = json!("");
+        v[0]["summary"] = json!("");
+        v[0]["depends_on"] = json!(["reader.open-book", "missing.one", "missing.two"]);
+        v[0]["platforms"]["ios"]["source"] = json!(["z.swift", "a.swift"]);
+        v[0]["platforms"]["android"]["tests"] = json!(["Missing.kt", "runner"]);
+    });
+    fixture.mutate("search", |v| v[0]["title"] = json!(""));
+    fs::write(
+        fixture.0.join("retired-ids.json"),
+        json!({
+            "reader.open-book": {"reason":"retired", "replaced_by":["gone.one", "gone.two"]},
+            "search.find-book": {"reason":"retired", "replaced_by":[]}
+        })
+        .to_string(),
+    )
+    .expect("retirements");
+    let report =
+        Catalog::validate(&fixture.0, &concordance::RootOptions::default()).expect("validation");
+    for (group, count) in [
+        ("schema", 3),
+        ("dependencies", 3),
+        ("retired", 4),
+        ("evidence", 3),
+    ] {
+        assert_eq!(
+            report.errors.iter().filter(|i| i.group == group).count(),
+            count,
+            "{report}"
+        );
+    }
+    assert!(report.errors.windows(2).all(|pair| pair[0] <= pair[1]));
+    assert!(report.clone().into_result().is_err());
+    let output = fixture.cli("validate", &[]);
+    assert!(!output.status.success());
+    let text = String::from_utf8_lossy(&output.stderr);
+    assert!(text.contains("13 validation error(s)"), "{text}");
+    assert!(text.contains("a.swift") && text.contains("z.swift") && text.contains("Missing.kt"));
+}
+
+#[test]
+fn validation_continues_after_unparseable_documents() {
+    let fixture = Fixture::new();
+    fs::write(fixture.0.join("catalog/library.yaml"), "[bad").expect("bad YAML");
+    fixture.mutate("reader", |v| {
+        v[0]["title"] = json!("");
+        v[0]["platforms"]["ios"]["source"] = json!(["Missing.swift"]);
+    });
+    let report =
+        Catalog::validate(&fixture.0, &concordance::RootOptions::default()).expect("report");
+    assert_eq!(
+        report.errors.iter().filter(|i| i.group == "schema").count(),
+        2
+    );
+    assert!(report.errors.iter().any(|i| i.reference == "Missing.swift"));
+}
+
+fn configure_external(fixture: &Fixture) {
+    let config = fs::read_to_string(fixture.0.join("catalog.toml")).expect("config");
+    fs::write(fixture.0.join("catalog.toml"), format!("{config}\n[external_roots.ios]\ndescription = 'Read-only reference checkout'\ngit = 'https://example.com/reference.git'\ncommit = 'HEAD'\n")).expect("config");
+}
+
+#[test]
+fn external_roots_are_optional_and_explicit_roots_override_env() {
+    let fixture = Fixture::new();
+    let external = Fixture::new();
+    configure_external(&fixture);
+    let output = success(fixture.cli("validate", &[]));
+    assert!(output.contains("unchecked (root not supplied)"));
+    assert!(output.contains("https://example.com/reference.git"));
+    assert!(output.contains("CONCORDANCE_ROOT_IOS"));
+    assert!(!fixture
+        .cli("validate", &["--require-roots"])
+        .status
+        .success());
+    let root = external.0.join("native");
+    let root_arg = format!("ios={}", root.display());
+    for command in ["validate", "entry", "next", "report"] {
+        let mut args = vec!["--root", &root_arg];
+        if command == "entry" {
+            args.push("reader.open-book");
+        }
+        if command == "next" {
+            args.extend(["--platform", "android"]);
+        }
+        // Do not request drift with this non-git fixture's pin.
+        if command == "report" {
+            continue;
+        }
+        success(fixture.cli(command, &args));
+    }
+    let env_run = |explicit: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_concordance"));
+        command.arg("validate").arg(&fixture.0).env(
+            "CONCORDANCE_ROOT_IOS",
+            if explicit {
+                fixture.0.join("does-not-exist")
+            } else {
+                root.clone()
+            },
+        );
+        if explicit {
+            command.args(["--root", &root_arg]);
+        }
+        success(command.output().expect("CLI"))
+    };
+    assert!(env_run(false).contains("0 unchecked"));
+    assert!(env_run(true).contains("0 unchecked"));
+    assert!(!fixture
+        .cli("validate", &["--root", "unknown=."])
+        .status
+        .success());
+    assert!(!fixture
+        .cli("validate", &["--root", "ios="])
+        .status
+        .success());
+    fixture.mutate("reader", |v| {
+        v[0]["platforms"]["ios"]["source"] = json!(["../catalog.toml"])
+    });
+    assert!(!fixture
+        .cli("validate", &["--root", &root_arg])
+        .status
+        .success());
+    assert!(!fixture.cli("validate", &[]).status.success()); // Unsafe paths fail even without a root.
+}
+
+fn git_test(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .expect("git");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("git UTF8")
+        .trim()
+        .to_owned()
+}
+fn commit_test(root: &Path) -> String {
+    git_test(root, &["add", "native"]);
+    git_test(
+        root,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "fixture",
+        ],
+    );
+    git_test(root, &["rev-parse", "HEAD"])
+}
+
+#[test]
+fn git_baseline_drift_tracks_shared_evidence_deletions_globs_and_subdirectory_roots() {
+    let fixture = Fixture::new();
+    let external = Fixture::new();
+    git_test(&external.0, &["init", "-q"]);
+    let before = commit_test(&external.0);
+    let config = fs::read_to_string(fixture.0.join("catalog.toml")).expect("config");
+    fs::write(
+        fixture.0.join("catalog.toml"),
+        format!(
+            "{config}\n[baseline]\ncommit = '{before}'\n[source_globs]\nios = ['**/*.swift']\n"
+        ),
+    )
+    .expect("config");
+    fs::remove_file(external.0.join("native/Reader.swift")).expect("delete evidence");
+    fs::write(external.0.join("native/Uncited file.swift"), "new").expect("uncited file");
+    fs::write(external.0.join("native/ignore.txt"), "ignore").expect("non-source");
+    let after = commit_test(&external.0);
+    let options = concordance::RootOptions {
+        roots: [("ios".into(), external.0.join("native"))].into(),
+        ..Default::default()
+    };
+    let catalog = fixture.load();
+    let drift = catalog
+        .drift(&options, Some("ios"), None, "HEAD")
+        .expect("drift");
+    let ios = &drift.platforms[0];
+    assert_eq!(ios.uncatalogued, ["Uncited file.swift"]);
+    assert!(!ios.entries.is_empty());
+    assert!(ios.entries.iter().all(|e| e.files == ["Reader.swift"]));
+    let unchanged = catalog
+        .drift(&options, Some("ios"), Some(&after), "HEAD")
+        .expect("override");
+    assert!(unchanged.platforms[0].entries.is_empty());
+    assert!(unchanged.platforms[0].uncatalogued.is_empty());
+    assert!(catalog
+        .drift(&options, Some("ios"), Some("--bad"), "HEAD")
+        .is_err());
+    assert!(catalog
+        .drift(&options, Some("unknown"), None, "HEAD")
+        .is_err());
+    let report = catalog.report_with_roots(&options).expect("parity report");
+    assert!(report.contains("## Baseline drift") && report.contains("target status is stale"));
+    let root_arg = format!("ios={}", external.0.join("native").display());
+    let json: Value = serde_json::from_str(&success(fixture.cli(
+        "drift",
+        &["--root", &root_arg, "--platform", "ios", "--format", "json"],
+    )))
+    .expect("drift JSON");
+    assert_eq!(
+        json["platforms"][0]["uncatalogued"][0],
+        "Uncited file.swift"
+    );
+    assert!(success(fixture.cli(
+        "drift",
+        &[
+            "--root",
+            &root_arg,
+            "--platform",
+            "ios",
+            "--since",
+            &after,
+            "--to",
+            &before
+        ]
+    ))
+    .contains("Reader.swift"));
+    success(fixture.cli("report", &["--root", &root_arg]));
+    success(fixture.cli("report", &["--root", &root_arg, "--check"]));
+}
+
+#[test]
+fn per_platform_pins_override_shared_baseline_and_prefixes_are_stripped_for_drift() {
+    let fixture = Fixture::new();
+    git_test(&fixture.0, &["init", "-q"]);
+    let before = commit_test(&fixture.0);
+    let config = fs::read_to_string(fixture.0.join("catalog.toml")).expect("config");
+    fs::write(fixture.0.join("catalog.toml"), format!("{config}\n[path_prefixes]\nios = 'reference/'\n[baseline]\ncommit = 'invalid'\n[baselines.ios]\ncommit = '{before}'\n")).expect("config");
+    for area in ["library", "reader", "search"] {
+        fixture.mutate(area, |entries| {
+            for entry in entries.as_array_mut().expect("entries") {
+                for key in ["source", "tests"] {
+                    for reference in entry["platforms"]["ios"][key]
+                        .as_array_mut()
+                        .expect("paths")
+                    {
+                        *reference =
+                            json!(format!("reference/{}", reference.as_str().expect("path")));
+                    }
+                }
+            }
+        });
+    }
+    fs::write(fixture.0.join("native/ReaderTests.swift"), "changed").expect("change");
+    commit_test(&fixture.0);
+    let drift = fixture
+        .load()
+        .drift(&Default::default(), Some("ios"), None, "HEAD")
+        .expect("drift");
+    assert_eq!(drift.platforms[0].since, before);
+    assert!(drift.platforms[0]
+        .entries
+        .iter()
+        .any(|e| e.files == ["ReaderTests.swift"]));
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_roots_preserve_symlink_containment() {
+    let fixture = Fixture::new();
+    let external = Fixture::new();
+    std::os::unix::fs::symlink(
+        fixture.0.join("catalog.toml"),
+        external.0.join("native/escape.swift"),
+    )
+    .expect("symlink");
+    fixture.mutate("reader", |v| {
+        v[0]["platforms"]["ios"]["source"] = json!(["escape.swift"])
+    });
+    let root = format!("ios={}", external.0.join("native").display());
+    assert!(!fixture.cli("validate", &["--root", &root]).status.success());
+}
+
+#[test]
+fn drift_marks_missing_pins_and_roots_unchecked() {
+    let fixture = Fixture::new();
+    configure_external(&fixture);
+    let output = success(fixture.cli("drift", &[]));
+    assert!(output.contains("ios: unchecked (root not supplied)"));
+    assert!(output.contains("android: unchecked (baseline commit not supplied)"));
+    assert!(!fixture
+        .cli("drift", &["--platform", "ios", "--require-roots"])
+        .status
+        .success());
+    let config = fs::read_to_string(fixture.0.join("catalog.toml")).expect("config");
+    fs::write(
+        fixture.0.join("catalog.toml"),
+        config.replace("ios = \"native\"", "ios = \"missing-checkout\""),
+    )
+    .expect("config");
+    // Missing external roots do not prevent parity reports.
+    success(fixture.cli("report", &[]));
+    assert!(fs::read_to_string(fixture.0.join("parity.md"))
+        .expect("report")
+        .contains("unchecked (root not supplied)"));
+}

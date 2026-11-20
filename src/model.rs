@@ -117,6 +117,15 @@ pub struct Config {
     pub path_prefixes: BTreeMap<String, String>,
     #[serde(default)]
     pub report: ReportConfig,
+    #[serde(default)]
+    pub external_roots: BTreeMap<String, ExternalRoot>,
+    #[serde(default)]
+    pub baseline: Option<Baseline>,
+    #[serde(default)]
+    pub baselines: BTreeMap<String, Baseline>,
+    /// Root-relative glob patterns used to discover uncatalogued changes.
+    #[serde(default)]
+    pub source_globs: BTreeMap<String, Vec<String>>,
 }
 fn dot() -> String {
     ".".into()
@@ -157,4 +166,42 @@ impl ReportConfig {
             .map(String::as_str)
             .unwrap_or(platform)
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum ExternalRoot {
+    Hint(String),
+    Details {
+        #[serde(alias = "hint")]
+        description: String,
+        git: Option<String>,
+        commit: Option<String>,
+    },
+}
+impl ExternalRoot {
+    pub fn hint(&self) -> String {
+        match self {
+            Self::Hint(hint) => hint.clone(),
+            Self::Details {
+                description,
+                git,
+                commit,
+            } => format!(
+                "{description}{}{}",
+                git.as_ref()
+                    .map(|s| format!("; git {s}"))
+                    .unwrap_or_default(),
+                commit
+                    .as_ref()
+                    .map(|s| format!("; commit {s}"))
+                    .unwrap_or_default()
+            ),
+        }
+    }
+}
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Baseline {
+    pub commit: String,
 }

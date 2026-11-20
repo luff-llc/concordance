@@ -693,3 +693,19 @@ fn report_does_not_truncate_input_when_output_assets_share_the_capture_directory
         .expect("report alongside captures");
     assert_eq!(fs::read(&path).expect("preserved PNG"), before);
 }
+
+#[test]
+fn ui_report_accepts_repeated_platform_roots_and_checks_freshness() {
+    let f = Fixture::new();
+    let ios = format!("ios={}", f.0.display());
+    let android = format!("android={}", f.0.display());
+    success(f.cli("ui-report", &["--root", &ios, "--root", &android]));
+    success(f.cli(
+        "ui-report",
+        &["--root", &ios, "--root", &android, "--check"],
+    ));
+    assert!(!f
+        .cli("ui-report", &["--root", "unknown=."])
+        .status
+        .success());
+}
