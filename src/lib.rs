@@ -4,10 +4,12 @@ mod drift;
 pub mod edit;
 mod rebase;
 pub mod strings;
+mod version;
 pub use continuous::{
     parse_date, patch_paths, today, GateFile, GateInput, GateReport, ReleaseFinding, SyncChange,
     SyncOptions, SyncReport,
 };
+pub use version::{VersionReport, VersionResult};
 mod set;
 pub use rebase::{AnchorFate, AnchorMove, AnchorSuggestion, RebaseReport};
 pub use set::{SetOutcome, SetRequest, CLEARABLE};

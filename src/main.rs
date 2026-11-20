@@ -207,9 +207,26 @@ enum Command {
         #[arg(long, value_enum, default_value = "review")]
         coarse_as: CoarseAs,
     },
+    /// Every platform ships the `[version] source` version. Exit 0 pass, 1 mismatch, 2 error.
+    VersionCheck {
+        dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
+        #[arg(long)]
+        platform: Option<String>,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
     /// Release check: stale records older than their limit fail. Exit 0 pass, 1 fail, 2 error.
     GateRelease {
         dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
+        /// Skip the version check that runs when catalog.toml has a [version] section.
+        #[arg(long)]
+        skip_version: bool,
+        #[arg(long)]
+        repo: Option<PathBuf>,
         #[arg(long)]
         platform: String,
         #[arg(long)]
@@ -757,46 +774,94 @@ fn run(cli: Cli) -> Result<()> {
             )?;
             print!("{}", report.markdown());
         }
-        Command::GateRelease {
+        Command::VersionCheck {
             dir,
+            roots,
             platform,
-            max_age_days,
-            max_age_days_for,
-            today,
+            repo,
         } => {
-            let outcome = (|| -> Result<Vec<concordance::ReleaseFinding>> {
+            let outcome = (|| -> Result<concordance::VersionReport> {
                 let catalog = Catalog::load(&dir)?;
-                let today = today.unwrap_or_else(concordance::today);
-                catalog.gate_release(
-                    &platform,
-                    max_age_days,
-                    &max_age_days_for.into_iter().collect(),
-                    &today,
-                )
+                let mut options = roots.options(&catalog)?;
+                options.repo = repo;
+                catalog.version_check(&options, platform.as_deref())
             })();
             match outcome {
-                Ok(findings) if findings.is_empty() => {
-                    println!("## Release gate: {platform}\n\nPassed: no stale records beyond their limit.");
-                }
-                Ok(findings) => {
-                    println!("## Release gate: {platform}\n\nFailed: {} stale record(s) beyond their limit without an intended difference.\n\n| Record | Stale since | Age (days) | Limit (days) |\n| --- | --- | ---: | ---: |", findings.len());
-                    for f in findings {
-                        println!(
-                            "| `{}` | {} | {} | {} |",
-                            f.label,
-                            f.since_date.as_deref().unwrap_or("unknown"),
-                            f.age_days
-                                .map(|a| a.to_string())
-                                .unwrap_or_else(|| "?".into()),
-                            f.limit_days
-                        );
+                Ok(report) => {
+                    print!("{}", report.markdown());
+                    if !report.passed() {
+                        std::process::exit(1);
                     }
-                    std::process::exit(1);
                 }
                 Err(error) => {
                     eprintln!("error: {error}");
                     std::process::exit(2);
                 }
+            }
+        }
+        Command::GateRelease {
+            dir,
+            roots,
+            skip_version,
+            repo,
+            platform,
+            max_age_days,
+            max_age_days_for,
+            today,
+        } => {
+            type Outcome = (
+                Vec<concordance::ReleaseFinding>,
+                Option<concordance::VersionReport>,
+            );
+            let outcome = (|| -> Result<Outcome> {
+                let catalog = Catalog::load(&dir)?;
+                let today = today.unwrap_or_else(concordance::today);
+                let findings = catalog.gate_release(
+                    &platform,
+                    max_age_days,
+                    &max_age_days_for.into_iter().collect(),
+                    &today,
+                )?;
+                let version = if skip_version || catalog.config.version.is_none() {
+                    None
+                } else {
+                    let mut options = roots.options(&catalog)?;
+                    options.repo = repo;
+                    Some(catalog.version_check(&options, Some(&platform))?)
+                };
+                Ok((findings, version))
+            })();
+            let (findings, version) = match outcome {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    std::process::exit(2);
+                }
+            };
+            let version_failed = version.as_ref().is_some_and(|v| !v.passed());
+            if findings.is_empty() {
+                println!(
+                    "## Release gate: {platform}\n\nPassed: no stale records beyond their limit."
+                );
+            } else {
+                println!("## Release gate: {platform}\n\nFailed: {} stale record(s) beyond their limit without an intended difference.\n\n| Record | Stale since | Age (days) | Limit (days) |\n| --- | --- | ---: | ---: |", findings.len());
+                for f in &findings {
+                    println!(
+                        "| `{}` | {} | {} | {} |",
+                        f.label,
+                        f.since_date.as_deref().unwrap_or("unknown"),
+                        f.age_days
+                            .map(|a| a.to_string())
+                            .unwrap_or_else(|| "?".into()),
+                        f.limit_days
+                    );
+                }
+            }
+            if let Some(version) = &version {
+                print!("\n{}", version.markdown());
+            }
+            if !findings.is_empty() || version_failed {
+                std::process::exit(1);
             }
         }
         Command::Strings {

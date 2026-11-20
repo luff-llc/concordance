@@ -486,6 +486,48 @@ pub struct Config {
     pub blockers: BTreeMap<String, Blocker>,
     #[serde(default)]
     pub ui: UiConfig,
+    /// One shared marketing version that every platform must ship.
+    #[serde(default)]
+    pub version: Option<VersionConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VersionConfig {
+    /// Repository-relative file holding the version string.
+    pub source: String,
+    #[serde(default)]
+    pub platforms: BTreeMap<String, VersionChecks>,
+}
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum VersionChecks {
+    One(VersionCheck),
+    Many(Vec<VersionCheck>),
+}
+impl VersionChecks {
+    pub fn checks(&self) -> &[VersionCheck] {
+        match self {
+            Self::One(one) => std::slice::from_ref(one),
+            Self::Many(many) => many,
+        }
+    }
+}
+/// How to read one platform's version: a file (optionally with a regex whose first capture
+/// group is the version), or a command that prints it. `reads_source` instead asserts the
+/// file refers to the source file.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VersionCheck {
+    /// Relative to the platform root.
+    pub file: Option<String>,
+    pub pattern: Option<String>,
+    /// Run with `sh -c` from the platform root; the last non-empty stdout line is the version.
+    pub command: Option<String>,
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub reads_source: bool,
 }
 
 /// Catalog-wide UI comparison settings.

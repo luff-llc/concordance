@@ -13,6 +13,8 @@ serde = { version = "=1.0.228", default-features = false, features = ["derive", 
 serde_json = { version = "=1.0.145", default-features = false, features = ["std", "float_roundtrip"] }
 serde_yaml = "=0.9.34"
 clap = { version = "=4.6.7", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
+# User-written version patterns in catalog.toml (`[version.platforms.*] pattern`).
+regex = { version = "=1.13.1", default-features = false, features = ["std", "unicode-perl"] }
 toml = { version = "=1.2.1", default-features = false, features = ["parse", "serde"] }
 
 [[bin]]

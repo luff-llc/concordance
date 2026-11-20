@@ -497,3 +497,68 @@ fn strings_export_writes_android_resources_for_catalog_copy_keys() {
     fs::write(res.join("values/strings_reader_shared.xml"), "edited").expect("edit");
     assert!(!check(&args).status.success());
 }
+
+#[test]
+fn version_check_compares_files_patterns_commands_and_source_wiring() {
+    let f = Fixture::new();
+    fs::write(f.0.join("version.txt"), "1.2.0\n").expect("source");
+    fs::write(f.0.join("native/Info.txt"), "MARKETING_VERSION = 1.2.0\n").expect("ios");
+    fs::write(
+        f.0.join("native/build.gradle.kts"),
+        "android {\n    versionName = \"1.1.0\"\n}\n",
+    )
+    .expect("android");
+    f.config("[version]\nsource = \"version.txt\"\n\n[version.platforms.ios]\nfile = \"Info.txt\"\npattern = 'MARKETING_VERSION = (\\S+)'\n\n[[version.platforms.android]]\nfile = \"build.gradle.kts\"\npattern = 'versionName = \"([^\"]+)\"'\n\n[[version.platforms.android]]\ncommand = \"echo 1.2.0\"\n");
+    let check = |args: &[&str]| f.cli("version-check", args);
+    let out = check(&[]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    let out = text(&out);
+    assert!(out.contains("| android | file `build.gradle.kts` /versionName = \"([^\"]+)\"/ | 1.1.0 | expected 1.2.0 |"), "{out}");
+    assert!(
+        out.contains("| ios | file `Info.txt` /MARKETING_VERSION = (\\S+)/ | 1.2.0 | matches |"),
+        "{out}"
+    );
+    assert!(
+        out.contains("| android | command `echo 1.2.0` | 1.2.0 | matches |"),
+        "{out}"
+    );
+    assert_eq!(check(&["--platform", "ios"]).status.code(), Some(0));
+    // gate-release runs the version check for its platform unless skipped.
+    let release = |extra: &[&str]| {
+        f.cli(
+            "gate-release",
+            &[&["--platform", "android", "--max-age-days", "7"][..], extra].concat(),
+        )
+    };
+    assert_eq!(release(&[]).status.code(), Some(1));
+    assert_eq!(release(&["--skip-version"]).status.code(), Some(0));
+    // A build file that reads the source passes a reads_source check without building.
+    fs::write(
+        f.0.join("native/build.gradle.kts"),
+        "android {\n    versionName = rootProject.file(\"../version.txt\").readText().trim()\n}\n",
+    )
+    .expect("android");
+    let config = fs::read_to_string(f.0.join("catalog.toml")).expect("config");
+    let config = config.replace(
+        "pattern = 'versionName = \"([^\"]+)\"'",
+        "pattern = 'versionName = .*version\\.txt'\nreads_source = true",
+    );
+    fs::write(f.0.join("catalog.toml"), config).expect("config");
+    let out = check(&[]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+    assert!(text(&out).contains("reads the source"));
+    assert_eq!(release(&[]).status.code(), Some(0));
+    // Commands time out.
+    let config = fs::read_to_string(f.0.join("catalog.toml")).expect("config");
+    fs::write(
+        f.0.join("catalog.toml"),
+        config.replace(
+            "command = \"echo 1.2.0\"",
+            "command = \"sleep 5\"\ntimeout_seconds = 1",
+        ),
+    )
+    .expect("config");
+    let out = check(&["--platform", "android"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out).contains("timed out after 1s"));
+}
