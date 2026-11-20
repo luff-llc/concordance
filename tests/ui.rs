@@ -559,7 +559,7 @@ fn html_escapes_notes_and_ui_report_counts_all_configured_platforms() {
     ui.compare(&f.0.join("captures"), "ios", "android", Some(&out))
         .expect("compare");
     let html = fs::read_to_string(out.join("index.html")).expect("html");
-    assert!(!html.contains("<script>"));
+    assert!(!html.contains("<script>alert"));
     assert!(html.contains("&lt;script&gt;"));
     let report = ui.ui_report(&f.0.join("captures"), "ios").expect("report");
     assert!(report.contains("| ios | 2 | 2 | 0 | 0 |"));
@@ -778,4 +778,96 @@ fn capture_coverage_counts_produced_skipped_and_missing_and_blocks_verification(
     let output = f.cli("validate", &[]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("not a declared screen.state"));
+}
+
+#[test]
+fn compare_writes_side_by_side_pairs_and_review_notes_fold_into_proposed_verification() {
+    let f = Fixture::new();
+    let out = f.0.join("review");
+    f.ui()
+        .compare(&f.0.join("captures"), "ios", "android", Some(&out))
+        .expect("compare");
+    // Equal-height side-by-side image with a label bar: 32 + 16 gap + 32 wide, 46 + 32 tall.
+    let decoder = png::Decoder::new(std::io::BufReader::new(
+        fs::File::open(out.join("pairs/demo.populated.png")).expect("pair image"),
+    ));
+    let info = decoder.read_info().expect("PNG").info().clone();
+    assert_eq!((info.width, info.height), (80, 78));
+    let html = fs::read_to_string(out.join("index.html")).expect("HTML");
+    for expected in [
+        "pairs/demo.dark.png",
+        "Differences noted",
+        "Save review.json",
+        "data-screen=\"demo\"",
+    ] {
+        assert!(html.contains(expected), "missing {expected}");
+    }
+    let template: Value =
+        serde_json::from_str(&fs::read_to_string(out.join("review.json")).expect("template"))
+            .expect("JSON");
+    assert_eq!(template["pairs"].as_array().map(Vec::len), Some(2));
+    assert_eq!(template["pairs"][0]["verdict"], "unreviewed");
+
+    // A reviewer's notes survive regeneration and pre-fill the form.
+    let write_review = |dark: &str, notes: &str| {
+        let review = json!({
+            "version": 1, "reviewer": "agy", "at": "2026-11-20", "commit": "abcdef1",
+            "baseline": "ios", "target": "android",
+            "pairs": [
+                {"screen": "demo", "state": "populated", "verdict": "same", "differences": ""},
+                {"screen": "demo", "state": "dark", "verdict": dark, "differences": notes}
+            ]
+        });
+        fs::write(out.join("review.json"), review.to_string()).expect("review");
+    };
+    write_review("differs", "Title row is taller");
+    f.ui()
+        .compare(&f.0.join("captures"), "ios", "android", Some(&out))
+        .expect("compare again");
+    assert!(fs::read_to_string(out.join("index.html"))
+        .expect("HTML")
+        .contains("Title row is taller"));
+    assert!(fs::read_to_string(out.join("review.json"))
+        .expect("review")
+        .contains("Title row is taller"));
+
+    let catalog_before = fs::read(f.0.join("catalog/demo.yaml")).expect("catalog");
+    let review = out.join("review.json");
+    let review_arg = review.to_str().expect("path");
+    let patch = success(f.cli("verify", &["--review", review_arg]));
+    assert!(patch.contains("Nothing was applied"));
+    assert!(patch.contains("action: needs-work"));
+    assert!(patch.contains("demo.dark: Title row is taller"));
+    write_review("unreviewed", "");
+    let patch = success(f.cli("verify", &["--review", review_arg]));
+    assert!(patch.contains("action: verify"), "{patch}");
+    assert!(patch.contains("by: agy") && patch.contains("- demo.populated"));
+    assert!(!patch.contains("demo.dark"));
+    let file = f.0.join("proposed.yaml");
+    let file_arg = file.to_str().expect("path");
+    success(f.cli("verify", &["--review", review_arg, "--out", file_arg]));
+    assert!(!f
+        .cli("verify", &["--review", review_arg, "--out", file_arg])
+        .status
+        .success());
+    assert_eq!(
+        fs::read(f.0.join("catalog/demo.yaml")).expect("catalog"),
+        catalog_before
+    );
+
+    // The implementer cannot verify their own work; skipped captures cannot support it.
+    f.edit("catalog/demo.yaml", |v| {
+        v[0]["platforms"]["android"]["implemented_by"] = json!("agy");
+    });
+    assert!(success(f.cli("verify", &["--review", review_arg])).contains("action: rejected"));
+    fs::remove_file(f.0.join("captures/demo.populated.android.json")).expect("remove");
+    fs::write(
+        f.0.join("captures/demo.populated.android.skip"),
+        "No fixture",
+    )
+    .expect("skip");
+    let output = f.cli("verify", &["--review", review_arg]);
+    let patch = success(output);
+    assert!(patch.contains("# Excluded pair: demo.populated: android capture skipped: No fixture"));
+    assert!(patch.contains("[]"));
 }

@@ -3,9 +3,11 @@ mod compare;
 mod coverage;
 mod generate;
 mod model;
+mod review;
 pub use compare::{Comparison, PairResult, PlatformResult};
 pub use coverage::{CaptureRecord, Coverage};
 pub use model::*;
+pub use review::{PairReview, Proposal, Review, Verdict, VerifyOutcome};
 
 use crate::{fail, schema, Catalog, Result};
 use serde::de::DeserializeOwned;

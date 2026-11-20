@@ -75,6 +75,19 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Fold reviewer notes (review.json from compare) into proposed verification records.
+    /// Writes a patch for a person to apply; never edits the catalog.
+    Verify {
+        dir: PathBuf,
+        #[arg(long)]
+        review: PathBuf,
+        /// Capture directory used to refuse skipped or missing captures (default DIR/captures).
+        #[arg(long)]
+        captures: Option<PathBuf>,
+        /// Patch output path (default: stdout).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Generate parity.md with a fresh screen summary for every platform.
     UiReport {
         dir: PathBuf,
@@ -372,6 +385,31 @@ fn run(cli: Cli) -> Result<()> {
                     "UI comparison failed: structural or token failures; see report".into(),
                 );
             }
+        }
+        Command::Verify {
+            dir,
+            review,
+            captures,
+            out,
+        } => {
+            let ui = UiCatalog::load(&dir)?;
+            let review = concordance::ui::Review::load(&review)?;
+            let captures = captures.unwrap_or_else(|| dir.join("captures"));
+            let outcome = ui.verify_review(&review, &captures)?;
+            let patch = outcome.patch()?;
+            match out {
+                Some(out) => {
+                    if out.exists() {
+                        return Err(
+                            format!("{} exists; choose a new patch path", out.display()).into()
+                        );
+                    }
+                    fs::write(&out, patch)?;
+                    eprintln!("Wrote proposed patch {}", out.display());
+                }
+                None => print!("{patch}"),
+            }
+            eprintln!("{}", outcome.summary());
         }
         Command::UiReport {
             dir,

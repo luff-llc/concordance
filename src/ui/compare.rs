@@ -70,13 +70,13 @@ fn screen_summary<'a>(results: impl IntoIterator<Item = &'a PlatformResult>) -> 
     out
 }
 
-struct Image {
-    width: u32,
-    height: u32,
-    pixels: Vec<[u8; 4]>,
+pub(super) struct Image {
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) pixels: Vec<[u8; 4]>,
 }
 impl Image {
-    fn load(path: &Path) -> Result<Self> {
+    pub(super) fn load(path: &Path) -> Result<Self> {
         let mut decoder = png::Decoder::new(BufReader::new(fs::File::open(path)?));
         decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
         decoder.set_limits(png::Limits {
@@ -469,11 +469,28 @@ impl UiCatalog {
     ) -> Result<Comparison> {
         self.require_platform(baseline)?;
         self.require_platform(target)?;
+        // Reviewer notes survive regeneration: an existing review.json pre-fills the form.
+        let existing_review = match out.map(|o| o.join("review.json")) {
+            Some(path) if path.exists() => Some(super::Review::load(&path)?),
+            _ => None,
+        };
+        let mut review = super::Review {
+            version: 1,
+            reviewer: String::new(),
+            at: String::new(),
+            commit: None,
+            baseline_commit: None,
+            baseline: baseline.into(),
+            target: target.into(),
+            pairs: vec![],
+        };
         if let Some(out) = out {
             fs::create_dir_all(out.join("captures"))?;
+            fs::create_dir_all(out.join("pairs"))?;
         }
         let mut comparison = Comparison { pairs: vec![] };
         let mut html = String::from("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>Concordance screen parity</title><style>body{font:16px system-ui;margin:2rem;max-width:1200px;background:#fafafa;color:#171717}section{border-top:1px solid #aaa;padding:1rem 0}.pair{display:flex;gap:1rem;flex-wrap:wrap}.capture{width:min(45%,480px);min-width:240px}svg{width:100%;height:auto}rect{fill:none;stroke:#e00080;stroke-width:1}text{fill:#fff;stroke:#111;stroke-width:.2px;font-size:10px}pre{white-space:pre-wrap}li{margin:.3rem 0}</style><h1>Screen parity</h1><p>Structural and token checks gate parity. Luminance SSIM (0–1) is a trend only. Overlays mark anatomy; hide them to review the images.</p><label><input type=\"checkbox\" checked onchange=\"document.querySelectorAll('.overlay').forEach(e=>e.style.display=this.checked?'':'none')\"> Show anatomy</label>");
+        html.push_str(REVIEW_HEADER);
         for screen in self.screens.values() {
             for (state_id, state) in &screen.states {
                 let base = self.evidence(screen, state_id, state, baseline, captures)?;
@@ -529,7 +546,50 @@ impl UiCatalog {
                     .map(|(a, b)| similarity(a, b));
                 let prompt = reviewer_prompt(screen, state_id, state, baseline, target);
                 if let Some(out) = out {
-                    html.push_str(&format!("<section><h2>{} · {}</h2><p>Trend SSIM: {} (never a gate)</p><div class=\"pair\">",escape(&screen.id),escape(state_id),score.map(|s| format!("{s:.4}")).unwrap_or_else(|| "unavailable".into())));
+                    let key = format!("{}.{state_id}", screen.id);
+                    let pair_image = format!("pairs/{key}.png");
+                    // A PNG without its JSON snapshot is still worth showing to a reviewer.
+                    let fallback = |e: &Evidence| -> Result<Option<Image>> {
+                        if e.image.is_some() {
+                            return Ok(None);
+                        }
+                        let png = capture_file(
+                            captures,
+                            &e.result.platform,
+                            &format!("{key}.{}", e.result.platform),
+                            "png",
+                        )?;
+                        Ok(png.is_file().then(|| Image::load(&png).ok()).flatten())
+                    };
+                    let (base_png, dest_png) = (fallback(&base)?, fallback(&dest)?);
+                    super::review::write_side_by_side(
+                        &out.join(&pair_image),
+                        (
+                            base.image.as_ref().or(base_png.as_ref()),
+                            &format!("{baseline} (baseline)"),
+                        ),
+                        (
+                            dest.image.as_ref().or(dest_png.as_ref()),
+                            &format!("{target} (target)"),
+                        ),
+                        &key,
+                    )?;
+                    let previous = existing_review.as_ref().and_then(|r| {
+                        r.pairs
+                            .iter()
+                            .find(|p| p.screen == screen.id && &p.state == state_id)
+                    });
+                    let pair = super::PairReview {
+                        screen: screen.id.clone(),
+                        state: state_id.clone(),
+                        verdict: previous.map(|p| p.verdict).unwrap_or_default(),
+                        differences: previous.map(|p| p.differences.clone()).unwrap_or_default(),
+                        image: Some(pair_image.clone()),
+                    };
+                    let selected =
+                        |v: super::Verdict| if v == pair.verdict { " selected" } else { "" };
+                    html.push_str(&format!("<section><h2>{} · {}</h2><p>Trend SSIM: {} (never a gate)</p><figure><img class=\"side\" src=\"{}\" alt=\"{} {} beside {}\"></figure><div class=\"review\" data-screen=\"{}\" data-state=\"{}\" data-image=\"{}\"><label>Verdict <select><option value=\"unreviewed\"{}>Unreviewed</option><option value=\"same\"{}>Same</option><option value=\"differs\"{}>Differs</option></select></label><label>Differences noted<textarea rows=\"3\">{}</textarea></label></div><div class=\"pair\">",escape(&screen.id),escape(state_id),score.map(|s| format!("{s:.4}")).unwrap_or_else(|| "unavailable".into()),escape(&pair_image),escape(&key),escape(baseline),escape(target),escape(&screen.id),escape(state_id),escape(&pair_image),selected(super::Verdict::Unreviewed),selected(super::Verdict::Same),selected(super::Verdict::Differs),escape(&pair.differences)));
+                    review.pairs.push(pair);
                     for evidence in [&base, &dest] {
                         html.push_str(&format!(
                             "<div class=\"capture\"><h3>{}</h3>",
@@ -595,8 +655,20 @@ impl UiCatalog {
             }
         }
         if let Some(out) = out {
-            html.push_str("</html>");
+            if let Some(previous) = &existing_review {
+                review.reviewer = previous.reviewer.clone();
+                review.at = previous.at.clone();
+                review.commit = previous.commit.clone();
+                review.baseline_commit = previous.baseline_commit.clone();
+            }
+            let json = serde_json::to_string(&review)?.replace("</", "<\\/");
+            html.push_str(&format!("<script id=\"review-data\" type=\"application/json\">{json}</script>{REVIEW_SCRIPT}</html>"));
             fs::write(out.join("index.html"), html)?;
+            let path = out.join("review.json");
+            if !path.exists() {
+                // A template for reviewers who edit JSON directly; never overwritten.
+                fs::write(path, serde_json::to_string_pretty(&review)? + "\n")?;
+            }
             fs::write(
                 out.join("comparison.json"),
                 serde_json::to_string_pretty(&comparison)?,
@@ -694,6 +766,8 @@ fn reviewer_prompt(
     }
     prompt
 }
+const REVIEW_HEADER: &str = "<style>.side{max-width:100%;height:auto;border:1px solid #ccc}.review{display:grid;gap:.5rem;margin:.5rem 0 1rem}.review textarea{width:100%;font:inherit}#reviewer{display:flex;flex-wrap:wrap;gap:1rem;padding:1rem;background:#fff;border:1px solid #ccc;position:sticky;top:0;z-index:1}</style><form id=\"reviewer\" onsubmit=\"return false\"><label>Reviewer <input name=\"reviewer\" required></label><label>Date <input name=\"at\" type=\"date\" required></label><label>Target commit <input name=\"commit\" size=\"12\"></label><label>Baseline commit <input name=\"baseline_commit\" size=\"12\"></label><button type=\"button\" id=\"save-review\">Save review.json</button><span id=\"review-status\" role=\"status\"></span></form><p>Note differences per pair, then save <code>review.json</code> next to this page. <code>concordance verify --review review.json</code> proposes verification records; it never edits the catalog.</p>";
+const REVIEW_SCRIPT: &str = "<script>(()=>{const data=JSON.parse(document.getElementById('review-data').textContent);const form=document.getElementById('reviewer');const key='concordance-review:'+location.pathname;let saved=null;try{saved=JSON.parse(localStorage.getItem(key)||'null')}catch(e){}const src=saved&&saved.pairs?saved:data;for(const f of ['reviewer','at','commit','baseline_commit'])form.elements[f].value=src[f]||'';for(const el of document.querySelectorAll('.review')){const p=(src.pairs||[]).find(p=>p.screen===el.dataset.screen&&p.state===el.dataset.state);if(p){el.querySelector('select').value=p.verdict||'unreviewed';el.querySelector('textarea').value=p.differences||''}}const collect=()=>{const out={version:1,reviewer:form.elements.reviewer.value.trim(),at:form.elements.at.value,baseline:data.baseline,target:data.target,pairs:[...document.querySelectorAll('.review')].map(el=>({screen:el.dataset.screen,state:el.dataset.state,verdict:el.querySelector('select').value,differences:el.querySelector('textarea').value,image:el.dataset.image}))};for(const f of ['commit','baseline_commit']){const v=form.elements[f].value.trim();if(v)out[f]=v}return out};document.addEventListener('input',()=>{try{localStorage.setItem(key,JSON.stringify(collect()))}catch(e){}});document.getElementById('save-review').addEventListener('click',()=>{const blob=new Blob([JSON.stringify(collect(),null,2)+'\\n'],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='review.json';a.click();URL.revokeObjectURL(a.href);document.getElementById('review-status').textContent='Saved review.json to your downloads; move it next to this page.'})})()</script>";
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
