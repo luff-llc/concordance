@@ -699,12 +699,14 @@ impl Catalog {
                 change.before,
                 change.after,
                 detail
-                    .map(|d| format!(
-                        ". {} ({}): {}",
-                        d.kind.as_str(),
-                        d.spec.numbers(),
-                        d.spec.text
-                    ))
+                    .map(|d| {
+                        let numbers = d.spec.numbers();
+                        if numbers.is_empty() {
+                            format!(". {}: {}", d.kind.as_str(), d.spec.text)
+                        } else {
+                            format!(". {} ({numbers}): {}", d.kind.as_str(), d.spec.text)
+                        }
+                    })
                     .unwrap_or_default()
             ));
             for hit in &change.hits {
@@ -733,7 +735,7 @@ impl Catalog {
                 (l.starts_with('+') || l.starts_with('-'))
                     && !l.starts_with("+++")
                     && !l.starts_with("---")
-                    && l.matches('"').count() >= 2
+                    && has_copy_literal(l)
             })
             .collect();
         out.push_str("\n## Copy changes\n\n");
@@ -851,6 +853,14 @@ impl Catalog {
         }
         Ok(findings)
     }
+}
+
+/// A double-quoted literal that reads like interface copy: it contains a space or starts
+/// with an uppercase letter (identifiers such as "notStarted" are skipped).
+fn has_copy_literal(line: &str) -> bool {
+    line.split('"').skip(1).step_by(2).any(|literal| {
+        literal.contains(' ') || literal.chars().next().is_some_and(char::is_uppercase)
+    })
 }
 
 fn gh_upsert(title: &str, entry_id: &str, label: &str, body: &Path) -> Result<String> {

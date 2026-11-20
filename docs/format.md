@@ -339,7 +339,7 @@ baseline evidence changed (precise or coarse `drift` hits) is examined: an imple
 partial target record becomes `stale` (already stale records keep their original
 `since_*`; missing and not-applicable records are listed but unchanged). With
 `--tasks-dir`, one `<entry-id>.md` per entry lists the records, evidence hits, changed
-string literals, commits (linked when `[external_roots.<from>] git` is a GitHub URL),
+string literals that read like interface copy (a space or a leading capital), commits (linked when `[external_roots.<from>] git` is a GitHub URL),
 captures for linked screens when `--captures` is given, and a diff excerpt. The block
 between `<!-- concordance:task <id> -->` and `<!-- concordance:task end -->` is
 regenerated; text after it is kept. `--issues gh` opens or updates one issue per task
