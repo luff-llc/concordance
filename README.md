@@ -35,6 +35,10 @@ concordance capture-plan path/to/catalog --platform ios,android --coverage --cap
 concordance compare path/to/catalog --captures captures --out ui-report --check
 concordance set path/to/catalog player.skip-forward --platform android --status implemented --by lane-1 --clear gap
 concordance rebase-anchors path/to/catalog --root ios=../apple-reference --to <sha>
+concordance gate path/to/catalog --platform ios --base <sha> --head <sha>
+concordance sync path/to/catalog --root ios=../apple-reference --platform-from ios --platform-to android --tasks-dir tasks --apply
+concordance gate-release path/to/catalog --platform android --max-age-days 7 --max-age-days-for copy=0
+concordance strings export path/to/catalog --from Localizable.xcstrings --keys-from-catalog --platform android --out app/src/main/res
 concordance review set ui-report detail.dark --verdict differs --note "Title wraps"
 concordance verify path/to/catalog --review ui-report/review.json --out proposal.yaml
 concordance ui-report path/to/catalog --captures captures

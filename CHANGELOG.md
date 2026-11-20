@@ -56,6 +56,15 @@
   platform_categories` and a note) and `fixture` (capture-tooling difference with a note).
   `verify` treats same and platform as equivalent and reports fixture pairs as tooling
   debt; `review set --category`; `ui-report --review` lists tooling debt.
+- Continuous parity: a `stale` status with `previous_status`, `since_commit` and
+  `since_date`; `gate` (commit range or patch plus message file; user-visible and
+  string-catalog globs in `[source_globs.<platform>]`; `Catalog: none — <reason>`
+  trailer; exit 0/1/2); `sync` (stale marking, task files, optional `gh` issues, anchor
+  rebase and pin advance; dry run unless `--apply`; idempotent); `gate-release` with
+  per-kind age limits; `set --intended`.
+- `strings export` writes Android `strings_<app>_shared.xml` resources (with locales)
+  for copy-detail keys from an `.xcstrings` file, with documented deterministic resource
+  names; `copy.key` on copy details.
 - Platform inheritance: `horizon = { root = "...", inherits = "android" }`; an
   inheriting record unsets a parent key with an explicit `null`.
 

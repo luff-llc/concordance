@@ -277,6 +277,121 @@ blocker still referenced, and (with UI contracts) a detail `motion.token` that i
 motion in `tokens.yaml`. `validate --strict` turns warnings into errors. The report
 lists implemented entries with open work.
 
+## Continuous parity
+
+Instead of parity rounds, the target follows the baseline on every baseline merge.
+
+### Stale records
+
+`stale` is a status set by `sync`: the baseline's evidence changed after the target
+implemented it. It is a gap (`next` hands it out) and keeps where it came from:
+
+```yaml
+android:
+  status: stale
+  previous_status: implemented   # implemented or partial
+  since_commit: 0123abc...       # baseline commit that made it stale
+  since_date: 2026-11-20         # that commit's date
+```
+
+`previous_status` and `since_*` are errors on any other status. Fix the target, then
+`concordance set … --status implemented --clear …`, or record an intended difference:
+`concordance set <dir> <id>[/<detail>] --platform android --intended "<reason>"` writes
+`intended_difference` and returns a stale record to its previous status. Reports count
+stale entries and list them under **Stale after baseline changes**.
+
+### `gate`
+
+```sh
+concordance gate spec/product --platform ios --base <sha> --head <sha> [--repo <checkout>]
+concordance gate spec/product --platform ios --patch change.patch --message-file msg.txt
+```
+
+For CI or an integration script (no GitHub dependency). Changed files in the platform
+root are matched against `[source_globs.<platform>]`:
+
+```toml
+[source_globs.ios]
+all = ["Sources/**/*.swift"]                  # uncatalogued-change detection (drift)
+user_visible = ["Sources/**/Views/**/*.swift"] # files whose changes need a catalog update
+strings = ["**/*.xcstrings"]                  # string catalogs, also user-visible
+```
+
+(The plain list form `ios = [...]` is still accepted; with no `user_visible` or
+`strings`, every `all` glob counts as user-visible.) A changed user-visible file is
+**covered** when the area file of an entry citing it changed in the same range, or, for
+a file no entry cites, when any area file changed. Otherwise it is listed as unmatched
+and the gate fails, unless a commit message in the range (or `--message-file`) carries a
+`Catalog: none — <reason>` trailer (`-`, `–` and `—` all work). `--patch` reads the paths
+from a unified diff whose paths are relative to the repository top. The catalog must be
+in the same repository as the range. Exit codes: 0 passed, 1 failed, 2 error. The
+Markdown summary goes to stdout and, with `--summary <file>`, is appended to that file.
+
+### `sync`
+
+```sh
+concordance sync spec/product --root ios=../apple --platform-from ios --platform-to android \
+  [--to <ref>] [--tasks-dir spec/product/tasks] [--captures <dir>] [--issues gh --label parity] [--apply]
+```
+
+From `[baselines.<from>].commit` to `--to` (default `HEAD`), every entry or detail whose
+baseline evidence changed (precise or coarse `drift` hits) is examined: an implemented or
+partial target record becomes `stale` (already stale records keep their original
+`since_*`; missing and not-applicable records are listed but unchanged). With
+`--tasks-dir`, one `<entry-id>.md` per entry lists the records, evidence hits, changed
+string literals, commits (linked when `[external_roots.<from>] git` is a GitHub URL),
+captures for linked screens when `--captures` is given, and a diff excerpt. The block
+between `<!-- concordance:task <id> -->` and `<!-- concordance:task end -->` is
+regenerated; text after it is kept. `--issues gh` opens or updates one issue per task
+(searching open issues with the label for the entry ID in the title). It then runs
+`rebase-anchors` over the same range and advances `[baselines.<from>] commit` in
+catalog.toml (only that line). Nothing is written without `--apply`; a second run over
+the same range finds the pin current and does nothing.
+
+### `gate-release`
+
+```sh
+concordance gate-release spec/product --platform android --max-age-days 7 \
+  --max-age-days-for copy=0 [--today 2026-11-20]
+```
+
+Fails (exit 1) for stale records without `intended_difference` older than their limit.
+A stale detail uses the limit for its kind (`--max-age-days-for KIND=DAYS`, repeatable)
+or the default; a stale entry uses the strictest limit among its stale details, or the
+default. A limit of 0 fails any stale record; otherwise a record fails when its age in
+days (from `since_date`, UTC today unless `--today`) exceeds the limit. A stale record
+without `since_date` always fails. Exit 2 on errors.
+
+### `strings export`
+
+```sh
+concordance strings export spec/product --from Localizable.xcstrings --keys-from-catalog \
+  [--match-text] --platform android --app taupe --out app/src/main/res [--check]
+```
+
+Exports the `.xcstrings` keys named by copy details' `copy.key` (with `--match-text`,
+copy details without a key are looked up by `copy.text`; for catalogs whose keys are the
+English text, `copy.key` holds that text). Output files are
+`<out>/<values-dir>/strings_<app>_shared.xml`; `--app` defaults to the catalog
+directory's name. The source language goes to `values`; `zh-Hans` → `values-zh-rCN`,
+`zh-Hant` → `values-zh-rTW`, `xx` → `values-xx`, `xx-YY` → `values-xx-rYY`, other forms
+→ `values-b+…`. Other locales are exported only when their state is `translated`; a key
+without a stored source value uses the key itself. Plural and device variations are not
+exported (listed on stderr), and keys missing from the string catalog are listed.
+
+Resource names are `<app>_<slug>_<hash>`: `<app>` lowercased with non-alphanumerics as
+`_`; `<slug>` is the key's first five whitespace-separated words, lowercased, each run of
+characters outside `[a-z0-9]` replaced by one `_`, trimmed of `_`, and cut to 32
+characters (at the last `_` when that leaves at least 8), or `s` when nothing remains;
+`<hash>` is the FNV-1a 32-bit hash of the exact key's UTF-8 bytes as 8 lowercase hex
+digits. So `Play %@` in app `taupe` becomes `taupe_play_` + `fnv32("Play %@")`. Names are
+stable while the key is unchanged; a copy change (a new English key) yields a new name.
+Values are escaped for Android (`\\`, `\'`, `\"`, `\n`, `\t`, `&amp;`, `&lt;`, `&gt;`, and
+a leading `@` or `?`), `%@` becomes `%s`, `%d`/`%ld`/`%lld`/`%u` become `%d`, and two or
+more unnumbered placeholders are numbered (`%1$s %2$d`). Each string is preceded by an
+XML comment with the original key and its catalog comment. `--check` writes nothing and
+fails when any file differs.
+
 ## Implemented versus verified
 
 A status of `shipped` means *implemented*. It is a claim, usually from source review
