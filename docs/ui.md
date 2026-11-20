@@ -329,10 +329,24 @@ agent or human reviewer; judge whether it expresses the same product design.
 
 ### Reviewer notes and proposed verification
 
-Each pair in `index.html` has a verdict (`unreviewed`, `same`, `differs`) and a
-**Differences noted** field. From a terminal, edit the same file with
+Each pair in `index.html` has a verdict and a **Differences noted** field:
+
+| Verdict | Meaning | For `verify` |
+| --- | --- | --- |
+| `unreviewed` | Not looked at yet. | Ignored. |
+| `same` | Equivalent. | Supports verification. |
+| `platform` | An accepted platform difference; needs a `category` and a note. | Equivalent; the note is kept in the verification record. |
+| `differs` | A product difference. | Proposes a gap. |
+| `fixture` | A capture-tooling difference (unreached state, seed data, unfrozen clock, animation phase); needs a note. | Not counted for or against the product; listed as tooling debt. |
+
+Categories come from `[ui] platform_categories` in catalog.toml (default `status-bar`,
+`gesture-inset`, `font-metrics`, `glyph`, `touch-target`, `native-affordance`); compare
+copies them into `review.json`. From a terminal, edit the same file with
 `concordance review set <compare-out-dir> <screen.state> --verdict differs --note "…"`
-(optionally `--reviewer`, `--at`, `--commit`, `--baseline-commit`). The page autosaves to the browser and **Save review.json**
+(`--verdict platform --category gesture-inset --note "…"`, `--verdict fixture --note "…"`;
+optionally `--reviewer`, `--at`, `--commit`, `--baseline-commit`). It refuses a platform
+verdict without a listed category, and platform or fixture verdicts without a note.
+`ui-report --review review.json` appends a **Capture tooling debt** list of fixture pairs. The page autosaves to the browser and **Save review.json**
 downloads the notes; place the file next to the page (or edit `review.json`, which
 `compare` writes once as a template and never overwrites). Rerunning `compare` reads
 an existing `review.json` and pre-fills the form.
@@ -358,7 +372,7 @@ concordance verify spec/product --review artifacts/ui-report/review.json \
 YAML patch (stdout without `--out`; an existing `--out` file is never replaced). For
 each entry and the review's target platform it proposes one action:
 
-- `verify`: every reviewed pair is `same`; proposes a `verification` record with the
+- `verify`: every reviewed pair is `same` or `platform`; proposes a `verification` record with the
   reviewer, date, commits, the pair keys as capture keys (merged with existing ones),
   existing journeys, and the reviewer's notes.
 - `needs-work`: some pair `differs`; proposes a `gap` from the noted differences.
@@ -368,9 +382,30 @@ each entry and the review's target platform it proposes one action:
   record lacks; the proposed record is included with what to add.
 - `rejected`: the reviewer is the entry's `implemented_by`.
 
-Unreviewed pairs are ignored. Pairs whose baseline or target capture is skipped or
+Unreviewed pairs are ignored; `fixture` pairs are listed as tooling debt in the patch
+header and do not count for or against the product. Pairs whose baseline or target capture is skipped or
 missing are excluded and listed in the patch header. **The catalog is never edited**:
 a person or agent reviews the proposal and applies it by hand, then `validate`.
+
+### Equivalence tolerances
+
+Parity is equivalence, not pixel identity. Cross-platform geometry can be judged in logical
+units instead of viewport fractions:
+
+```toml
+# catalog.toml
+[ui.tolerance]
+position_dp = 12     # x and y, logical points/dp
+size_ratio = 0.08    # width and height, relative to the baseline
+radius_dp = 4        # snapshot node corner_radius, logical points/dp
+```
+
+A screen's `tolerances` may set the same three keys to override the catalog. When an axis
+has a tolerance, the baseline and target frames are compared directly in logical units;
+deltas within it pass and are recorded as measurements (`artwork x Δ3.2dp within 12dp`) in
+`comparison.json` and the HTML, and larger ones fail with the measured delta. Axes without
+one keep the normalized `geometry` check. Corner radii are compared only when both
+snapshots give a node `corner_radius`.
 
 Mechanical pass/fail checks are:
 

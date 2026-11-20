@@ -998,3 +998,172 @@ fn motion_tokens_are_checked_against_design_tokens() {
     );
     assert!(!stdout.contains("#settle"));
 }
+
+#[test]
+fn equivalence_tolerances_pass_geometry_within_dp_and_ratio_with_measured_deltas() {
+    let f = Fixture::new();
+    let config = fs::read_to_string(f.0.join("catalog.toml")).expect("config");
+    let geometry_failures = |c: &concordance::ui::Comparison| -> Vec<String> {
+        let dark = c.pairs.iter().find(|p| p.state == "dark").expect("dark");
+        dark.target
+            .failures
+            .iter()
+            .filter(|f| f.contains("differs from ios"))
+            .cloned()
+            .collect()
+    };
+    assert!(!geometry_failures(&f.compare()).is_empty());
+    fs::write(
+        f.0.join("catalog.toml"),
+        format!("{config}\n[ui.tolerance]\nposition_dp = 100\nsize_ratio = 5\nradius_dp = 4\n"),
+    )
+    .expect("config");
+    let c = f.compare();
+    assert!(
+        geometry_failures(&c).is_empty(),
+        "{:?}",
+        geometry_failures(&c)
+    );
+    let populated = c
+        .pairs
+        .iter()
+        .find(|p| p.state == "populated")
+        .expect("populated");
+    assert!(
+        populated
+            .target
+            .measurements
+            .iter()
+            .any(|m| m == "artwork x Δ0.0dp within 100dp"),
+        "{:?}",
+        populated.target.measurements
+    );
+    // Corner radii compare in dp when both snapshots report them.
+    for (platform, radius) in [("ios", 8.0), ("android", 11.0)] {
+        f.edit(&format!("captures/demo.populated.{platform}.json"), |v| {
+            v["nodes"][1]["corner_radius"] = json!(radius);
+        });
+    }
+    let c = f.compare();
+    let populated = c
+        .pairs
+        .iter()
+        .find(|p| p.state == "populated")
+        .expect("populated");
+    assert!(populated
+        .target
+        .measurements
+        .iter()
+        .any(|m| m == "artwork corner radius Δ3.0dp within 4dp"));
+    // A screen override wins over the catalog tolerance.
+    f.edit("screens/demo.yaml", |s| {
+        s["tolerances"]["position_dp"] = json!(0);
+        s["tolerances"]["radius_dp"] = json!(2);
+    });
+    let c = f.compare();
+    let dark = c.pairs.iter().find(|p| p.state == "dark").expect("dark");
+    assert!(
+        dark.target
+            .failures
+            .iter()
+            .any(|f| f.contains("differs from ios by") && f.contains("(tolerance 0dp)")),
+        "{:?}",
+        dark.target.failures
+    );
+    let populated = c
+        .pairs
+        .iter()
+        .find(|p| p.state == "populated")
+        .expect("populated");
+    assert!(populated
+        .target
+        .failures
+        .iter()
+        .any(|f| f.contains("corner radius differs from ios by 3.0dp")));
+    let out = f.0.join("report");
+    f.ui()
+        .compare(&f.0.join("captures"), "ios", "android", Some(&out))
+        .expect("compare");
+    assert!(fs::read_to_string(out.join("index.html"))
+        .expect("HTML")
+        .contains("Within tolerance:"));
+}
+
+#[test]
+fn platform_and_fixture_verdicts_need_notes_count_as_equivalent_or_tooling_debt() {
+    let f = Fixture::new();
+    f.edit("catalog/demo.yaml", |v| {
+        v[0]["platforms"]["android"]["implemented_by"] = json!("sol")
+    });
+    let out = f.0.join("review");
+    f.ui()
+        .compare(&f.0.join("captures"), "ios", "android", Some(&out))
+        .expect("compare");
+    let dir = out.to_str().expect("path");
+    let set = |args: &[&str]| f.cli_bare(&[&["review", "set", dir][..], args].concat());
+    assert!(!set(&[
+        "demo.populated",
+        "--verdict",
+        "platform",
+        "--note",
+        "Shorter gesture inset"
+    ])
+    .status
+    .success());
+    let output = set(&[
+        "demo.populated",
+        "--verdict",
+        "platform",
+        "--category",
+        "weather",
+        "--note",
+        "x",
+    ]);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown platform category"));
+    assert!(!set(&["demo.dark", "--verdict", "fixture"]).status.success());
+    success(set(&[
+        "demo.populated",
+        "--verdict",
+        "platform",
+        "--category",
+        "gesture-inset",
+        "--note",
+        "Bottom bar sits 10dp lower",
+        "--reviewer",
+        "agy",
+        "--at",
+        "2026-11-20",
+    ]));
+    success(set(&[
+        "demo.dark",
+        "--verdict",
+        "fixture",
+        "--note",
+        "Clock not frozen",
+    ]));
+    let review = out.join("review.json");
+    let review_arg = review.to_str().expect("path");
+    let patch = success(f.cli("verify", &["--review", review_arg]));
+    assert!(patch.contains("action: verify"), "{patch}");
+    assert!(
+        patch.contains("accepted platform difference (gesture-inset): Bottom bar sits 10dp lower")
+    );
+    assert!(patch.contains("# Tooling debt (fixture, not counted): demo.dark: Clock not frozen"));
+    assert!(patch.contains("- demo.populated") && !patch.contains("- demo.dark"));
+    success(f.cli("ui-report", &["--review", review_arg]));
+    let report = fs::read_to_string(f.0.join("parity.md")).expect("report");
+    assert!(
+        report.contains("## Capture tooling debt")
+            && report.contains("- demo.dark: Clock not frozen")
+    );
+    // Categories come from catalog.toml [ui].
+    let config = fs::read_to_string(f.0.join("catalog.toml")).expect("config");
+    fs::write(
+        f.0.join("catalog.toml"),
+        format!("{config}\n[ui]\nplatform_categories = ['status-bar']\n"),
+    )
+    .expect("config");
+    let output = f.cli("verify", &["--review", review_arg]);
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("unknown platform category \"gesture-inset\""));
+}

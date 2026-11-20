@@ -461,6 +461,44 @@ pub struct Config {
     /// Registry of decisions and dependencies that block work, referenced by `blocked_by`.
     #[serde(default)]
     pub blockers: BTreeMap<String, Blocker>,
+    #[serde(default)]
+    pub ui: UiConfig,
+}
+
+/// Catalog-wide UI comparison settings.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UiConfig {
+    pub tolerance: UiTolerance,
+    /// Categories a reviewer may give an accepted `platform` difference.
+    pub platform_categories: Vec<String>,
+}
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            tolerance: UiTolerance::default(),
+            platform_categories: DEFAULT_PLATFORM_CATEGORIES
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
+        }
+    }
+}
+pub const DEFAULT_PLATFORM_CATEGORIES: &[&str] = &[
+    "status-bar",
+    "gesture-inset",
+    "font-metrics",
+    "glyph",
+    "touch-target",
+    "native-affordance",
+];
+/// Equivalence tolerances for cross-platform geometry, in logical points/dp.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UiTolerance {
+    pub position_dp: Option<f64>,
+    pub size_ratio: Option<f64>,
+    pub radius_dp: Option<f64>,
 }
 
 /// A platform's root directory, optionally inheriting records from another platform.

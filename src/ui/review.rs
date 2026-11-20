@@ -16,6 +16,21 @@ pub enum Verdict {
     Unreviewed,
     Same,
     Differs,
+    /// A capture-tooling difference (fixture, seed data, clock, animation phase); not the product.
+    Fixture,
+    /// An accepted platform difference; needs a category and a note.
+    Platform,
+}
+impl Verdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unreviewed => "unreviewed",
+            Self::Same => "same",
+            Self::Differs => "differs",
+            Self::Fixture => "fixture",
+            Self::Platform => "platform",
+        }
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,6 +45,9 @@ pub struct PairReview {
     /// Side-by-side image, relative to the review file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    /// Required for `platform` verdicts: one of the review's platform categories.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
 }
 /// Reviewer notes saved from the compare index (`review.json`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +64,9 @@ pub struct Review {
     pub baseline_commit: Option<String>,
     pub baseline: String,
     pub target: String,
+    /// Allowed `platform` categories, copied from catalog.toml `[ui]` by compare.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platform_categories: Vec<String>,
     pub pairs: Vec<PairReview>,
 }
 impl Review {
@@ -60,8 +81,58 @@ impl Review {
 }
 
 impl Review {
-    /// Set one pair's verdict (and note) by its `screen.state` key.
-    pub fn set(&mut self, key: &str, verdict: Verdict, note: Option<&str>) -> Result<()> {
+    /// The categories `platform` verdicts may use: the review's own, else the defaults.
+    pub fn categories(&self) -> Vec<String> {
+        if self.platform_categories.is_empty() {
+            crate::DEFAULT_PLATFORM_CATEGORIES
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect()
+        } else {
+            self.platform_categories.clone()
+        }
+    }
+    /// `platform` needs a listed category and a note; `fixture` needs a note; only
+    /// `platform` takes a category.
+    pub fn check(&self, categories: &[String]) -> Result<()> {
+        let mut problems = Vec::new();
+        for pair in &self.pairs {
+            let key = format!("{}.{}", pair.screen, pair.state);
+            let noted = !pair.differences.trim().is_empty();
+            match (pair.verdict, &pair.category) {
+                (Verdict::Platform, None) => problems.push(format!(
+                    "{key}: platform verdict needs a category ({})",
+                    categories.join(", ")
+                )),
+                (Verdict::Platform, Some(c)) if !categories.contains(c) => problems.push(format!(
+                    "{key}: unknown platform category {c:?}; expected one of {}",
+                    categories.join(", ")
+                )),
+                (Verdict::Platform, _) | (Verdict::Fixture, _) if !noted => problems.push(format!(
+                    "{key}: a {} verdict needs a note",
+                    pair.verdict.as_str()
+                )),
+                (Verdict::Platform | Verdict::Fixture, _) => {}
+                (_, Some(_)) => {
+                    problems.push(format!("{key}: only platform verdicts take a category"))
+                }
+                _ => {}
+            }
+        }
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            fail(format!("review.json: {}", problems.join("; ")))
+        }
+    }
+    /// Set one pair's verdict, note and category by its `screen.state` key.
+    pub fn set(
+        &mut self,
+        key: &str,
+        verdict: Verdict,
+        note: Option<&str>,
+        category: Option<&str>,
+    ) -> Result<()> {
         let pair = self
             .pairs
             .iter_mut()
@@ -71,7 +142,32 @@ impl Review {
         if let Some(note) = note {
             pair.differences = note.to_owned();
         }
-        Ok(())
+        pair.category = if verdict == Verdict::Platform {
+            category.map(str::to_owned).or(pair.category.take())
+        } else {
+            category.map(str::to_owned)
+        };
+        let categories = self.categories();
+        self.check(&categories)
+    }
+    /// Fixture-only pairs as a Markdown list: bugs in the capture tooling, not the product.
+    pub fn tooling_debt(&self) -> Vec<String> {
+        self.pairs
+            .iter()
+            .filter(|p| p.verdict == Verdict::Fixture)
+            .map(|p| format!("{}.{}: {}", p.screen, p.state, p.differences.trim()))
+            .collect()
+    }
+    pub fn tooling_debt_markdown(&self) -> String {
+        let debt = self.tooling_debt();
+        let mut out = String::from("\n## Capture tooling debt\n\nPairs a reviewer marked `fixture`: differences caused by the capture fixture or harness, not the product. Fix them in the capture tooling.\n\n");
+        if debt.is_empty() {
+            out.push_str("None.\n");
+        }
+        for line in debt {
+            out.push_str(&format!("- {line}\n"));
+        }
+        out
     }
     pub fn save(&self, path: &Path) -> Result<()> {
         fs::write(path, serde_json::to_string_pretty(self)? + "\n")?;
@@ -100,6 +196,8 @@ pub struct VerifyOutcome {
     pub proposals: Vec<Proposal>,
     /// Reviewed pairs that cannot support verification, with the reason.
     pub excluded: Vec<String>,
+    /// Pairs marked `fixture`: capture-tooling bugs, not counted for or against the product.
+    pub tooling_debt: Vec<String>,
 }
 impl VerifyOutcome {
     /// The proposed patch as commented YAML.
@@ -107,6 +205,9 @@ impl VerifyOutcome {
         let mut out = String::from("# Proposed by `concordance verify` from reviewer notes.\n# Nothing was applied: review each proposal, then edit the catalog by hand.\n");
         for line in &self.excluded {
             out.push_str(&format!("# Excluded pair: {line}\n"));
+        }
+        for line in &self.tooling_debt {
+            out.push_str(&format!("# Tooling debt (fixture, not counted): {line}\n"));
         }
         if self.proposals.is_empty() {
             out.push_str("[]\n");
@@ -118,13 +219,14 @@ impl VerifyOutcome {
     pub fn summary(&self) -> String {
         let count = |a: &str| self.proposals.iter().filter(|p| p.action == a).count();
         format!(
-            "{} verify, {} incomplete, {} needs-work, {} not-implemented, {} rejected; {} pair(s) excluded.",
+            "{} verify, {} incomplete, {} needs-work, {} not-implemented, {} rejected; {} pair(s) excluded; {} tooling-debt pair(s).",
             count("verify"),
             count("incomplete"),
             count("needs-work"),
             count("not-implemented"),
             count("rejected"),
-            self.excluded.len()
+            self.excluded.len(),
+            self.tooling_debt.len()
         )
     }
 }
@@ -148,6 +250,7 @@ impl UiCatalog {
                 return fail(format!("review.json: invalid commit {commit:?}"));
             }
         }
+        review.check(&self.catalog.config.ui.platform_categories)?;
         let coverage = self.coverage(captures, &[&review.baseline, &review.target])?;
         let states: BTreeMap<(String, String), &CaptureState> = coverage
             .records
@@ -156,7 +259,7 @@ impl UiCatalog {
             .collect();
         let mut outcome = VerifyOutcome::default();
         // Entry ID -> reviewed pairs (key, verdict, differences).
-        let mut by_entry: BTreeMap<&str, Vec<(String, Verdict, &str)>> = BTreeMap::new();
+        let mut by_entry: BTreeMap<&str, Vec<(String, Verdict, String)>> = BTreeMap::new();
         for pair in &review.pairs {
             let screen = self
                 .screens
@@ -168,10 +271,18 @@ impl UiCatalog {
                         pair.screen, pair.state
                     )
                 })?;
-            if pair.verdict == Verdict::Unreviewed {
-                continue;
-            }
             let key = format!("{}.{}", pair.screen, pair.state);
+            match pair.verdict {
+                Verdict::Unreviewed => continue,
+                // Fixture-only pairs say nothing about the product: tooling debt.
+                Verdict::Fixture => {
+                    outcome
+                        .tooling_debt
+                        .push(format!("{key}: {}", pair.differences.trim()));
+                    continue;
+                }
+                _ => {}
+            }
             let blocked = [&review.baseline, &review.target]
                 .into_iter()
                 .find_map(|p| match states.get(&(key.clone(), p.clone())) {
@@ -185,11 +296,17 @@ impl UiCatalog {
                 continue;
             }
             for entry in &screen.entries {
-                by_entry.entry(entry).or_default().push((
-                    key.clone(),
-                    pair.verdict,
-                    pair.differences.trim(),
-                ));
+                let note = match (pair.verdict, &pair.category) {
+                    (Verdict::Platform, Some(category)) => format!(
+                        "accepted platform difference ({category}): {}",
+                        pair.differences.trim()
+                    ),
+                    _ => pair.differences.trim().to_owned(),
+                };
+                by_entry
+                    .entry(entry)
+                    .or_default()
+                    .push((key.clone(), pair.verdict, note));
             }
         }
         for (id, pairs) in by_entry {
@@ -207,7 +324,7 @@ impl UiCatalog {
                         if p.2.is_empty() {
                             "differs (no note)"
                         } else {
-                            p.2
+                            p.2.as_str()
                         }
                     )
                 })
@@ -249,7 +366,7 @@ impl UiCatalog {
                     .collect();
                 let notes: Vec<&str> = pairs
                     .iter()
-                    .map(|p| p.2)
+                    .map(|p| p.2.as_str())
                     .filter(|n| !n.is_empty())
                     .collect();
                 proposal.verification = Some(Verification {

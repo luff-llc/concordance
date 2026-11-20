@@ -156,6 +156,9 @@ enum Command {
         baseline: Option<String>,
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Reviewer notes from compare; appends the capture tooling-debt list.
+        #[arg(long)]
+        review: Option<PathBuf>,
         /// Check report freshness without writing (same semantics as report --check).
         #[arg(long)]
         check: bool,
@@ -234,6 +237,9 @@ enum ReviewAction {
         verdict: VerdictArg,
         #[arg(long)]
         note: Option<String>,
+        /// Category of an accepted platform difference (see [ui] platform_categories).
+        #[arg(long)]
+        category: Option<String>,
         #[arg(long)]
         reviewer: Option<String>,
         /// Review date, YYYY-MM-DD.
@@ -257,6 +263,10 @@ enum VerdictArg {
     Unreviewed,
     Same,
     Differs,
+    /// A capture-tooling difference; needs --note.
+    Fixture,
+    /// An accepted platform difference; needs --category and --note.
+    Platform,
 }
 #[derive(clap::Args)]
 struct Roots {
@@ -576,6 +586,7 @@ fn run(cli: Cli) -> Result<()> {
                     key,
                     verdict,
                     note,
+                    category,
                     reviewer,
                     at,
                     commit,
@@ -591,8 +602,11 @@ fn run(cli: Cli) -> Result<()> {
                     VerdictArg::Unreviewed => Verdict::Unreviewed,
                     VerdictArg::Same => Verdict::Same,
                     VerdictArg::Differs => Verdict::Differs,
+                    VerdictArg::Fixture => Verdict::Fixture,
+                    VerdictArg::Platform => Verdict::Platform,
                 },
                 note.as_deref(),
+                category.as_deref(),
             )?;
             if let Some(reviewer) = reviewer {
                 review.reviewer = reviewer;
@@ -648,9 +662,14 @@ fn run(cli: Cli) -> Result<()> {
             captures,
             baseline,
             out,
+            review,
             check,
         } => {
             let ui = UiCatalog::load(&dir)?;
+            let debt = match review {
+                Some(path) => concordance::ui::Review::load(&path)?.tooling_debt_markdown(),
+                None => String::new(),
+            };
             let captures = captures.unwrap_or_else(|| dir.join("captures"));
             let baseline = baseline
                 .as_deref()
@@ -659,7 +678,8 @@ fn run(cli: Cli) -> Result<()> {
             let out = out.unwrap_or_else(|| dir.join("parity.md"));
             let report = ui.ui_report_at(&captures, baseline, Some(&out))?
                 + &ui.catalog.evidence_roots_section(&options)?
-                + &ui.catalog.baseline_drift_section(&options)?;
+                + &ui.catalog.baseline_drift_section(&options)?
+                + &debt;
             if check {
                 if fs::read_to_string(&out).ok().as_deref() != Some(&report) {
                     return Err(format!("stale UI report: {}", out.display()).into());

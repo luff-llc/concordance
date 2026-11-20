@@ -49,6 +49,13 @@
   for motion, haptic and gesture). The schema evaluator supports `anyOf`.
 - `concordance rebase-anchors --to <sha>` moves line anchors through the diff and
   flags edited ranges and lost symbols; `--write` applies the moves.
+- Equivalence tolerances: `[ui.tolerance] position_dp`, `size_ratio`, `radius_dp` (per-screen
+  overrides) judge cross-platform geometry in logical units, recording passing deltas as
+  measurements; snapshots may report `corner_radius`.
+- Review verdicts `platform` (accepted difference with a category from `[ui]
+  platform_categories` and a note) and `fixture` (capture-tooling difference with a note).
+  `verify` treats same and platform as equivalent and reports fixture pairs as tooling
+  debt; `review set --category`; `ui-report --review` lists tooling debt.
 - Platform inheritance: `horizon = { root = "...", inherits = "android" }`; an
   inheriting record unsets a parent key with an explicit `null`.
 

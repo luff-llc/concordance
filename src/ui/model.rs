@@ -119,6 +119,10 @@ pub struct Tolerances {
     pub delta_e: f64,
     /// Absolute logical points/sp after applying the state's font_scale.
     pub text_size: f64,
+    /// Cross-platform equivalence tolerances; override `[ui.tolerance]` in catalog.toml.
+    pub position_dp: Option<f64>,
+    pub size_ratio: Option<f64>,
+    pub radius_dp: Option<f64>,
 }
 impl Default for Tolerances {
     fn default() -> Self {
@@ -126,6 +130,9 @@ impl Default for Tolerances {
             geometry: 0.05,
             delta_e: 5.0,
             text_size: 1.0,
+            position_dp: None,
+            size_ratio: None,
+            radius_dp: None,
         }
     }
 }
@@ -147,6 +154,9 @@ pub struct Node {
     pub text_size: Option<f64>,
     /// Resolved artwork-derived color, required when checking a rule-based role.
     pub resolved_color: Option<String>,
+    /// Rendered corner radius in logical points/dp, compared with `radius_dp`.
+    #[serde(default)]
+    pub corner_radius: Option<f64>,
 }
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
