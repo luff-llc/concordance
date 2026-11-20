@@ -62,6 +62,10 @@
   trailer; exit 0/1/2); `sync` (stale marking, task files, optional `gh` issues, anchor
   rebase and pin advance; dry run unless `--apply`; idempotent); `gate-release` with
   per-kind age limits; `set --intended`.
+- `sync` marks stale only on precise hits (anchors, or changed copy text/keys in code or
+  string catalogs) and queues file-level hits as review tasks (`--coarse-as stale|review`,
+  default review); `set --stale` and `set --reviewed-unchanged` (`reviewed_commit`) triage
+  them. `anchors suggest` proposes `#Symbol` anchors for file-level evidence.
 - `strings export` writes Android `strings_<app>_shared.xml` resources (with locales)
   for copy-detail keys from an `.xcstrings` file, with documented deterministic resource
   names; `copy.key` on copy details.

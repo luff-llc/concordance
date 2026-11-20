@@ -334,11 +334,19 @@ concordance sync spec/product --root ios=../apple --platform-from ios --platform
   [--to <ref>] [--tasks-dir spec/product/tasks] [--captures <dir>] [--issues gh --label parity] [--apply]
 ```
 
-From `[baselines.<from>].commit` to `--to` (default `HEAD`), every entry or detail whose
-baseline evidence changed (precise or coarse `drift` hits) is examined: an implemented or
-partial target record becomes `stale` (already stale records keep their original
-`since_*`; missing and not-applicable records are listed but unchanged). With
-`--tasks-dir`, one `<entry-id>.md` per entry lists the records, evidence hits, changed
+From `[baselines.<from>].commit` to `--to` (default `HEAD`), every entry or detail with
+changed baseline evidence is examined. Only **precise** changes mark an implemented or
+partial target record `stale`: an anchored `#Symbol` or line-range hit, or a copy detail
+whose `copy.text` or `copy.key` appears as a removed string literal that was not re-added
+in the range (this covers code and string catalogs such as `.xcstrings`). File-level
+(coarse) hits go to a **review** queue instead: the record keeps its status and its task
+says `Kind: review`. `--coarse-as stale` restores the old behaviour. Already stale
+records keep their original `since_*`; missing and not-applicable records are listed but
+unchanged. Triage a review item with `concordance set <dir> <record> --platform <p>
+--stale` (stale against the current `[report].baseline` pin, dated today) or
+`--reviewed-unchanged` (records `reviewed_commit`, the pin it was checked against).
+With
+`--tasks-dir`, one `<entry-id>.md` per entry, with a `Kind:` of `stale` or `review`, lists the records, evidence hits, changed
 string literals that read like interface copy (a space or a leading capital), commits (linked when `[external_roots.<from>] git` is a GitHub URL),
 captures for linked screens when `--captures` is given, and a diff excerpt. The block
 between `<!-- concordance:task <id> -->` and `<!-- concordance:task end -->` is
@@ -666,6 +674,14 @@ two revisions and the file's content at the baseline revision:
 
 Each platform heading reports entries with precise hits versus coarse-only entries,
 and reference counts: precise, coarse, and anchored-unaffected.
+
+`concordance anchors suggest <dir> <entry> [--platform p] [--root …]` proposes anchors for an
+entry's file-level evidence: for each cited file it finds lines containing the entry's
+accessibility identifier or label, its copy, or its copy details' text and keys, and names
+the innermost enclosing type or function (`func`, `fun`, `class`, `struct`, `enum`,
+`protocol`, `extension`, `interface`, `object`, `def`, `fn`, …; `body` and `init` are
+skipped), printing `path → path#Symbol` with the matches and their lines. It only prints;
+apply the anchors you agree with.
 
 Prefer `path#Symbol` anchors for entry evidence: they survive edits elsewhere in the
 file and need no rewriting. When the baseline pin moves, re-locate line anchors:
