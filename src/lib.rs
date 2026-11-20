@@ -1,5 +1,10 @@
 //! Product behavior catalogs shared by native implementations and their tests.
 mod drift;
+pub mod edit;
+mod rebase;
+mod set;
+pub use rebase::{AnchorFate, AnchorMove, RebaseReport};
+pub use set::{SetOutcome, SetRequest, CLEARABLE};
 mod evidence;
 mod generate;
 mod model;
@@ -62,7 +67,23 @@ impl Catalog {
                 "platforms must not be empty",
             );
         }
-        for (name, root) in &config.platforms {
+        for (name, platform) in &config.platforms {
+            if let Some(parent) = platform.inherits() {
+                let mut seen = BTreeSet::from([name.as_str()]);
+                let mut next = Some(parent);
+                while let Some(current) = next {
+                    if !config.platforms.contains_key(current) {
+                        report.error("config", "", name, current, "inherits an unknown platform");
+                        break;
+                    }
+                    if !seen.insert(current) {
+                        report.error("config", "", name, current, "platform inheritance cycle");
+                        break;
+                    }
+                    next = config.platforms[current].inherits();
+                }
+            }
+            let root = platform.root();
             if name.is_empty() || !safe_relative(root, true) {
                 report.error("config", "", name, root, "unsafe platform root");
             }
@@ -176,7 +197,11 @@ impl Catalog {
             if values.is_empty() {
                 report.error("schema", "", "", &reference, "too few items");
             }
+            let order = inheritance_order(&catalog.config);
             for (index, value) in values.iter().enumerate() {
+                let mut value = value.clone();
+                let copied = inherit(&mut value, &order);
+                let value = &value;
                 let id = value
                     .get("id")
                     .and_then(serde_json::Value::as_str)
@@ -191,10 +216,22 @@ impl Catalog {
                         &error.replace("$[0]", &format!("$[{index}]")),
                     );
                 }
-                let entry: Entry = match serde_json::from_value(value.clone()) {
+                let mut entry: Entry = match serde_json::from_value(value.clone()) {
                     Ok(entry) => entry,
                     Err(_) => continue,
                 };
+                for (detail, platform) in copied {
+                    let record = match detail {
+                        None => entry.platforms.get_mut(&platform),
+                        Some(i) => entry
+                            .details
+                            .get_mut(i)
+                            .and_then(|d| d.platforms.get_mut(&platform)),
+                    };
+                    if let Some(record) = record {
+                        record.inherited = true;
+                    }
+                }
                 validation::check_entry(&entry, &mut report);
                 let id = &entry.id;
                 let detail_platforms = entry.details.iter().flat_map(|d| {
@@ -256,6 +293,7 @@ impl Catalog {
             }
         }
         catalog.validate_retired(&mut report)?;
+        catalog.check_work_state(&mut report);
         report.sort();
         Ok((catalog, report))
     }
@@ -415,6 +453,70 @@ impl Catalog {
         limit: usize,
         details: bool,
     ) -> Result<Vec<&Entry>> {
+        self.next_filtered(platform, area, limit, details, false)
+    }
+
+    /// Open blockers (by key) on a record.
+    pub fn open_blockers<'a>(&self, record: &'a Platform) -> Vec<&'a str> {
+        record
+            .blocked_by
+            .iter()
+            .filter(|k| self.config.blockers.get(*k).is_none_or(|b| b.blocks()))
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// Unfinished entries on a platform that are blocked, with the open blocker keys that
+    /// hold them back, directly or through an unfinished dependency.
+    pub fn blocked_entries(&self, platform: &str) -> BTreeMap<String, BTreeSet<String>> {
+        fn visit(
+            catalog: &Catalog,
+            platform: &str,
+            id: &str,
+            memo: &mut BTreeMap<String, BTreeSet<String>>,
+            stack: &mut BTreeSet<String>,
+        ) -> BTreeSet<String> {
+            if let Some(known) = memo.get(id) {
+                return known.clone();
+            }
+            let Some(entry) = catalog.entries.get(id) else {
+                return BTreeSet::new();
+            };
+            let Some(record) = entry.platforms.get(platform) else {
+                return BTreeSet::new();
+            };
+            if !record.status.is_gap() || !stack.insert(id.to_owned()) {
+                return BTreeSet::new();
+            }
+            let mut keys: BTreeSet<String> = catalog
+                .open_blockers(record)
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            for dependency in &entry.depends_on {
+                keys.extend(visit(catalog, platform, dependency, memo, stack));
+            }
+            stack.remove(id);
+            memo.insert(id.to_owned(), keys.clone());
+            keys
+        }
+        let mut memo = BTreeMap::new();
+        for id in self.entries.keys() {
+            visit(self, platform, id, &mut memo, &mut BTreeSet::new());
+        }
+        memo.retain(|_, keys| !keys.is_empty());
+        memo
+    }
+
+    /// Like `next_with`; blocked work is skipped unless `include_blocked`.
+    pub fn next_filtered(
+        &self,
+        platform: &str,
+        area: Option<&str>,
+        limit: usize,
+        details: bool,
+        include_blocked: bool,
+    ) -> Result<Vec<&Entry>> {
         if !self.config.platforms.contains_key(platform) {
             return fail(format!("unknown platform: {platform}"));
         }
@@ -447,13 +549,24 @@ impl Catalog {
                 return fail(format!("{id}: no status for dependency on {platform}"));
             }
         }
+        let blocked = if include_blocked {
+            BTreeMap::new()
+        } else {
+            self.blocked_entries(platform)
+        };
         selected.retain(|id| {
             let entry = &self.entries[id];
             let status = entry.platforms[platform].status;
-            status.is_gap()
-                || (details
-                    && status == Status::Implemented
-                    && !self.open_details(entry, platform).is_empty())
+            !blocked.contains_key(id)
+                && (status.is_gap()
+                    || (details
+                        && status == Status::Implemented
+                        && self.open_details(entry, platform).iter().any(|d| {
+                            include_blocked
+                                || d.platforms
+                                    .get(platform)
+                                    .is_none_or(|p| self.open_blockers(p).is_empty())
+                        })))
         });
         Ok(self
             .dependency_order(Some(&selected))?
@@ -543,8 +656,28 @@ impl Catalog {
                 .platforms
                 .iter()
                 .map(|(p, e)| {
+                    let blockers: String = e
+                        .blocked_by
+                        .iter()
+                        .map(|k| match self.config.blockers.get(k) {
+                            Some(b) => format!(
+                                "Blocked by {k}: {}{} [{}]. ",
+                                b.title,
+                                b.link
+                                    .as_ref()
+                                    .map(|l| format!(" ({l})"))
+                                    .unwrap_or_default(),
+                                match b.status {
+                                    BlockerStatus::Open => "open",
+                                    BlockerStatus::Decided => "decided",
+                                    BlockerStatus::Resolved => "resolved",
+                                }
+                            ),
+                            None => format!("Blocked by {k}. "),
+                        })
+                        .collect();
                     format!(
-                        "{p}: {}; {}. {} {}",
+                        "{p}: {}; {}. {blockers}{} {}",
                         e.status.as_str(),
                         verification_line(e),
                         e.gap.as_deref().unwrap_or(""),
@@ -636,6 +769,93 @@ pub(crate) fn verification_line(record: &Platform) -> String {
         (_, Some(reason)) => format!("unverified ({reason})"),
         (None, None) => "unverified".into(),
     }
+}
+
+/// Inheriting platforms ordered so parents resolve before children; cycles are skipped.
+fn inheritance_order(config: &Config) -> Vec<(String, String)> {
+    let mut pending: Vec<(String, String)> = config
+        .platforms
+        .iter()
+        .filter_map(|(name, p)| p.inherits().map(|parent| (name.clone(), parent.to_owned())))
+        .filter(|(_, parent)| config.platforms.contains_key(parent))
+        .collect();
+    let mut order = Vec::new();
+    while !pending.is_empty() {
+        let before = pending.len();
+        let children: BTreeSet<String> = pending.iter().map(|(c, _)| c.clone()).collect();
+        pending.retain(|(child, parent)| {
+            if children.contains(parent) {
+                return true; // the parent still needs resolving
+            }
+            order.push((child.clone(), parent.clone()));
+            false
+        });
+        if pending.len() == before {
+            break; // cycle; reported by configuration validation
+        }
+    }
+    order
+}
+
+/// Fill inherited platform records in a raw entry. A missing child record is copied whole
+/// from its parent; a present one is merged over the parent's (child keys win).
+/// Returns the whole copies as (detail index, platform).
+fn inherit(
+    entry: &mut serde_json::Value,
+    order: &[(String, String)],
+) -> Vec<(Option<usize>, String)> {
+    fn apply(
+        platforms: Option<&mut serde_json::Value>,
+        order: &[(String, String)],
+        copied: &mut Vec<String>,
+    ) {
+        let Some(map) = platforms.and_then(serde_json::Value::as_object_mut) else {
+            return;
+        };
+        for (child, parent) in order {
+            let Some(base) = map
+                .get(parent)
+                .and_then(serde_json::Value::as_object)
+                .cloned()
+            else {
+                continue;
+            };
+            if !map.contains_key(child) {
+                map.insert(child.clone(), serde_json::Value::Object(base));
+                copied.push(child.clone());
+            } else if let Some(own) = map
+                .get_mut(child)
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                // A different status makes the parent's verification and gap irrelevant.
+                let own_status = own.get("status").cloned();
+                let differs = own_status.is_some() && own_status.as_ref() != base.get("status");
+                for (key, value) in base {
+                    if differs && matches!(key.as_str(), "verification" | "gap" | "blocked_by") {
+                        continue;
+                    }
+                    own.entry(key).or_insert(value);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if order.is_empty() {
+        return out;
+    }
+    let mut copied = Vec::new();
+    apply(entry.get_mut("platforms"), order, &mut copied);
+    out.extend(copied.drain(..).map(|p| (None, p)));
+    if let Some(details) = entry
+        .get_mut("details")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for (index, detail) in details.iter_mut().enumerate() {
+            apply(detail.get_mut("platforms"), order, &mut copied);
+            out.extend(copied.drain(..).map(|p| (Some(index), p)));
+        }
+    }
+    out
 }
 
 fn safe_relative(path: &str, allow_dot: bool) -> bool {

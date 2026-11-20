@@ -271,7 +271,7 @@ fn block_end(lines: &[&str], start: usize) -> usize {
     end
 }
 
-fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
+pub(crate) fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root)

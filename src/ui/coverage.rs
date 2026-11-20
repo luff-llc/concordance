@@ -323,6 +323,28 @@ impl UiCatalog {
         Ok(coverage)
     }
 
+    /// Detail `motion.token` names that are not motions in tokens.yaml.
+    pub fn motion_token_warnings(&self) -> Vec<Issue> {
+        let mut issues = Vec::new();
+        for entry in self.catalog.entries.values() {
+            for detail in &entry.details {
+                let Some(token) = detail.spec.motion.as_ref().and_then(|m| m.token.as_ref()) else {
+                    continue;
+                };
+                if !self.tokens.motions.contains_key(token) {
+                    issues.push(Issue {
+                        group: "details".into(),
+                        entry: format!("{}#{}", entry.id, detail.id),
+                        platform: String::new(),
+                        reference: token.clone(),
+                        message: "motion token is not defined in tokens.yaml".into(),
+                    });
+                }
+            }
+        }
+        issues
+    }
+
     /// Verification capture keys must name declared screen states.
     pub fn verification_issues(&self) -> Vec<Issue> {
         let declared: BTreeSet<String> = self

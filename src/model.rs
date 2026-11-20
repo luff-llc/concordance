@@ -88,6 +88,12 @@ pub struct Platform {
     /// Independent review evidence. `verified` is derived from it, never stored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<Verification>,
+    /// Keys of `[blockers]` entries holding this work back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<String>,
+    /// True when the record was copied whole from an inherited platform.
+    #[serde(skip)]
+    pub inherited: bool,
 }
 
 /// A reviewer's record that an implementation was checked against the baseline.
@@ -244,6 +250,43 @@ pub struct Detail {
     pub baseline: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub platforms: BTreeMap<String, Platform>,
+    /// Evidence a verification must include. Default: a journey for motion, haptic and
+    /// gesture details (a still capture cannot prove them); a capture or journey otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_requires: Option<Vec<VerifyEvidence>>,
+}
+impl Detail {
+    pub fn verification_requirements(&self) -> Vec<VerifyEvidence> {
+        match (&self.verify_requires, self.kind) {
+            (Some(explicit), _) => explicit.clone(),
+            (None, DetailKind::Motion | DetailKind::Haptic | DetailKind::Gesture) => {
+                vec![VerifyEvidence::Journey]
+            }
+            (None, _) => vec![],
+        }
+    }
+    /// Why this detail's platform record is not verified, if it is not.
+    pub fn unverified_reason(&self, record: &Platform) -> Option<String> {
+        if let Some(reason) = record.unverified_reason() {
+            return Some(reason.into());
+        }
+        let v = record.verification.as_ref()?;
+        let lacking: Vec<&str> = self
+            .verification_requirements()
+            .into_iter()
+            .filter_map(|r| match r {
+                VerifyEvidence::Capture if v.captures.is_empty() => Some("capture"),
+                VerifyEvidence::Journey if v.journeys.is_empty() => Some("journey"),
+                _ => None,
+            })
+            .collect();
+        (!lacking.is_empty()).then(|| {
+            format!(
+                "verification lacks a required {} (verify_requires)",
+                lacking.join(" and a ")
+            )
+        })
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -255,8 +298,9 @@ pub struct DetailSpec {
     pub haptic: Option<HapticSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gesture: Option<GestureSpec>,
+    /// One measurement or several (for example width, height and corner radius).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub geometry: Option<GeometrySpec>,
+    pub geometry: Option<Geometry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copy: Option<CopySpec>,
 }
@@ -268,9 +312,27 @@ pub enum Curve {
     Linear,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Geometry {
+    One(GeometrySpec),
+    Many(Vec<GeometrySpec>),
+}
+impl Geometry {
+    pub fn items(&self) -> &[GeometrySpec] {
+        match self {
+            Self::One(one) => std::slice::from_ref(one),
+            Self::Many(many) => many,
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MotionSpec {
-    pub curve: Curve,
+    /// A named design-token motion (for example `Motion.fold`), with or without numbers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curve: Option<Curve>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -316,14 +378,20 @@ impl DetailSpec {
     pub fn numbers(&self) -> String {
         let mut parts = Vec::new();
         if let Some(m) = &self.motion {
-            let mut p = vec![format!(
-                "motion {}",
-                match m.curve {
-                    Curve::Spring => "spring",
-                    Curve::Ease => "ease",
-                    Curve::Linear => "linear",
-                }
-            )];
+            let mut p = vec!["motion".to_owned()];
+            if let Some(token) = &m.token {
+                p.push(format!("token {token}"));
+            }
+            if let Some(curve) = m.curve {
+                p.push(
+                    match curve {
+                        Curve::Spring => "spring",
+                        Curve::Ease => "ease",
+                        Curve::Linear => "linear",
+                    }
+                    .into(),
+                );
+            }
             for (name, value) in [
                 ("response", m.response),
                 ("damping", m.damping),
@@ -351,7 +419,9 @@ impl DetailSpec {
             parts.push(text);
         }
         if let Some(g) = &self.geometry {
-            parts.push(format!("{} = {}{}", g.property, number(g.value), g.unit));
+            for g in g.items() {
+                parts.push(format!("{} = {}{}", g.property, number(g.value), g.unit));
+            }
         }
         if let Some(c) = &self.copy {
             parts.push(format!(
@@ -373,7 +443,7 @@ pub struct Config {
     /// Relative to the directory containing catalog.toml; --repo overrides this.
     #[serde(default = "dot")]
     pub repo_root: String,
-    pub platforms: BTreeMap<String, String>,
+    pub platforms: BTreeMap<String, PlatformConfig>,
     /// Optional legacy prefix to strip before resolving a platform's evidence.
     #[serde(default)]
     pub path_prefixes: BTreeMap<String, String>,
@@ -388,6 +458,73 @@ pub struct Config {
     /// Root-relative glob patterns used to discover uncatalogued changes.
     #[serde(default)]
     pub source_globs: BTreeMap<String, Vec<String>>,
+    /// Registry of decisions and dependencies that block work, referenced by `blocked_by`.
+    #[serde(default)]
+    pub blockers: BTreeMap<String, Blocker>,
+}
+
+/// A platform's root directory, optionally inheriting records from another platform.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum PlatformConfig {
+    Root(String),
+    Table {
+        #[serde(default = "dot")]
+        root: String,
+        inherits: Option<String>,
+    },
+}
+impl PlatformConfig {
+    pub fn root(&self) -> &str {
+        match self {
+            Self::Root(root) | Self::Table { root, .. } => root,
+        }
+    }
+    pub fn inherits(&self) -> Option<&str> {
+        match self {
+            Self::Root(_) => None,
+            Self::Table { inherits, .. } => inherits.as_deref(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BlockerStatus {
+    #[default]
+    Open,
+    Decided,
+    Resolved,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BlockerKind {
+    Decision,
+    Dependency,
+    Sdk,
+    Platform,
+    Hardware,
+}
+/// Something outside the implementer's control that blocks work.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Blocker {
+    pub title: String,
+    #[serde(default)]
+    pub kind: Option<BlockerKind>,
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// Where the decision is tracked.
+    #[serde(default, alias = "decision")]
+    pub link: Option<String>,
+    #[serde(default)]
+    pub status: BlockerStatus,
+}
+impl Blocker {
+    /// Only open blockers hold work back; decided and resolved ones do not.
+    pub fn blocks(&self) -> bool {
+        self.status == BlockerStatus::Open
+    }
 }
 fn dot() -> String {
     ".".into()

@@ -100,10 +100,28 @@ fn check(
             "minimum",
             "maximum",
             "minProperties",
+            "anyOf",
         ]
         .contains(&key.as_str())
         {
             return fail(format!("unsupported bundled schema keyword: {key}"));
+        }
+    }
+    if let Some(alternatives) = rule.get("anyOf").and_then(Value::as_array) {
+        let mut first = None;
+        let mut matched = false;
+        for alternative in alternatives {
+            let mut attempt = Vec::new();
+            check(value, alternative, root, at, &mut attempt)?;
+            if attempt.is_empty() {
+                matched = true;
+                break;
+            }
+            first.get_or_insert(attempt);
+        }
+        if !matched {
+            errors.push(format!("{at}: matches none of the allowed forms"));
+            errors.extend(first.unwrap_or_default());
         }
     }
     if let Some(reference) = rule.get("$ref").and_then(Value::as_str) {

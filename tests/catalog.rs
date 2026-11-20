@@ -1027,3 +1027,356 @@ fn report_links_resolve_from_the_output_location() {
         ],
     ));
 }
+
+fn append_config(fixture: &Fixture, extra: &str) {
+    let config = fs::read_to_string(fixture.0.join("catalog.toml")).expect("config");
+    let config = config.replacen("[platforms]\n", &format!("[platforms]\n{}", ""), 1);
+    fs::write(
+        fixture.0.join("catalog.toml"),
+        format!("{config}\n{extra}\n"),
+    )
+    .expect("config");
+}
+
+#[test]
+fn blockers_hold_back_work_transitively_and_rank_in_the_report() {
+    let fixture = Fixture::new();
+    append_config(
+        &fixture,
+        "[blockers.engine]\ntitle = 'On-device engine'\nkind = 'dependency'\nowner = 'Mike'\nlink = 'docs/decisions.md#1'\n\n[blockers.old]\ntitle = 'Settled question'\nstatus = 'resolved'\n",
+    );
+    fixture.mutate("reader", |v| {
+        v[0]["platforms"]["android"]["blocked_by"] = json!(["engine"])
+    });
+    fixture.mutate("search", |v| {
+        v[0]["depends_on"] = json!(["reader.open-book"])
+    });
+    success(fixture.cli("validate", &[]));
+    let queue = success(fixture.cli("next", &["--platform", "android"]));
+    assert!(queue.starts_with("library.open-library"));
+    assert!(!queue.contains("reader.open-book") && !queue.contains("search.find-book"));
+    let all = success(fixture.cli("next", &["--platform", "android", "--include-blocked"]));
+    assert!(all.contains("reader.open-book\tcritical\tpartial\tOpen a book [blocked: engine]"));
+    assert!(all.contains("search.find-book\thigh\tmissing\tFind a book [blocked: engine]"));
+    let report = fixture.load().report().expect("report");
+    for expected in [
+        "## Ten highest-impact actionable gaps",
+        "## Ten highest-impact blocked gaps",
+        "Blocked by engine. Implement the native journey.",
+        "| `engine` | On-device engine | dependency | Mike | open | 2 | 0 | critical | docs/decisions.md#1 |",
+        " Blocked |",
+    ] {
+        assert!(report.contains(expected), "missing {expected}:\n{report}");
+    }
+    let engine = report.find("`engine`").expect("engine row");
+    assert!(engine < report.find("| `old`").expect("old row"));
+    let brief = success(fixture.cli("entry", &["reader.open-book", "--format", "brief"]));
+    assert!(brief.contains("Blocked by engine: On-device engine (docs/decisions.md#1) [open]."));
+    // Unknown keys and blockers on implemented work are errors; resolved ones warn.
+    fixture.mutate("reader", |v| {
+        v[0]["platforms"]["android"]["blocked_by"] = json!(["nope", "old"]);
+        v[1]["platforms"]["android"]["blocked_by"] = json!(["engine"]);
+    });
+    let stderr = String::from_utf8(fixture.cli("validate", &[]).stderr).expect("UTF8");
+    assert!(stderr.contains("unknown blocker"), "{stderr}");
+    assert!(
+        stderr.contains("blocked_by on a implemented record"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("blocker is resolved; revisit this record"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn set_edits_records_in_place_and_refuses_invalid_results() {
+    let fixture = Fixture::new();
+    let path = fixture.0.join("catalog/reader.yaml");
+    let before = fs::read_to_string(&path).expect("area");
+    let dir = fixture.0.to_str().expect("path");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_concordance"))
+            .arg("set")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("CLI")
+    };
+    let output = run(&[
+        "reader.open-book",
+        "--platform",
+        "android",
+        "--status",
+        "implemented",
+        "--by",
+        "sol",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // An implemented record that keeps its gap is a warning, and it is reported.
+    assert!(String::from_utf8_lossy(&output.stderr).contains("implemented record still has a gap"));
+    let after = fs::read_to_string(&path).expect("area");
+    // Only the edited lines differ: status, the gap line's comma, and one added field.
+    let old: std::collections::BTreeSet<&str> = before.lines().collect();
+    let new_lines: Vec<&str> = after.lines().filter(|l| !old.contains(l)).collect();
+    assert_eq!(after.lines().count(), before.lines().count() + 1);
+    assert_eq!(new_lines.len(), 3, "{new_lines:?}");
+    assert!(after.contains("\"implemented_by\": \"sol\""));
+    assert!(run(&[
+        "reader.open-book",
+        "--platform",
+        "android",
+        "--clear",
+        "gap"
+    ])
+    .status
+    .success());
+    assert!(!fs::read_to_string(&path)
+        .expect("area")
+        .contains("\"gap\": \"Implement the native journey.\",\n        \"implemented_by\""));
+    // Leaving verification on a missing record is refused, and the file is restored.
+    fixture.mutate("reader", |v| {
+        v[0]["platforms"]["android"]["verification"] =
+            json!({"by": "agy", "at": "2026-11-20", "captures": ["shot.png"]});
+    });
+    fs::write(fixture.0.join("shot.png"), "png").expect("capture");
+    let snapshot = fs::read_to_string(&path).expect("area");
+    let output = run(&[
+        "reader.open-book",
+        "--platform",
+        "android",
+        "--status",
+        "missing",
+    ]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--clear verification"));
+    assert_eq!(fs::read_to_string(&path).expect("area"), snapshot);
+    assert!(run(&[
+        "reader.open-book",
+        "--platform",
+        "android",
+        "--status",
+        "missing",
+        "--clear",
+        "verification"
+    ])
+    .status
+    .success());
+    assert!(!run(&[
+        "reader.open-book",
+        "--platform",
+        "android",
+        "--clear",
+        "title"
+    ])
+    .status
+    .success());
+    // Details are addressed as entry/detail or entry#detail; a missing record needs --status.
+    fixture.mutate("reader", |v| {
+        v[1]["details"] =
+            json!([{"id": "tap-haptic", "kind": "haptic", "spec": {"text": "Light impact"}}]);
+    });
+    assert!(!run(&[
+        "reader.native-menu/tap-haptic",
+        "--platform",
+        "android",
+        "--gap",
+        "x"
+    ])
+    .status
+    .success());
+    let output = run(&[
+        "reader.native-menu/tap-haptic",
+        "--platform",
+        "android",
+        "--status",
+        "partial",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // The implemented entry now has an open detail: validate warns.
+    let stdout = success(fixture.cli("validate", &[]));
+    assert!(
+        stdout.contains("tap-haptic: implemented record has open details"),
+        "{stdout}"
+    );
+    assert!(!fixture.cli("validate", &["--strict"]).status.success());
+}
+
+#[test]
+fn geometry_lists_motion_tokens_and_detail_journey_requirements() {
+    let fixture = Fixture::new();
+    let details = |items: Value| fixture.mutate("reader", |v| v[1]["details"] = items);
+    details(json!([
+        {"id": "cover", "kind": "geometry", "spec": {"text": "Mini player cover", "geometry": [
+            {"property": "width", "value": 38, "unit": "pt"},
+            {"property": "corner-radius", "value": 8, "unit": "pt"}]}},
+        {"id": "fold", "kind": "motion", "spec": {"text": "Fold open", "motion": {"token": "Motion.fold"}},
+         "platforms": {"android": {"status": "implemented", "implemented_by": "sol",
+            "verification": {"by": "agy", "at": "2026-11-20", "captures": ["shot.png"]}}}}
+    ]));
+    fs::write(fixture.0.join("shot.png"), "png").expect("capture");
+    success(fixture.cli("validate", &[]));
+    let catalog = fixture.load();
+    let entry = &catalog.entries["reader.native-menu"];
+    assert_eq!(
+        entry.details[0].spec.numbers(),
+        "width = 38pt; corner-radius = 8pt"
+    );
+    assert_eq!(entry.details[1].spec.numbers(), "motion token Motion.fold");
+    // A still capture cannot verify motion: it needs a journey.
+    let record = &entry.details[1].platforms["android"];
+    assert_eq!(
+        entry.details[1].unverified_reason(record).as_deref(),
+        Some("verification lacks a required journey (verify_requires)")
+    );
+    details(json!([
+        {"id": "a", "kind": "motion", "spec": {"text": "x", "motion": {}}},
+        {"id": "b", "kind": "motion", "spec": {"text": "x", "motion": {"token": "t", "response": 0.3}}}
+    ]));
+    let stderr = String::from_utf8(fixture.cli("validate", &[]).stderr).expect("UTF8");
+    for expected in [
+        "motion needs a curve or a token",
+        "motion numbers need a curve",
+    ] {
+        assert!(stderr.contains(expected), "missing {expected}: {stderr}");
+    }
+    details(
+        json!([{"id": "c", "kind": "geometry", "spec": {"text": "x", "geometry": [{"property": "w"}]}}]),
+    );
+    let stderr = String::from_utf8(fixture.cli("validate", &[]).stderr).expect("UTF8");
+    assert!(
+        stderr.contains("matches none of the allowed forms"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn rebase_anchors_moves_ranges_and_flags_edited_or_lost_anchors() {
+    let fixture = Fixture::new();
+    let player = "struct Player {\n    func play() {\n        start()\n    }\n\n    func pause() {\n        stop()\n    }\n}\n";
+    fs::write(fixture.0.join("native/Player.swift"), player).expect("player");
+    git_test(&fixture.0, &["init", "-q"]);
+    let before = commit_test(&fixture.0);
+    append_config(&fixture, &format!("[baselines.ios]\ncommit = '{before}'\n"));
+    let cite = |area: &str, index: usize, source: Value| {
+        fixture.mutate(area, |v| {
+            v[index]["platforms"]["ios"]["source"] = source;
+            v[index]["platforms"]["ios"]["tests"] = json!([]);
+        });
+    };
+    cite("reader", 0, json!(["Player.swift:L2-L4"]));
+    cite("reader", 1, json!(["Player.swift:L6-L8"]));
+    cite(
+        "search",
+        0,
+        json!(["Player.swift#Player.play", "Player.swift#Player.pause"]),
+    );
+    let edited = format!(
+        "// header\n// more\n{}",
+        player
+            .replace("stop()", "stop(fade: true)")
+            .replace("    func pause() {", "    func halt() {")
+    );
+    fs::write(fixture.0.join("native/Player.swift"), edited).expect("edit");
+    commit_test(&fixture.0);
+    let catalog = fixture.load();
+    let report = catalog
+        .rebase_anchors(&Default::default(), "ios", None, "HEAD", false, false)
+        .expect("rebase");
+    let fate = |r: &str| {
+        report
+            .moves
+            .iter()
+            .find(|m| m.reference == r)
+            .expect(r)
+            .clone()
+    };
+    assert_eq!(
+        fate("Player.swift:L2-L4").new_reference.as_deref(),
+        Some("Player.swift:L4-L6")
+    );
+    assert_eq!(
+        fate("Player.swift:L6-L8").fate,
+        concordance::AnchorFate::Changed
+    );
+    assert_eq!(
+        fate("Player.swift#Player.play").fate,
+        concordance::AnchorFate::Unchanged
+    );
+    assert_eq!(
+        fate("Player.swift#Player.pause").fate,
+        concordance::AnchorFate::Lost
+    );
+    assert!(report
+        .markdown()
+        .contains("1 moved, 1 changed (review), 1 lost"));
+    let dir = fixture.0.to_str().expect("path");
+    let output = Command::new(env!("CARGO_BIN_EXE_concordance"))
+        .args(["rebase-anchors", dir, "--to", "HEAD", "--write"])
+        .output()
+        .expect("CLI");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(fs::read_to_string(fixture.0.join("catalog/reader.yaml"))
+        .expect("area")
+        .contains("\"Player.swift:L4-L6\""));
+}
+
+#[test]
+fn flavour_platforms_inherit_records_unless_overridden() {
+    let fixture = Fixture::new();
+    let config = fs::read_to_string(fixture.0.join("catalog.toml")).expect("config");
+    fs::write(
+        fixture.0.join("catalog.toml"),
+        config.replace(
+            "android = \"native\"\n",
+            "android = \"native\"\nhorizon = { root = \"native\", inherits = \"android\" }\n",
+        ),
+    )
+    .expect("config");
+    fixture.mutate("reader", |v| {
+        v[0]["platforms"]["horizon"] = json!({"status": "missing", "gap": "No headset build"})
+    });
+    fixture.mutate("search", |v| {
+        v[0]["platforms"]["android"]["source"] = json!(["Gone.kt"])
+    });
+    let catalog = fixture.load_collect_only();
+    let open = &catalog.entries["reader.open-book"];
+    assert_eq!(
+        open.platforms["horizon"].status,
+        concordance::Status::Missing
+    );
+    // Overrides keep inherited evidence fields.
+    assert_eq!(
+        open.platforms["horizon"].source,
+        open.platforms["android"].source
+    );
+    let search = &catalog.entries["search.find-book"].platforms["horizon"];
+    assert!(search.inherited);
+    // Inherited copies are validated once, through the parent.
+    let stderr = String::from_utf8(fixture.cli("validate", &[]).stderr).expect("UTF8");
+    assert_eq!(stderr.matches("Gone.kt").count(), 1, "{stderr}");
+    let queue = success(fixture.cli("next", &["--platform", "horizon"]));
+    assert!(queue.contains("reader.open-book\tcritical\tmissing"));
+    let config = fs::read_to_string(fixture.0.join("catalog.toml")).expect("config");
+    fs::write(
+        fixture.0.join("catalog.toml"),
+        config.replace("inherits = \"android\"", "inherits = \"nowhere\""),
+    )
+    .expect("config");
+    assert!(
+        String::from_utf8_lossy(&fixture.cli("validate", &[]).stderr)
+            .contains("inherits an unknown platform")
+    );
+}

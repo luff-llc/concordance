@@ -979,3 +979,22 @@ fn review_set_edits_notes_and_manifests_record_skips_and_fixture_packs() {
         .expect("compare");
     assert!(comparison.fixture_warning.is_none());
 }
+
+#[test]
+fn motion_tokens_are_checked_against_design_tokens() {
+    let f = Fixture::new();
+    f.edit("catalog/demo.yaml", |v| {
+        v[0]["details"] = json!([
+            {"id": "settle", "kind": "motion", "spec": {"text": "Settles", "motion": {"token": "settle"}}},
+            {"id": "fold", "kind": "motion", "spec": {"text": "Folds", "motion": {"token": "Motion.fold"}}}
+        ]);
+    });
+    let stdout = success(f.cli("validate", &[]));
+    assert!(
+        stdout.contains(
+            "demo.open-screen#fold  Motion.fold: motion token is not defined in tokens.yaml"
+        ),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("#settle"));
+}

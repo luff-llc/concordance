@@ -1,6 +1,6 @@
 use crate::{fail, is_capture_key, Catalog, Entry, Result, Status};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 
 fn table(value: &str) -> String {
@@ -83,11 +83,20 @@ pub(crate) fn detail_counts<'a>(
         if record.is_some_and(|p| p.status == Status::Implemented) {
             c.implemented += 1;
         }
-        if record.is_some_and(|p| p.verified()) {
+        if record.is_some_and(|p| detail.unverified_reason(p).is_none()) {
             c.verified += 1;
         }
     }
     c
+}
+/// Details with an explicit partial or missing record on a platform.
+pub(crate) fn explicit_open_details(entry: &Entry, platform: &str) -> Vec<String> {
+    entry
+        .details
+        .iter()
+        .filter(|d| d.platforms.get(platform).is_some_and(|p| p.status.is_gap()))
+        .map(|d| d.id.clone())
+        .collect()
 }
 /// (open, total) details on a platform, or None for entries without details.
 pub(crate) fn open_details(entry: &Entry, platform: &str) -> Option<(usize, usize)> {
@@ -198,6 +207,20 @@ impl Catalog {
         }
         summary.push_str(".**");
         let has_details = self.entries.values().any(|e| !e.details.is_empty());
+        let blocked = self.blocked_entries(target);
+        let has_blockers = !self.config.blockers.is_empty() || !blocked.is_empty();
+        let blocked_cell = |entries: &[&Entry]| -> String {
+            if !has_blockers {
+                return String::new();
+            }
+            format!(
+                " {} |",
+                entries
+                    .iter()
+                    .filter(|e| blocked.contains_key(&e.id))
+                    .count()
+            )
+        };
         let detail_cell = |entries: &[&Entry]| -> String {
             if !has_details {
                 return String::new();
@@ -217,11 +240,13 @@ impl Catalog {
             format!(
                 "| Area | Entries | {bl} baseline | {tl} implemented | Verified | Partial | Missing |{}",
                 if has_na { " Not applicable |" } else { "" }
-            ) + if has_details { " Details implemented / verified / total |" } else { "" },
+            ) + if has_details { " Details implemented / verified / total |" } else { "" }
+                + if has_blockers { " Blocked |" } else { "" },
             format!(
                 "| --- | ---: | ---: | ---: | ---: | ---: | ---: |{}",
                 if has_na { " ---: |" } else { "" }
-            ) + if has_details { " ---: |" } else { "" },
+            ) + if has_details { " ---: |" } else { "" }
+                + if has_blockers { " ---: |" } else { "" },
         ];
         let link = |relative: &str| -> Result<String> {
             match &context.link_base {
@@ -256,50 +281,151 @@ impl Catalog {
                     } else {
                         String::new()
                     }
-                ) + &detail_cell(&included),
+                ) + &detail_cell(&included)
+                    + &blocked_cell(&included),
             );
         }
-        lines.extend([
-            format!(
-                "| **Total** | **{}** | **{}** | **{}** | **{}** | **{}** | **{}** |{}",
-                self.entries.len(),
-                baseline.len(),
-                totals[0],
-                totals[1],
-                totals[2],
-                totals[3],
-                if has_na {
-                    format!(" **{}** |", totals[4])
-                } else {
-                    String::new()
-                }
-            ) + &detail_cell(&baseline),
-            String::new(),
-            "## Ten highest-impact gaps".into(),
-            String::new(),
-            config.ordering_note.trim_end().into(),
-            String::new(),
-        ]);
+        lines.extend([format!(
+            "| **Total** | **{}** | **{}** | **{}** | **{}** | **{}** | **{}** |{}",
+            self.entries.len(),
+            baseline.len(),
+            totals[0],
+            totals[1],
+            totals[2],
+            totals[3],
+            if has_na {
+                format!(" **{}** |", totals[4])
+            } else {
+                String::new()
+            }
+        ) + &detail_cell(&baseline)
+            + &blocked_cell(&baseline)]);
         let mut gaps: Vec<_> = baseline
             .iter()
             .copied()
             .filter(|e| e.platforms[target].status.is_gap())
             .collect();
         gaps.sort_by_key(|e| self.gap_key(e));
-        for (index, entry) in gaps.iter().take(10).enumerate() {
-            let p = &entry.platforms[target];
-            lines.push(format!(
-                "{}. **{}** — `{}` ({}, {}): {}{}",
-                index + 1,
-                entry.title,
-                entry.id,
-                entry.impact.as_str(),
-                p.status.as_str(),
-                p.gap.as_deref().unwrap_or("No gap recorded."),
-                open_details(entry, target)
-                    .map(|(open, total)| format!(" Details: {open} of {total} open."))
-                    .unwrap_or_default()
-            ));
+        let any_blocked = gaps.iter().any(|e| blocked.contains_key(&e.id));
+        let lists: Vec<(String, Vec<&Entry>)> = if any_blocked {
+            vec![
+                (
+                    "Ten highest-impact actionable gaps".into(),
+                    gaps.iter()
+                        .copied()
+                        .filter(|e| !blocked.contains_key(&e.id))
+                        .collect(),
+                ),
+                (
+                    "Ten highest-impact blocked gaps".into(),
+                    gaps.iter()
+                        .copied()
+                        .filter(|e| blocked.contains_key(&e.id))
+                        .collect(),
+                ),
+            ]
+        } else {
+            vec![("Ten highest-impact gaps".into(), gaps.clone())]
+        };
+        for (heading, list) in lists {
+            lines.extend([
+                String::new(),
+                format!("## {heading}"),
+                String::new(),
+                config.ordering_note.trim_end().into(),
+                String::new(),
+            ]);
+            if list.is_empty() {
+                lines.push("None.".into());
+            }
+            for (index, entry) in list.iter().take(10).enumerate() {
+                let p = &entry.platforms[target];
+                lines.push(format!(
+                    "{}. **{}** — `{}` ({}, {}): {}{}{}",
+                    index + 1,
+                    entry.title,
+                    entry.id,
+                    entry.impact.as_str(),
+                    p.status.as_str(),
+                    blocked
+                        .get(&entry.id)
+                        .map(|k| format!(
+                            "Blocked by {}. ",
+                            k.iter().cloned().collect::<Vec<_>>().join(", ")
+                        ))
+                        .unwrap_or_default(),
+                    p.gap.as_deref().unwrap_or("No gap recorded."),
+                    open_details(entry, target)
+                        .map(|(open, total)| format!(" Details: {open} of {total} open."))
+                        .unwrap_or_default()
+                ));
+            }
+        }
+        if has_blockers {
+            lines.extend([
+                String::new(),
+                "## Blockers".into(),
+                String::new(),
+                format!("Ranked by the {tl} entries (directly or through a dependency) and details each open blocker holds back."),
+                String::new(),
+                "| Blocker | Title | Kind | Owner | Status | Entries | Details | Highest impact | Link |".into(),
+                "| --- | --- | --- | --- | --- | ---: | ---: | --- | --- |".into(),
+            ]);
+            let mut rows: Vec<(usize, usize, String)> = Vec::new();
+            for (key, b) in &self.config.blockers {
+                let entries: Vec<&Entry> = self
+                    .entries
+                    .values()
+                    .filter(|e| blocked.get(&e.id).is_some_and(|k| k.contains(key)))
+                    .collect();
+                let details = self
+                    .entries
+                    .values()
+                    .flat_map(|e| &e.details)
+                    .filter(|d| {
+                        d.platforms
+                            .get(target)
+                            .is_some_and(|p| p.blocked_by.contains(key))
+                    })
+                    .count();
+                let impact = entries
+                    .iter()
+                    .map(|e| e.impact)
+                    .min()
+                    .map(|i| i.as_str())
+                    .unwrap_or("—");
+                let text = |v: &Option<String>| table(v.as_deref().unwrap_or("—"));
+                rows.push((
+                    entries.len(),
+                    details,
+                    format!(
+                        "| `{key}` | {} | {} | {} | {} | {} | {details} | {impact} | {} |",
+                        table(&b.title),
+                        b.kind
+                            .map(|k| format!("{k:?}").to_lowercase())
+                            .unwrap_or_else(|| "—".into()),
+                        text(&b.owner),
+                        format!("{:?}", b.status).to_lowercase(),
+                        entries.len(),
+                        text(&b.link)
+                    ),
+                ));
+            }
+            rows.sort_by(|a, b| (b.0 + b.1).cmp(&(a.0 + a.1)).then_with(|| a.2.cmp(&b.2)));
+            if rows.is_empty() {
+                lines.push("| — | No blockers registered. | | | | 0 | 0 | | |".into());
+            }
+            lines.extend(rows.into_iter().map(|r| r.2));
+            let unknown: BTreeSet<&String> = blocked
+                .values()
+                .flatten()
+                .filter(|k| !self.config.blockers.contains_key(*k))
+                .collect();
+            for key in unknown {
+                lines.push(format!(
+                    "| `{key}` | Not registered in catalog.toml | | | | | | | |"
+                ));
+            }
         }
         for (status, heading) in [
             (Status::Missing, "Missing capabilities, by user impact"),
@@ -336,6 +462,50 @@ impl Catalog {
                     ));
                 }
             }
+        }
+        let open_work: Vec<String> = {
+            let mut implemented: Vec<&Entry> = self
+                .entries
+                .values()
+                .filter(|e| {
+                    e.platforms
+                        .get(target)
+                        .is_some_and(|p| p.status == Status::Implemented)
+                })
+                .collect();
+            implemented.sort_by_key(|e| self.gap_key(e));
+            implemented
+                .into_iter()
+                .filter_map(|e| {
+                    let p = &e.platforms[target];
+                    let open = explicit_open_details(e, target);
+                    let gap = p.gap.as_deref().filter(|g| !g.trim().is_empty());
+                    (gap.is_some() || !open.is_empty()).then(|| {
+                        format!(
+                            "| `{}` | {} | {} |",
+                            e.id,
+                            if open.is_empty() {
+                                "—".into()
+                            } else {
+                                open.join(", ")
+                            },
+                            table(gap.unwrap_or("—"))
+                        )
+                    })
+                })
+                .collect()
+        };
+        if !open_work.is_empty() {
+            lines.extend([
+                String::new(),
+                "## Implemented entries with open work".into(),
+                String::new(),
+                "An implemented record should not keep a gap or partial/missing details; `validate` warns about each.".into(),
+                String::new(),
+                "| ID | Open details | Gap |".into(),
+                "| --- | --- | --- |".into(),
+            ]);
+            lines.extend(open_work);
         }
         if has_details {
             // An implemented entry can still hide unimplemented motion, haptics or geometry.

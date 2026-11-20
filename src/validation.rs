@@ -20,6 +20,9 @@ pub struct Issue {
 pub struct ValidationReport {
     pub errors: Vec<Issue>,
     pub unchecked: Vec<Issue>,
+    /// Problems that do not fail validation unless `--strict` is given.
+    #[serde(default)]
+    pub warnings: Vec<Issue>,
 }
 impl ValidationReport {
     pub(crate) fn error(
@@ -38,9 +41,32 @@ impl ValidationReport {
             message: message.into(),
         });
     }
+    pub(crate) fn warning(
+        &mut self,
+        group: &str,
+        entry: &str,
+        platform: &str,
+        reference: &str,
+        message: &str,
+    ) {
+        self.warnings.push(Issue {
+            group: group.into(),
+            entry: entry.into(),
+            platform: platform.into(),
+            reference: reference.into(),
+            message: message.into(),
+        });
+    }
     pub fn sort(&mut self) {
         self.errors.sort();
         self.unchecked.sort();
+        self.warnings.sort();
+    }
+    /// Treat warnings as errors.
+    pub fn strict(mut self) -> Self {
+        self.errors.append(&mut self.warnings);
+        self.sort();
+        self
     }
     pub fn into_result(self) -> Result<()> {
         if self.errors.is_empty() {
@@ -71,10 +97,18 @@ impl fmt::Display for ValidationReport {
                 issue.entry, issue.platform, issue.reference, issue.message
             )?;
         }
+        for issue in &self.warnings {
+            writeln!(
+                f,
+                "warning: {} {} {}: {}",
+                issue.entry, issue.platform, issue.reference, issue.message
+            )?;
+        }
         write!(
             f,
-            "{} validation error(s); {} unchecked reference(s).",
+            "{} validation error(s); {} warning(s); {} unchecked reference(s).",
             self.errors.len(),
+            self.warnings.len(),
             self.unchecked.len()
         )
     }
@@ -145,6 +179,7 @@ impl Catalog {
         let mut out: Vec<_> = self
             .records()
             .into_iter()
+            .filter(|(_, _, record)| !record.inherited)
             .flat_map(|(label, platform, record)| {
                 evidence_refs(record).map(move |r| (label.clone(), platform, r))
             })
@@ -218,6 +253,7 @@ impl Catalog {
             .config
             .platforms
             .get(platform)
+            .map(crate::PlatformConfig::root)
             .ok_or_else(|| format!("unknown platform: {platform}"))?;
         if let Some(root) = options.roots.get(platform) {
             return Ok(Some(root.canonicalize()?));
@@ -370,6 +406,9 @@ pub(crate) fn check_platform(
     record: &Platform,
     report: &mut ValidationReport,
 ) {
+    if record.inherited {
+        return; // validated through the platform it was copied from
+    }
     let Some(v) = &record.verification else {
         return;
     };
@@ -435,25 +474,102 @@ pub(crate) fn check_entry(entry: &Entry, report: &mut ValidationReport) {
             check_platform(&label, platform, record, report);
         }
         if let Some(m) = &detail.spec.motion {
+            let numbers = m.response.is_some()
+                || m.damping.is_some()
+                || m.duration.is_some()
+                || m.bounce.is_some();
             let problem = match m.curve {
-                Curve::Spring if m.response.is_none() && m.duration.is_none() => {
-                    Some("spring motion needs response (with damping) or duration (with bounce)")
-                }
-                Curve::Spring if m.response.is_some() && m.duration.is_some() => {
-                    Some("spring motion uses response/damping or duration/bounce, not both")
-                }
-                Curve::Ease | Curve::Linear if m.duration.is_none() => {
-                    Some("ease and linear motion need a duration")
-                }
-                Curve::Ease | Curve::Linear
-                    if m.response.is_some() || m.damping.is_some() || m.bounce.is_some() =>
-                {
-                    Some("ease and linear motion take only a duration")
-                }
-                _ => None,
+                None if m.token.is_none() => Some("motion needs a curve or a token"),
+                None if numbers => Some("motion numbers need a curve"),
+                None => None,
+                Some(curve) => match curve {
+                    Curve::Spring if m.response.is_none() && m.duration.is_none() => Some(
+                        "spring motion needs response (with damping) or duration (with bounce)",
+                    ),
+                    Curve::Spring if m.response.is_some() && m.duration.is_some() => {
+                        Some("spring motion uses response/damping or duration/bounce, not both")
+                    }
+                    Curve::Ease | Curve::Linear if m.duration.is_none() => {
+                        Some("ease and linear motion need a duration")
+                    }
+                    Curve::Ease | Curve::Linear
+                        if m.response.is_some() || m.damping.is_some() || m.bounce.is_some() =>
+                    {
+                        Some("ease and linear motion take only a duration")
+                    }
+                    _ => None,
+                },
             };
             if let Some(problem) = problem {
                 report.error("details", &label, "", "spec.motion", problem);
+            }
+        }
+    }
+}
+
+impl Catalog {
+    /// Blocker references and implemented records that still carry open work.
+    pub(crate) fn check_work_state(&self, report: &mut ValidationReport) {
+        for (name, blocker) in &self.config.blockers {
+            if blocker.title.trim().is_empty() {
+                report.error("blockers", "", "", name, "blocker title must not be empty");
+            }
+        }
+        for (label, platform, record) in self.records() {
+            if record.inherited {
+                continue;
+            }
+            for key in &record.blocked_by {
+                match self.config.blockers.get(key) {
+                    None => report.error("blockers", &label, platform, key, "unknown blocker"),
+                    Some(b) if b.status == crate::BlockerStatus::Resolved => report.warning(
+                        "blockers",
+                        &label,
+                        platform,
+                        key,
+                        "blocker is resolved; revisit this record",
+                    ),
+                    Some(_) => {}
+                }
+            }
+            if !record.blocked_by.is_empty()
+                && matches!(record.status, Status::Implemented | Status::NotApplicable)
+            {
+                report.error(
+                    "blockers",
+                    &label,
+                    platform,
+                    "",
+                    &format!("blocked_by on a {} record", record.status.as_str()),
+                );
+            }
+            if record.status == Status::Implemented
+                && record.gap.as_deref().is_some_and(|g| !g.trim().is_empty())
+            {
+                report.warning(
+                    "open-work",
+                    &label,
+                    platform,
+                    "gap",
+                    "implemented record still has a gap",
+                );
+            }
+        }
+        for entry in self.entries.values() {
+            for (platform, record) in &entry.platforms {
+                if record.inherited || record.status != Status::Implemented {
+                    continue;
+                }
+                let open = crate::report::explicit_open_details(entry, platform);
+                if !open.is_empty() {
+                    report.warning(
+                        "open-work",
+                        &entry.id,
+                        platform,
+                        &open.join(", "),
+                        "implemented record has open details",
+                    );
+                }
             }
         }
     }

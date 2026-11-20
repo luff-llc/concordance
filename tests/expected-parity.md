@@ -35,6 +35,14 @@ Order: critical, high, medium, low. Within a tier, catalog priority comes first,
 | --- | --- | --- | --- |
 | critical | `reader.open-book` | Open a book | Implement the native journey. |
 
+## Implemented entries with open work
+
+An implemented record should not keep a gap or partial/missing details; `validate` warns about each.
+
+| ID | Open details | Gap |
+| --- | --- | --- |
+| `reader.native-menu` | — | Implement the native journey. |
+
 ## Claimed shipped but unverified
 
 1 of 1 Android implemented entries (all entries, including any outside the iOS baseline) have no independent verification (a reviewer other than the implementer, with captures or journeys).

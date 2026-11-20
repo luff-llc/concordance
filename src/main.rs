@@ -25,6 +25,9 @@ enum Command {
         roots: Roots,
         #[arg(long)]
         repo: Option<PathBuf>,
+        /// Fail on warnings (resolved blockers, implemented records with open work).
+        #[arg(long)]
+        strict: bool,
     },
     /// Generate the configured baseline-to-target parity report.
     Report {
@@ -88,6 +91,52 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Set or clear a platform record's status and bookkeeping in place (never verification).
+    Set {
+        dir: PathBuf,
+        /// `entry.id`, `entry.id#detail` or `entry.id/detail`.
+        target: String,
+        #[arg(long)]
+        platform: String,
+        #[arg(long, value_enum)]
+        status: Option<StatusArg>,
+        #[arg(long, alias = "by")]
+        implemented_by: Option<String>,
+        #[arg(long)]
+        gap: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        /// Comma-separated blocker keys.
+        #[arg(long, value_delimiter = ',')]
+        blocked_by: Option<Vec<String>>,
+        /// Field to remove: gap, notes, implemented_by, blocked_by, verification, source, tests.
+        #[arg(long)]
+        clear: Vec<String>,
+        /// Allow rewriting a file whose layout is not canonical (comments are lost).
+        #[arg(long)]
+        allow_reformat: bool,
+    },
+    /// Re-locate line and symbol anchors from the baseline pin to a new commit.
+    RebaseAnchors {
+        dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
+        #[arg(long)]
+        to: String,
+        /// Starting commit (default: the platform's baseline pin).
+        #[arg(long)]
+        from: Option<String>,
+        /// Platform (default: the report baseline).
+        #[arg(long)]
+        platform: Option<String>,
+        /// Rewrite moved references in the area files.
+        #[arg(long)]
+        write: bool,
+        #[arg(long)]
+        allow_reformat: bool,
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: DriftFormat,
+    },
     /// Edit reviewer notes (review.json) without the browser.
     Review {
         #[command(subcommand)]
@@ -134,6 +183,9 @@ enum Command {
         /// Also select implemented entries with open details and print one row per open detail.
         #[arg(long)]
         details: bool,
+        /// Include work held back by open blockers (marked in the title column).
+        #[arg(long)]
+        include_blocked: bool,
     },
     /// List entries with changed baseline evidence and uncatalogued source changes.
     Drift {
@@ -189,6 +241,13 @@ enum ReviewAction {
         #[arg(long)]
         baseline_commit: Option<String>,
     },
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum StatusArg {
+    Implemented,
+    Partial,
+    Missing,
+    NotApplicable,
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum VerdictArg {
@@ -271,7 +330,12 @@ impl From<Native> for Language {
 }
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Validate { dir, repo, roots } => {
+        Command::Validate {
+            dir,
+            repo,
+            roots,
+            strict,
+        } => {
             let (catalog, mut report) = Catalog::load_collect(&dir)?;
             // Validation accumulates missing roots per reference, rather than failing in option parsing.
             let options = RootOptions {
@@ -285,7 +349,10 @@ fn run(cli: Cli) -> Result<()> {
             report.unchecked.extend(evidence.unchecked);
             if dir.join("tokens.yaml").exists() || dir.join("screens").exists() {
                 match UiCatalog::load(&dir) {
-                    Ok(ui) => report.errors.extend(ui.verification_issues()),
+                    Ok(ui) => {
+                        report.errors.extend(ui.verification_issues());
+                        report.warnings.extend(ui.motion_token_warnings());
+                    }
                     Err(error) => report.errors.push(concordance::Issue {
                         group: "ui".into(),
                         entry: String::new(),
@@ -296,6 +363,9 @@ fn run(cli: Cli) -> Result<()> {
                 }
             }
             report.sort();
+            if strict {
+                report = report.strict();
+            }
             let failed = !report.errors.is_empty();
             if failed {
                 return Err(Box::new(report));
@@ -419,6 +489,78 @@ fn run(cli: Cli) -> Result<()> {
             if check && comparison.failed() {
                 return Err(
                     "UI comparison failed: structural or token failures; see report".into(),
+                );
+            }
+        }
+        Command::RebaseAnchors {
+            dir,
+            roots,
+            to,
+            from,
+            platform,
+            write,
+            allow_reformat,
+            format,
+        } => {
+            let catalog = Catalog::load(&dir)?;
+            let options = roots.options(&catalog)?;
+            let platform = platform.unwrap_or_else(|| catalog.config.report.baseline.clone());
+            let report = catalog.rebase_anchors(
+                &options,
+                &platform,
+                from.as_deref(),
+                &to,
+                write,
+                allow_reformat,
+            )?;
+            match format {
+                DriftFormat::Markdown => print!("{}", report.markdown()),
+                DriftFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+            }
+        }
+        Command::Set {
+            dir,
+            target,
+            platform,
+            status,
+            implemented_by,
+            gap,
+            notes,
+            blocked_by,
+            clear,
+            allow_reformat,
+        } => {
+            use concordance::Status;
+            let request = concordance::SetRequest {
+                target: target.clone(),
+                platform,
+                status: status.map(|s| match s {
+                    StatusArg::Implemented => Status::Implemented,
+                    StatusArg::Partial => Status::Partial,
+                    StatusArg::Missing => Status::Missing,
+                    StatusArg::NotApplicable => Status::NotApplicable,
+                }),
+                implemented_by,
+                gap,
+                notes,
+                blocked_by,
+                clear,
+                allow_reformat,
+            };
+            let outcome = Catalog::set_record(&dir, &request)?;
+            println!(
+                "{} {}",
+                if outcome.changed {
+                    "Updated"
+                } else {
+                    "Unchanged:"
+                },
+                outcome.file.display()
+            );
+            for warning in outcome.warnings {
+                eprintln!(
+                    "warning: {} {} {}: {}",
+                    warning.entry, warning.platform, warning.reference, warning.message
                 );
             }
         }
@@ -548,23 +690,56 @@ fn run(cli: Cli) -> Result<()> {
             area,
             limit,
             details,
+            include_blocked,
         } => {
             let catalog = Catalog::load(dir)?;
             roots.options(&catalog)?;
-            for entry in catalog.next_with(&platform, area.as_deref(), limit, details)? {
+            let blocked = catalog.blocked_entries(&platform);
+            let mark = |keys: Option<&std::collections::BTreeSet<String>>| -> String {
+                keys.filter(|k| !k.is_empty())
+                    .map(|k| {
+                        format!(
+                            " [blocked: {}]",
+                            k.iter().cloned().collect::<Vec<_>>().join(", ")
+                        )
+                    })
+                    .unwrap_or_default()
+            };
+            for entry in catalog.next_filtered(
+                &platform,
+                area.as_deref(),
+                limit,
+                details,
+                include_blocked,
+            )? {
                 println!(
-                    "{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}{}",
                     entry.id,
                     entry.impact.as_str(),
                     entry.platforms[&platform].status.as_str(),
-                    entry.title
+                    entry.title,
+                    mark(blocked.get(&entry.id))
                 );
                 if details {
                     // Same four columns: entry#detail, detail:kind, status, spec with numbers.
                     for detail in catalog.open_details(entry, &platform) {
+                        let keys: std::collections::BTreeSet<String> = detail
+                            .platforms
+                            .get(&platform)
+                            .map(|p| {
+                                catalog
+                                    .open_blockers(p)
+                                    .into_iter()
+                                    .map(str::to_owned)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if !include_blocked && !keys.is_empty() {
+                            continue;
+                        }
                         let numbers = detail.spec.numbers();
                         println!(
-                            "{}#{}\tdetail:{}\t{}\t{}{}",
+                            "{}#{}\tdetail:{}\t{}\t{}{}{}",
                             entry.id,
                             detail.id,
                             detail.kind.as_str(),
@@ -578,7 +753,8 @@ fn run(cli: Cli) -> Result<()> {
                                 String::new()
                             } else {
                                 format!(" [{numbers}]")
-                            }
+                            },
+                            mark(Some(&keys))
                         );
                     }
                 }
