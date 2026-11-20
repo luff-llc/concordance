@@ -265,6 +265,166 @@
         },
         "notes": {
           "$ref": "#/$defs/texts"
+        },
+        "details": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/detail"
+          }
+        }
+      }
+    },
+    "slug": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "number": {
+      "type": "number"
+    },
+    "detail": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A measurable detail of an entry, referenced as entry-id#detail-id.",
+      "required": [
+        "id",
+        "kind",
+        "spec"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/slug"
+        },
+        "kind": {
+          "enum": [
+            "motion",
+            "haptic",
+            "gesture",
+            "geometry",
+            "copy",
+            "state",
+            "accessibility",
+            "layout",
+            "other"
+          ]
+        },
+        "spec": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "text"
+          ],
+          "properties": {
+            "text": {
+              "$ref": "#/$defs/text"
+            },
+            "motion": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "curve"
+              ],
+              "properties": {
+                "curve": {
+                  "enum": [
+                    "spring",
+                    "ease",
+                    "linear"
+                  ]
+                },
+                "response": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "damping": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "duration": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "bounce": {
+                  "type": "number",
+                  "minimum": -1,
+                  "maximum": 1
+                }
+              }
+            },
+            "haptic": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "$ref": "#/$defs/text"
+                }
+              }
+            },
+            "gesture": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind"
+              ],
+              "properties": {
+                "kind": {
+                  "$ref": "#/$defs/text"
+                },
+                "threshold": {
+                  "$ref": "#/$defs/number"
+                },
+                "unit": {
+                  "$ref": "#/$defs/text"
+                }
+              }
+            },
+            "geometry": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "property",
+                "value",
+                "unit"
+              ],
+              "properties": {
+                "property": {
+                  "$ref": "#/$defs/text"
+                },
+                "value": {
+                  "$ref": "#/$defs/number"
+                },
+                "unit": {
+                  "$ref": "#/$defs/text"
+                }
+              }
+            },
+            "copy": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "text"
+              ],
+              "properties": {
+                "text": {
+                  "$ref": "#/$defs/text"
+                },
+                "locale": {
+                  "$ref": "#/$defs/text"
+                }
+              }
+            }
+          }
+        },
+        "baseline": {
+          "$ref": "#/$defs/texts"
+        },
+        "platforms": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/platform"
+          }
         }
       }
     }

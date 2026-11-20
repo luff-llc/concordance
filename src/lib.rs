@@ -1,10 +1,12 @@
 //! Product behavior catalogs shared by native implementations and their tests.
 mod drift;
+mod evidence;
 mod generate;
 mod model;
 mod report;
 mod validation;
 pub use drift::*;
+pub use evidence::{split_anchor, Anchor};
 pub use report::{CaptureState, ReportContext};
 pub use validation::*;
 pub mod schema;
@@ -194,11 +196,22 @@ impl Catalog {
                     Err(_) => continue,
                 };
                 validation::check_entry(&entry, &mut report);
-                for platform in entry.platforms.keys() {
+                let id = &entry.id;
+                let detail_platforms = entry.details.iter().flat_map(|d| {
+                    d.platforms
+                        .keys()
+                        .map(move |p| (format!("{id}#{}", d.id), p))
+                });
+                for (label, platform) in entry
+                    .platforms
+                    .keys()
+                    .map(|p| (entry.id.clone(), p))
+                    .chain(detail_platforms)
+                {
                     if !catalog.config.platforms.contains_key(platform) {
                         report.error(
                             "identity",
-                            &entry.id,
+                            &label,
                             platform,
                             "",
                             "platform has no configured repo root",
@@ -382,6 +395,26 @@ impl Catalog {
     /// Missing/partial work in dependency order, ranked by impact among ready items.
     /// An area filter includes unfinished prerequisites from other areas.
     pub fn next(&self, platform: &str, area: Option<&str>, limit: usize) -> Result<Vec<&Entry>> {
+        self.next_with(platform, area, limit, false)
+    }
+
+    /// Details of an entry that are missing, partial or unrecorded on a platform.
+    pub fn open_details<'a>(&self, entry: &'a Entry, platform: &str) -> Vec<&'a Detail> {
+        entry
+            .details
+            .iter()
+            .filter(|d| d.platforms.get(platform).is_none_or(|p| p.status.is_gap()))
+            .collect()
+    }
+
+    /// Like `next`; with `details`, implemented entries with open details are also selected.
+    pub fn next_with(
+        &self,
+        platform: &str,
+        area: Option<&str>,
+        limit: usize,
+        details: bool,
+    ) -> Result<Vec<&Entry>> {
         if !self.config.platforms.contains_key(platform) {
             return fail(format!("unknown platform: {platform}"));
         }
@@ -394,7 +427,12 @@ impl Catalog {
             .values()
             .filter(|e| {
                 area.is_none_or(|a| self.areas[&e.id] == a)
-                    && e.platforms.get(platform).is_some_and(|p| p.status.is_gap())
+                    && e.platforms.get(platform).is_some_and(|p| {
+                        p.status.is_gap()
+                            || (details
+                                && p.status == Status::Shipped
+                                && !self.open_details(e, platform).is_empty())
+                    })
             })
             .map(|e| e.id.clone())
             .collect();
@@ -409,7 +447,14 @@ impl Catalog {
                 return fail(format!("{id}: no status for dependency on {platform}"));
             }
         }
-        selected.retain(|id| self.entries[id].platforms[platform].status.is_gap());
+        selected.retain(|id| {
+            let entry = &self.entries[id];
+            let status = entry.platforms[platform].status;
+            status.is_gap()
+                || (details
+                    && status == Status::Shipped
+                    && !self.open_details(entry, platform).is_empty())
+        });
         Ok(self
             .dependency_order(Some(&selected))?
             .into_iter()
@@ -419,6 +464,11 @@ impl Catalog {
     }
 
     pub fn brief(&self, id: &str) -> Result<String> {
+        self.brief_with(id, false)
+    }
+
+    /// An implementation brief; with `details`, every detail item with its numbers and status.
+    pub fn brief_with(&self, id: &str, details: bool) -> Result<String> {
         let entry = self.entry(id)?;
         let mut lines = vec![
             format!("# {} — `{}`", entry.title, entry.id),
@@ -523,6 +573,50 @@ impl Catalog {
         );
         section(&mut lines, "Design", &entry.design);
         section(&mut lines, "Notes", &entry.notes);
+        if details {
+            lines.extend([String::new(), "## Details".into()]);
+            if entry.details.is_empty() {
+                lines.push("None recorded.".into());
+            }
+            for detail in &entry.details {
+                lines.push(format!(
+                    "- `{}#{}` ({}): {}",
+                    entry.id,
+                    detail.id,
+                    detail.kind.as_str(),
+                    detail.spec.text
+                ));
+                let numbers = detail.spec.numbers();
+                if !numbers.is_empty() {
+                    lines.push(format!("  - Spec: {numbers}"));
+                }
+                if !detail.baseline.is_empty() {
+                    lines.push(format!(
+                        "  - Baseline ({}): {}",
+                        self.config.report.baseline,
+                        detail.baseline.join(", ")
+                    ));
+                }
+                if detail.platforms.is_empty() {
+                    lines.push("  - Status: none recorded".into());
+                }
+                for (platform, record) in &detail.platforms {
+                    lines.push(format!(
+                        "  - {platform}: {}; {}{}",
+                        record.status.as_str(),
+                        verification_line(record),
+                        record
+                            .gap
+                            .as_ref()
+                            .map(|g| format!(". Gap: {g}"))
+                            .unwrap_or_default()
+                    ));
+                    for reference in record.source.iter().chain(&record.tests) {
+                        lines.push(format!("    - {reference}"));
+                    }
+                }
+            }
+        }
         Ok(lines.join("\n") + "\n")
     }
 }
@@ -559,5 +653,8 @@ fn safe_area(area: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 fn is_test_path(reference: &str) -> bool {
-    reference.contains(['/', '\\', '#']) || Path::new(reference).extension().is_some()
+    reference.contains(['/', '\\', '#'])
+        || Path::new(evidence::split_anchor(reference).0)
+            .extension()
+            .is_some()
 }

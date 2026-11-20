@@ -806,3 +806,80 @@ fn verification_is_derived_from_independent_evidence() {
         assert!(stderr.contains(expected), "missing {expected}: {stderr}");
     }
 }
+
+#[test]
+fn detail_items_carry_numbers_status_and_baseline_evidence() {
+    let fixture = Fixture::new();
+    let details = |extra: Value| {
+        fixture.mutate("reader", |v| {
+            let mut items = vec![
+                json!({
+                    "id": "open-spring",
+                    "kind": "motion",
+                    "spec": {"text": "Menu opens with a settling spring", "motion": {"curve": "spring", "response": 0.4, "damping": 0.8}},
+                    "baseline": ["Reader.swift:1"],
+                    "platforms": {"android": {"status": "missing", "gap": "Uses a tween"}}
+                }),
+                json!({
+                    "id": "tap-haptic",
+                    "kind": "haptic",
+                    "spec": {"text": "Light impact on open", "haptic": {"kind": "light-impact"}},
+                    "baseline": ["Reader.swift#Reader"],
+                    "platforms": {"android": {"status": "shipped", "implemented_by": "sol",
+                        "verification": {"by": "agy", "at": "2026-11-20", "journeys": ["ReaderTests.swift#ReaderTests.testOpen"]}}}
+                }),
+            ];
+            if !extra.is_null() {
+                items.push(extra);
+            }
+            v[1]["details"] = json!(items);
+        });
+    };
+    details(Value::Null);
+    success(fixture.cli("validate", &[]));
+    let catalog = fixture.load();
+    let report = catalog.report().expect("report");
+    assert!(report.contains("Details implemented / verified / total"));
+    assert!(report.contains("## Detail gaps in implemented entries"));
+    assert!(report.contains(
+        "| `reader.native-menu#open-spring` | motion | missing | Menu opens with a settling spring (motion spring response 0.4 damping 0.8) |"
+    ));
+    assert!(!report.contains("reader.native-menu#tap-haptic"));
+
+    // Briefs and the work queue expose the numbers to implementing agents.
+    let brief = success(fixture.cli(
+        "entry",
+        &["reader.native-menu", "--format", "brief", "--details"],
+    ));
+    assert!(brief.contains("## Details"));
+    assert!(brief.contains("Spec: motion spring response 0.4 damping 0.8"));
+    assert!(brief.contains("Baseline (ios): Reader.swift:1"));
+    assert!(brief.contains("android: shipped; verified by agy"));
+    let plain = success(fixture.cli("entry", &["reader.native-menu", "--format", "brief"]));
+    assert!(!plain.contains("## Details"));
+    let queue = success(fixture.cli("next", &["--platform", "android", "--details"]));
+    assert!(queue.contains("reader.native-menu\tmedium\tshipped"));
+    assert!(queue.contains(
+        "reader.native-menu#open-spring\tdetail:motion\tmissing\tMenu opens with a settling spring [motion spring response 0.4 damping 0.8]"
+    ));
+    let queue = success(fixture.cli("next", &["--platform", "android"]));
+    assert!(!queue.contains("reader.native-menu"));
+
+    // Invalid details are collected with the entry#detail label.
+    details(
+        json!({"id": "open-spring", "kind": "motion", "baseline": ["Gone.swift:3"],
+        "spec": {"text": "Duplicate", "motion": {"curve": "ease", "response": 0.3}}}),
+    );
+    let stderr = String::from_utf8(fixture.cli("validate", &[]).stderr).expect("UTF8");
+    for expected in [
+        "duplicate detail ID",
+        "ease and linear motion need a duration",
+        "reader.native-menu#open-spring ios Gone.swift:3: missing evidence",
+    ] {
+        assert!(stderr.contains(expected), "missing {expected}: {stderr}");
+    }
+    details(json!({"id": "Bad_Id", "kind": "sound", "spec": {"text": "x"}}));
+    let stderr = String::from_utf8(fixture.cli("validate", &[]).stderr).expect("UTF8");
+    assert!(stderr.contains("invalid slug"), "{stderr}");
+    assert!(stderr.contains("invalid value \"sound\""), "{stderr}");
+}

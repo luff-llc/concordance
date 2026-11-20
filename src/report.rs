@@ -22,6 +22,47 @@ pub enum CaptureState {
     Missing(String),
 }
 
+/// Detail tallies for one platform.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DetailCounts {
+    pub total: usize,
+    pub implemented: usize,
+    pub verified: usize,
+}
+pub(crate) fn detail_counts<'a>(
+    entries: impl IntoIterator<Item = &'a Entry>,
+    platform: &str,
+) -> DetailCounts {
+    let mut c = DetailCounts::default();
+    for detail in entries.into_iter().flat_map(|e| &e.details) {
+        let record = detail.platforms.get(platform);
+        if record.is_some_and(|p| p.status == Status::NotApplicable) {
+            continue;
+        }
+        c.total += 1;
+        if record.is_some_and(|p| p.status == Status::Shipped) {
+            c.implemented += 1;
+        }
+        if record.is_some_and(|p| p.verified()) {
+            c.verified += 1;
+        }
+    }
+    c
+}
+/// (open, total) details on a platform, or None for entries without details.
+pub(crate) fn open_details(entry: &Entry, platform: &str) -> Option<(usize, usize)> {
+    let c = detail_counts([entry], platform);
+    (c.total > 0).then_some((c.total - c.implemented, c.total))
+}
+pub(crate) fn detail_summary(detail: &crate::Detail) -> String {
+    let numbers = detail.spec.numbers();
+    if numbers.is_empty() {
+        detail.spec.text.clone()
+    } else {
+        format!("{} ({numbers})", detail.spec.text)
+    }
+}
+
 impl Catalog {
     /// Why an entry's platform record is not verified (including capture coverage), if it is not.
     pub fn verification_gap(
@@ -109,6 +150,14 @@ impl Catalog {
             summary.push_str(&format!(", {} not-applicable", totals[4]));
         }
         summary.push_str(".**");
+        let has_details = self.entries.values().any(|e| !e.details.is_empty());
+        let detail_cell = |entries: &[&Entry]| -> String {
+            if !has_details {
+                return String::new();
+            }
+            let c = detail_counts(entries.iter().copied(), target);
+            format!(" {} / {} / {} |", c.implemented, c.verified, c.total)
+        };
         let mut lines = vec![
             format!("# {}", config.title),
             String::new(),
@@ -121,11 +170,11 @@ impl Catalog {
             format!(
                 "| Area | Entries | {bl} baseline | {tl} implemented | Verified | Partial | Missing |{}",
                 if has_na { " Not applicable |" } else { "" }
-            ),
+            ) + if has_details { " Details implemented / verified / total |" } else { "" },
             format!(
                 "| --- | ---: | ---: | ---: | ---: | ---: | ---: |{}",
                 if has_na { " ---: |" } else { "" }
-            ),
+            ) + if has_details { " ---: |" } else { "" },
         ];
         for (area, file) in &self.area_files {
             let group: Vec<_> = self
@@ -139,20 +188,22 @@ impl Catalog {
                 .filter(|e| e.platforms[base].status == Status::Shipped)
                 .collect();
             let c = counts(&included);
-            lines.push(format!(
-                "| [{area}]({file}) | {} | {} | {} | {} | {} | {} |{}",
-                group.len(),
-                included.len(),
-                c[0],
-                c[1],
-                c[2],
-                c[3],
-                if has_na {
-                    format!(" {} |", c[4])
-                } else {
-                    String::new()
-                }
-            ));
+            lines.push(
+                format!(
+                    "| [{area}]({file}) | {} | {} | {} | {} | {} | {} |{}",
+                    group.len(),
+                    included.len(),
+                    c[0],
+                    c[1],
+                    c[2],
+                    c[3],
+                    if has_na {
+                        format!(" {} |", c[4])
+                    } else {
+                        String::new()
+                    }
+                ) + &detail_cell(&included),
+            );
         }
         lines.extend([
             format!(
@@ -168,7 +219,7 @@ impl Catalog {
                 } else {
                     String::new()
                 }
-            ),
+            ) + &detail_cell(&baseline),
             String::new(),
             "## Ten highest-impact gaps".into(),
             String::new(),
@@ -184,13 +235,16 @@ impl Catalog {
         for (index, entry) in gaps.iter().take(10).enumerate() {
             let p = &entry.platforms[target];
             lines.push(format!(
-                "{}. **{}** — `{}` ({}, {}): {}",
+                "{}. **{}** — `{}` ({}, {}): {}{}",
                 index + 1,
                 entry.title,
                 entry.id,
                 entry.impact.as_str(),
                 p.status.as_str(),
-                p.gap.as_deref().unwrap_or("No gap recorded.")
+                p.gap.as_deref().unwrap_or("No gap recorded."),
+                open_details(entry, target)
+                    .map(|(open, total)| format!(" Details: {open} of {total} open."))
+                    .unwrap_or_default()
             ));
         }
         for (status, heading) in [
@@ -201,20 +255,79 @@ impl Catalog {
                 String::new(),
                 format!("## {heading}"),
                 String::new(),
-                "| Impact | ID | Capability | Gap |".into(),
-                "| --- | --- | --- | --- |".into(),
+                format!(
+                    "| Impact | ID | Capability | Gap |{}",
+                    if has_details { " Open details |" } else { "" }
+                ),
+                format!(
+                    "| --- | --- | --- | --- |{}",
+                    if has_details { " ---: |" } else { "" }
+                ),
             ]);
             for entry in &gaps {
                 let p = &entry.platforms[target];
                 if p.status == status {
                     lines.push(format!(
-                        "| {} | `{}` | {} | {} |",
+                        "| {} | `{}` | {} | {} |{}",
                         entry.impact.as_str(),
                         entry.id,
                         table(&entry.title),
-                        table(p.gap.as_deref().unwrap_or("No gap recorded."))
+                        table(p.gap.as_deref().unwrap_or("No gap recorded.")),
+                        if has_details {
+                            let (open, total) = open_details(entry, target).unwrap_or((0, 0));
+                            format!(" {open} / {total} |")
+                        } else {
+                            String::new()
+                        }
                     ));
                 }
+            }
+        }
+        if has_details {
+            // An implemented entry can still hide unimplemented motion, haptics or geometry.
+            lines.extend([
+                String::new(),
+                "## Detail gaps in implemented entries".into(),
+                String::new(),
+            ]);
+            let mut rows = Vec::new();
+            let mut implemented: Vec<_> = self
+                .entries
+                .values()
+                .filter(|e| {
+                    e.platforms
+                        .get(target)
+                        .is_some_and(|p| p.status == Status::Shipped)
+                })
+                .collect();
+            implemented.sort_by_key(|e| self.gap_key(e));
+            for entry in implemented {
+                for detail in &entry.details {
+                    let status = detail
+                        .platforms
+                        .get(target)
+                        .map(|p| p.status.as_str())
+                        .unwrap_or("unrecorded");
+                    if matches!(status, "shipped" | "not-applicable") {
+                        continue;
+                    }
+                    rows.push(format!(
+                        "| `{}#{}` | {} | {status} | {} |",
+                        entry.id,
+                        detail.id,
+                        detail.kind.as_str(),
+                        table(&detail_summary(detail))
+                    ));
+                }
+            }
+            if rows.is_empty() {
+                lines.push("None.".into());
+            } else {
+                lines.extend([
+                    "| Detail | Kind | Status | Spec |".into(),
+                    "| --- | --- | --- | --- |".into(),
+                ]);
+                lines.extend(rows);
             }
         }
         let claimed: Vec<_> = self

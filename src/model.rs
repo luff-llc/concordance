@@ -162,6 +162,174 @@ pub struct Entry {
     pub acceptance: Vec<Acceptance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// Measurable details (motion, haptics, geometry, copy...) tracked per platform.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<Detail>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DetailKind {
+    Motion,
+    Haptic,
+    Gesture,
+    Geometry,
+    Copy,
+    State,
+    Accessibility,
+    Layout,
+    Other,
+}
+impl DetailKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Motion => "motion",
+            Self::Haptic => "haptic",
+            Self::Gesture => "gesture",
+            Self::Geometry => "geometry",
+            Self::Copy => "copy",
+            Self::State => "state",
+            Self::Accessibility => "accessibility",
+            Self::Layout => "layout",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// One measurable detail of an entry, with baseline evidence and per-platform status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Detail {
+    /// Entry-scoped slug; referenced as `entry.id#detail-id`.
+    pub id: String,
+    pub kind: DetailKind,
+    pub spec: DetailSpec,
+    /// Evidence on the report baseline platform, usually `path:line` or `path#Symbol`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub baseline: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub platforms: BTreeMap<String, Platform>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DetailSpec {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion: Option<MotionSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub haptic: Option<HapticSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gesture: Option<GestureSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<GeometrySpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy: Option<CopySpec>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Curve {
+    Spring,
+    Ease,
+    Linear,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MotionSpec {
+    pub curve: Curve,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damping: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounce: Option<f64>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HapticSpec {
+    pub kind: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GestureSpec {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeometrySpec {
+    pub property: String,
+    pub value: f64,
+    pub unit: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CopySpec {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+}
+fn number(value: f64) -> String {
+    format!("{value}")
+}
+impl DetailSpec {
+    /// The structured numbers as one compact line, for briefs and work queues.
+    pub fn numbers(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(m) = &self.motion {
+            let mut p = vec![format!(
+                "motion {}",
+                match m.curve {
+                    Curve::Spring => "spring",
+                    Curve::Ease => "ease",
+                    Curve::Linear => "linear",
+                }
+            )];
+            for (name, value) in [
+                ("response", m.response),
+                ("damping", m.damping),
+                ("duration", m.duration),
+                ("bounce", m.bounce),
+            ] {
+                if let Some(v) = value {
+                    p.push(format!("{name} {}", number(v)));
+                }
+            }
+            parts.push(p.join(" "));
+        }
+        if let Some(h) = &self.haptic {
+            parts.push(format!("haptic {}", h.kind));
+        }
+        if let Some(g) = &self.gesture {
+            let mut text = format!("gesture {}", g.kind);
+            if let Some(t) = g.threshold {
+                text.push_str(&format!(
+                    " threshold {}{}",
+                    number(t),
+                    g.unit.as_deref().unwrap_or("")
+                ));
+            }
+            parts.push(text);
+        }
+        if let Some(g) = &self.geometry {
+            parts.push(format!("{} = {}{}", g.property, number(g.value), g.unit));
+        }
+        if let Some(c) = &self.copy {
+            parts.push(format!(
+                "copy {:?}{}",
+                c.text,
+                c.locale
+                    .as_ref()
+                    .map(|l| format!(" ({l})"))
+                    .unwrap_or_default()
+            ));
+        }
+        parts.join("; ")
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

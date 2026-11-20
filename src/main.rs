@@ -94,6 +94,9 @@ enum Command {
         id: String,
         #[arg(long, value_enum, default_value = "json")]
         format: Format,
+        /// Include detail items (numbers, baseline evidence, per-platform status) in briefs.
+        #[arg(long)]
+        details: bool,
     },
     /// Pull missing/partial work, prerequisites first, then highest impact.
     Next {
@@ -106,6 +109,9 @@ enum Command {
         area: Option<String>,
         #[arg(long, default_value_t = 10)]
         limit: usize,
+        /// Also select implemented entries with open details and print one row per open detail.
+        #[arg(long)]
+        details: bool,
     },
     /// List entries with changed baseline evidence and uncatalogued source changes.
     Drift {
@@ -391,13 +397,14 @@ fn run(cli: Cli) -> Result<()> {
             id,
             format,
             roots,
+            details,
         } => {
             let catalog = Catalog::load(dir)?;
             roots.options(&catalog)?;
             match format {
                 Format::Yaml => print!("{}", serde_yaml::to_string(catalog.entry(&id)?)?),
                 Format::Json => println!("{}", serde_json::to_string_pretty(catalog.entry(&id)?)?),
-                Format::Brief => print!("{}", catalog.brief(&id)?),
+                Format::Brief => print!("{}", catalog.brief_with(&id, details)?),
             }
         }
         Command::Next {
@@ -406,10 +413,11 @@ fn run(cli: Cli) -> Result<()> {
             platform,
             area,
             limit,
+            details,
         } => {
             let catalog = Catalog::load(dir)?;
             roots.options(&catalog)?;
-            for entry in catalog.next(&platform, area.as_deref(), limit)? {
+            for entry in catalog.next_with(&platform, area.as_deref(), limit, details)? {
                 println!(
                     "{}\t{}\t{}\t{}",
                     entry.id,
@@ -417,6 +425,29 @@ fn run(cli: Cli) -> Result<()> {
                     entry.platforms[&platform].status.as_str(),
                     entry.title
                 );
+                if details {
+                    // Same four columns: entry#detail, detail:kind, status, spec with numbers.
+                    for detail in catalog.open_details(entry, &platform) {
+                        let numbers = detail.spec.numbers();
+                        println!(
+                            "{}#{}\tdetail:{}\t{}\t{}{}",
+                            entry.id,
+                            detail.id,
+                            detail.kind.as_str(),
+                            detail
+                                .platforms
+                                .get(&platform)
+                                .map(|p| p.status.as_str())
+                                .unwrap_or("unrecorded"),
+                            detail.spec.text,
+                            if numbers.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" [{numbers}]")
+                            }
+                        );
+                    }
+                }
             }
         }
         Command::Ids {

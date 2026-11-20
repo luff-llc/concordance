@@ -1,5 +1,6 @@
 use crate::{
-    is_capture_key, is_test_path, safe_relative, schema, Catalog, Entry, Platform, Result, Status,
+    is_capture_key, is_test_path, safe_relative, schema, Catalog, Curve, Entry, Platform, Result,
+    Status,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -125,6 +126,36 @@ impl Catalog {
             for (platform, record) in &entry.platforms {
                 out.push((entry.id.clone(), platform.as_str(), record));
             }
+            for detail in &entry.details {
+                for (platform, record) in &detail.platforms {
+                    out.push((
+                        format!("{}#{}", entry.id, detail.id),
+                        platform.as_str(),
+                        record,
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    /// Every file-based evidence reference: (label, platform, reference).
+    /// Detail baseline evidence belongs to the report baseline platform.
+    pub fn evidence_items(&self) -> Vec<(String, &str, &String)> {
+        let mut out: Vec<_> = self
+            .records()
+            .into_iter()
+            .flat_map(|(label, platform, record)| {
+                evidence_refs(record).map(move |r| (label.clone(), platform, r))
+            })
+            .collect();
+        let baseline = self.config.report.baseline.as_str();
+        for entry in self.entries.values() {
+            for detail in &entry.details {
+                for reference in &detail.baseline {
+                    out.push((format!("{}#{}", entry.id, detail.id), baseline, reference));
+                }
+            }
         }
         out
     }
@@ -168,10 +199,7 @@ impl Catalog {
         platform: &str,
         reference: &'a str,
     ) -> Result<&'a str> {
-        let path = reference
-            .split_once('#')
-            .map(|(p, _)| p)
-            .unwrap_or(reference);
+        let path = crate::split_anchor(reference).0;
         let path = match self.config.path_prefixes.get(platform) {
             Some(prefix) => path
                 .strip_prefix(prefix)
@@ -233,10 +261,9 @@ impl Catalog {
         for (label, platform, record) in self.records() {
             self.check_capture_files(&label, platform, record, repo.as_deref(), &mut report);
         }
-        for (label, platform, evidence) in self.records() {
-            let entry_id = label;
+        for (entry_id, platform, reference) in self.evidence_items() {
             {
-                for reference in evidence_refs(evidence) {
+                {
                     let relative = match self.evidence_relative(platform, reference) {
                         Ok(path) => path,
                         Err(error) => {
@@ -388,5 +415,37 @@ pub(crate) fn check_platform(
 pub(crate) fn check_entry(entry: &Entry, report: &mut ValidationReport) {
     for (platform, record) in &entry.platforms {
         check_platform(&entry.id, platform, record, report);
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for detail in &entry.details {
+        let label = format!("{}#{}", entry.id, detail.id);
+        if !seen.insert(detail.id.as_str()) {
+            report.error("details", &label, "", "", "duplicate detail ID");
+        }
+        for (platform, record) in &detail.platforms {
+            check_platform(&label, platform, record, report);
+        }
+        if let Some(m) = &detail.spec.motion {
+            let problem = match m.curve {
+                Curve::Spring if m.response.is_none() && m.duration.is_none() => {
+                    Some("spring motion needs response (with damping) or duration (with bounce)")
+                }
+                Curve::Spring if m.response.is_some() && m.duration.is_some() => {
+                    Some("spring motion uses response/damping or duration/bounce, not both")
+                }
+                Curve::Ease | Curve::Linear if m.duration.is_none() => {
+                    Some("ease and linear motion need a duration")
+                }
+                Curve::Ease | Curve::Linear
+                    if m.response.is_some() || m.damping.is_some() || m.bounce.is_some() =>
+                {
+                    Some("ease and linear motion take only a duration")
+                }
+                _ => None,
+            };
+            if let Some(problem) = problem {
+                report.error("details", &label, "", "spec.motion", problem);
+            }
+        }
     }
 }
