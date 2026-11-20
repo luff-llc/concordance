@@ -116,12 +116,23 @@ enum Command {
         /// previous status.
         #[arg(long)]
         intended: Option<String>,
+        /// Mark the record stale against the current baseline pin (triage of a review task).
+        #[arg(long)]
+        stale: bool,
+        /// Record that the record needs no change at the current baseline pin.
+        #[arg(long)]
+        reviewed_unchanged: bool,
         /// Set a field to null on an inheriting platform, unsetting the parent's value.
         #[arg(long)]
         unset: Vec<String>,
         /// Allow rewriting a file whose layout is not canonical (comments are lost).
         #[arg(long)]
         allow_reformat: bool,
+    },
+    /// Anchor helpers.
+    Anchors {
+        #[command(subcommand)]
+        action: AnchorsAction,
     },
     /// Re-locate line and symbol anchors from the baseline pin to a new commit.
     RebaseAnchors {
@@ -192,6 +203,9 @@ enum Command {
         /// Write records, tasks, issues and the new pin (default: dry run).
         #[arg(long)]
         apply: bool,
+        /// What file-level (coarse) hits do: queue a review task (default) or mark stale.
+        #[arg(long, value_enum, default_value = "review")]
+        coarse_as: CoarseAs,
     },
     /// Release check: stale records older than their limit fail. Exit 0 pass, 1 fail, 2 error.
     GateRelease {
@@ -299,6 +313,18 @@ enum Command {
     },
 }
 #[derive(Subcommand)]
+enum AnchorsAction {
+    /// Propose `#Symbol` anchors for an entry's file-level evidence.
+    Suggest {
+        dir: PathBuf,
+        id: String,
+        #[command(flatten)]
+        roots: Roots,
+        #[arg(long)]
+        platform: Option<String>,
+    },
+}
+#[derive(Subcommand)]
 enum StringsAction {
     /// Write Android `strings_<app>_shared.xml` files for keys used by copy details.
     Export {
@@ -356,6 +382,11 @@ enum ReviewAction {
         #[arg(long)]
         baseline_commit: Option<String>,
     },
+}
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CoarseAs {
+    Stale,
+    Review,
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum StatusArg {
@@ -611,6 +642,41 @@ fn run(cli: Cli) -> Result<()> {
                 );
             }
         }
+        Command::Anchors {
+            action:
+                AnchorsAction::Suggest {
+                    dir,
+                    id,
+                    roots,
+                    platform,
+                },
+        } => {
+            let catalog = Catalog::load(&dir)?;
+            let options = roots.options(&catalog)?;
+            let suggestions = catalog.suggest_anchors(&options, &id, platform.as_deref())?;
+            println!("## Anchor suggestions for `{id}`\n");
+            if suggestions.is_empty() {
+                println!(
+                    "No file-level evidence to anchor (or the platform roots were not supplied)."
+                );
+            }
+            for s in suggestions {
+                match &s.suggestion {
+                    Some(anchor) => println!(
+                        "- {} `{}` → `{anchor}` ({})",
+                        s.platform,
+                        s.reference,
+                        s.evidence.join(", ")
+                    ),
+                    None => println!(
+                        "- {} `{}`: {}",
+                        s.platform,
+                        s.reference,
+                        s.evidence.join(", ")
+                    ),
+                }
+            }
+        }
         Command::Gate {
             dir,
             roots,
@@ -668,6 +734,7 @@ fn run(cli: Cli) -> Result<()> {
             issues,
             label,
             apply,
+            coarse_as,
         } => {
             let catalog = Catalog::load(&dir)?;
             let options = roots.options(&catalog)?;
@@ -685,6 +752,7 @@ fn run(cli: Cli) -> Result<()> {
                     issues: issues.is_some(),
                     label,
                     apply,
+                    coarse_as_stale: coarse_as == CoarseAs::Stale,
                 },
             )?;
             print!("{}", report.markdown());
@@ -827,6 +895,8 @@ fn run(cli: Cli) -> Result<()> {
             blocked_by,
             clear,
             intended,
+            stale,
+            reviewed_unchanged,
             unset,
             allow_reformat,
         } => {
@@ -846,6 +916,8 @@ fn run(cli: Cli) -> Result<()> {
                 blocked_by,
                 clear,
                 intended,
+                stale,
+                reviewed_unchanged,
                 unset,
                 allow_reformat,
             };

@@ -104,6 +104,10 @@ pub struct Platform {
     /// For `stale` records: YYYY-MM-DD of that commit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since_date: Option<String>,
+    /// Baseline commit at which a reviewer confirmed this record needs no change after a
+    /// file-level evidence change (set with `set --reviewed-unchanged`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_commit: Option<String>,
     /// A recorded, intended difference from the baseline (set with `set --intended`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intended_difference: Option<String>,

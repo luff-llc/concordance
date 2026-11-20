@@ -202,6 +202,45 @@ pub fn symbol_spans(text: &str, symbol: &str) -> Vec<(u32, u32)> {
     spans
 }
 
+/// Type and function declarations in source text: (name, start, end), 1-based inclusive,
+/// using the same block heuristic as `symbol_spans`. Variables and cases are skipped.
+pub(crate) fn declarations(text: &str) -> Vec<(String, u32, u32)> {
+    const TYPE_OR_FUNCTION: &[&str] = &[
+        "func",
+        "fun",
+        "class",
+        "struct",
+        "enum",
+        "protocol",
+        "extension",
+        "interface",
+        "object",
+        "def",
+        "fn",
+        "actor",
+        "trait",
+        "impl",
+        "function",
+        "record",
+        "mod",
+    ];
+    let lines: Vec<&str> = text.lines().collect();
+    let mut out = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let tokens: Vec<&str> = words(line).collect();
+        if let Some(position) = tokens.iter().position(|w| TYPE_OR_FUNCTION.contains(w)) {
+            if let Some(name) = tokens.get(position + 1) {
+                out.push((
+                    (*name).to_owned(),
+                    index as u32 + 1,
+                    block_end(&lines, index) as u32 + 1,
+                ));
+            }
+        }
+    }
+    out
+}
+
 fn block_end(lines: &[&str], start: usize) -> usize {
     let mut depth = 0i64;
     let mut parens = 0i64;

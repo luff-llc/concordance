@@ -128,6 +128,10 @@
         "intended_difference": {
           "$ref": "#/$defs/text",
           "description": "An intended difference from the baseline."
+        },
+        "reviewed_commit": {
+          "$ref": "#/$defs/text",
+          "description": "Baseline commit at which a reviewer confirmed no change was needed after a file-level evidence change."
         }
       }
     },

@@ -14,6 +14,8 @@ pub const CLEARABLE: &[&str] = &[
     "verification",
     "source",
     "tests",
+    "reviewed_commit",
+    "intended_difference",
 ];
 
 #[derive(Debug, Default, Clone)]
@@ -29,6 +31,10 @@ pub struct SetRequest {
     pub clear: Vec<String>,
     /// Record an intended difference; a stale record returns to its previous status.
     pub intended: Option<String>,
+    /// Mark the record stale against the current baseline pin (triaging a review task).
+    pub stale: bool,
+    /// Record that the record needs no change at the current baseline pin.
+    pub reviewed_unchanged: bool,
     /// Fields to set to `null`, unsetting a value inherited from the parent platform.
     pub unset: Vec<String>,
     pub allow_reformat: bool,
@@ -123,6 +129,19 @@ impl Catalog {
                 request.platform
             ));
         }
+        let pin = catalog
+            .baseline_commit(&catalog.config.report.baseline)
+            .map(str::to_owned);
+        if (request.stale || request.reviewed_unchanged) && pin.is_none() {
+            return fail(format!(
+                "--stale and --reviewed-unchanged need a [baselines.{}] commit",
+                catalog.config.report.baseline
+            ));
+        }
+        if request.stale && request.reviewed_unchanged {
+            return fail("--stale and --reviewed-unchanged are exclusive");
+        }
+        let pin = pin.unwrap_or_default();
         let area = catalog
             .areas
             .get(entry_id)
@@ -160,6 +179,33 @@ impl Catalog {
                 if let Some(value) = value {
                     record.insert(key(field), key(value));
                 }
+            }
+            if request.stale {
+                let current = record
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                if current != "stale" {
+                    if !matches!(current.as_str(), "implemented" | "shipped" | "partial") {
+                        return fail(format!(
+                            "only implemented or partial records can become stale, not {current}"
+                        ));
+                    }
+                    let current = if current == "shipped" {
+                        "implemented".to_owned()
+                    } else {
+                        current
+                    };
+                    record.insert(key("status"), key("stale"));
+                    record.insert(key("previous_status"), key(&current));
+                    record.insert(key("since_commit"), key(&pin));
+                    record.insert(key("since_date"), key(&crate::today()));
+                }
+                record.remove("reviewed_commit");
+            }
+            if request.reviewed_unchanged {
+                record.insert(key("reviewed_commit"), key(&pin));
             }
             if let Some(reason) = &request.intended {
                 record.insert(key("intended_difference"), key(reason));

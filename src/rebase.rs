@@ -328,3 +328,100 @@ mod tests {
         assert_eq!(shift_range(&hunks, (50, 50)), Some((52, 52)));
     }
 }
+
+/// A proposed `#Symbol` anchor for file-level evidence.
+#[derive(Debug, Clone, Serialize)]
+pub struct AnchorSuggestion {
+    pub platform: String,
+    pub reference: String,
+    /// The anchored reference to use instead, or `None` when nothing matched.
+    pub suggestion: Option<String>,
+    /// Identifiers or copy found inside the symbol, with their line numbers.
+    pub evidence: Vec<String>,
+}
+
+impl Catalog {
+    /// Propose `path#Symbol` anchors for an entry's file-level evidence: the innermost type
+    /// or function declaration containing the entry's accessibility identifier, label or copy.
+    pub fn suggest_anchors(
+        &self,
+        options: &RootOptions,
+        entry_id: &str,
+        platform: Option<&str>,
+    ) -> Result<Vec<AnchorSuggestion>> {
+        let entry = self.entry(entry_id)?;
+        let mut needles: BTreeSet<&str> = BTreeSet::new();
+        needles.insert(&entry.accessibility.identifier);
+        needles.insert(&entry.accessibility.label);
+        needles.extend(entry.copy.iter().map(String::as_str));
+        for detail in &entry.details {
+            if let Some(copy) = &detail.spec.copy {
+                needles.insert(&copy.text);
+                if let Some(key) = &copy.key {
+                    needles.insert(key);
+                }
+            }
+        }
+        needles.retain(|n| n.chars().count() >= 3);
+        let mut out = Vec::new();
+        for (name, record) in &entry.platforms {
+            if platform.is_some_and(|p| p != name) || record.inherited {
+                continue;
+            }
+            let Some(root) = self.platform_root(name, options)? else {
+                continue;
+            };
+            for reference in record.source.iter().chain(&record.tests) {
+                if split_anchor(reference).1.is_some() || !crate::is_test_path(reference) {
+                    continue;
+                }
+                let relative = self.evidence_relative(name, reference)?;
+                let Ok(text) = std::fs::read_to_string(root.join(relative)) else {
+                    continue;
+                };
+                let declarations = crate::drift::declarations(&text);
+                let mut found: BTreeMap<String, Vec<String>> = BTreeMap::new();
+                for (index, line) in text.lines().enumerate() {
+                    let number = index as u32 + 1;
+                    for needle in needles.iter().filter(|n| line.contains(**n)) {
+                        let innermost = declarations
+                            .iter()
+                            .filter(|(symbol, start, end)| {
+                                *start <= number
+                                    && number <= *end
+                                    && !matches!(symbol.as_str(), "body" | "init")
+                            })
+                            .max_by_key(|(_, start, _)| *start);
+                        if let Some((symbol, _, _)) = innermost {
+                            found
+                                .entry(symbol.clone())
+                                .or_default()
+                                .push(format!("{needle:?} at L{number}"));
+                        }
+                    }
+                }
+                if found.is_empty() {
+                    out.push(AnchorSuggestion {
+                        platform: name.clone(),
+                        reference: reference.clone(),
+                        suggestion: None,
+                        evidence: vec![
+                            "no type or function contains the entry's identifier, label or copy"
+                                .into(),
+                        ],
+                    });
+                }
+                let path = split_anchor(reference).0;
+                for (symbol, evidence) in found {
+                    out.push(AnchorSuggestion {
+                        platform: name.clone(),
+                        reference: reference.clone(),
+                        suggestion: Some(format!("{path}#{symbol}")),
+                        evidence,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+}

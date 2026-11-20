@@ -9,7 +9,7 @@ pub use continuous::{
     SyncOptions, SyncReport,
 };
 mod set;
-pub use rebase::{AnchorFate, AnchorMove, RebaseReport};
+pub use rebase::{AnchorFate, AnchorMove, AnchorSuggestion, RebaseReport};
 pub use set::{SetOutcome, SetRequest, CLEARABLE};
 mod evidence;
 mod generate;

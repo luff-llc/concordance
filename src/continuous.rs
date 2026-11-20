@@ -192,7 +192,7 @@ impl SyncReport {
                 .count()
         };
         let mut out = format!(
-            "## Sync {} → {}: `{}` → `{}`{}\n\n{} records with changed baseline evidence: {} newly stale, {} already stale, {} unchanged (not implemented).\n",
+            "## Sync {} → {}: `{}` → `{}`{}\n\n{} records with changed baseline evidence: {} newly stale, {} already stale, {} queued for review (file-level hits only), {} unchanged (not implemented).\n",
             self.from,
             self.to_platform,
             short(&self.since),
@@ -201,7 +201,8 @@ impl SyncReport {
             self.changes.len(),
             count("stale"),
             self.changes.iter().filter(|c| c.before == "stale").count(),
-            self.changes.iter().filter(|c| c.after != "stale").count()
+            self.changes.iter().filter(|c| c.after == "review").count(),
+            self.changes.iter().filter(|c| c.after != "stale" && c.after != "review").count()
         );
         if !self.changes.is_empty() {
             out.push_str(&format!(
@@ -254,6 +255,8 @@ pub struct SyncOptions {
     pub issues: bool,
     pub label: String,
     pub apply: bool,
+    /// Mark file-level (coarse) hits stale too, instead of queueing them for review.
+    pub coarse_as_stale: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -527,8 +530,60 @@ impl Catalog {
         };
         // Planned edits, grouped by area file.
         let mut edits: BTreeMap<String, Vec<(String, Option<String>, Status)>> = BTreeMap::new();
+        // Interface copy whose old text disappeared in the range (code or string catalogs).
+        let full = String::from_utf8_lossy(&git(
+            &root,
+            &["diff", "-U0", "--no-color", &since_sha, &to, "--", "."],
+        )?)
+        .into_owned();
+        let (mut removed, mut added) = (BTreeSet::new(), BTreeSet::new());
+        for line in full.lines() {
+            let set = if line.starts_with('-') && !line.starts_with("---") {
+                &mut removed
+            } else if line.starts_with('+') && !line.starts_with("+++") {
+                &mut added
+            } else {
+                continue;
+            };
+            for literal in line.split('"').skip(1).step_by(2) {
+                set.insert(literal.to_owned());
+            }
+        }
+        let copy_changed: BTreeSet<&String> = removed.difference(&added).collect();
+        // label -> (precise, hit descriptions)
+        let mut labels: BTreeMap<String, (bool, Vec<String>)> = BTreeMap::new();
         for hit in &platform_drift.entries {
-            let (entry_id, detail_id) = split_target(&hit.id);
+            let item = labels.entry(hit.id.clone()).or_default();
+            for h in &hit.hits {
+                item.0 |= h.precision == Precision::Precise;
+                item.1.push(match (h.precision, h.lines) {
+                    (Precision::Precise, Some((a, b))) => format!("{} (L{a}-L{b})", h.reference),
+                    (Precision::Precise, None) => h.reference.clone(),
+                    (Precision::Coarse, _) => format!("{} (file-level)", h.reference),
+                });
+            }
+        }
+        for entry in self.entries.values() {
+            for detail in &entry.details {
+                let Some(copy) = &detail.spec.copy else {
+                    continue;
+                };
+                let changed = copy
+                    .key
+                    .iter()
+                    .chain([&copy.text])
+                    .find(|t| copy_changed.contains(t));
+                if let Some(text) = changed {
+                    let item = labels
+                        .entry(format!("{}#{}", entry.id, detail.id))
+                        .or_default();
+                    item.0 = true;
+                    item.1.push(format!("copy {text:?} changed"));
+                }
+            }
+        }
+        for (label, (precise, hits)) in labels {
+            let (entry_id, detail_id) = split_target(&label);
             let Some(entry) = self.entries.get(entry_id) else {
                 continue;
             };
@@ -541,29 +596,22 @@ impl Catalog {
                     .and_then(|x| x.platforms.get(target)),
             };
             let before = record.map(|r| r.status);
+            let stale = precise || sync.coarse_as_stale;
             let after = match before {
-                Some(Status::Implemented | Status::Partial | Status::Stale) => Status::Stale,
-                Some(other) => other,
+                Some(Status::Stale) => "stale",
+                Some(Status::Implemented | Status::Partial) if stale => "stale",
+                Some(Status::Implemented | Status::Partial) => "review",
+                Some(other) => other.as_str(),
                 None => continue,
             };
             report.changes.push(SyncChange {
-                label: hit.id.clone(),
+                label: label.clone(),
                 before: before.map(Status::as_str).unwrap_or("unrecorded").into(),
-                after: after.as_str().into(),
-                hits: hit
-                    .hits
-                    .iter()
-                    .map(|h| match (h.precision, h.lines) {
-                        (Precision::Precise, Some((a, b))) => {
-                            format!("{} (L{a}-L{b})", h.reference)
-                        }
-                        (Precision::Precise, None) => h.reference.clone(),
-                        (Precision::Coarse, _) => format!("{} (file-level)", h.reference),
-                    })
-                    .collect(),
+                after: after.into(),
+                hits,
             });
             if let Some(previous) =
-                before.filter(|s| matches!(s, Status::Implemented | Status::Partial))
+                before.filter(|s| stale && matches!(s, Status::Implemented | Status::Partial))
             {
                 let file = self.area_files[&self.areas[entry_id]].clone();
                 edits.entry(file).or_default().push((
@@ -679,13 +727,25 @@ impl Catalog {
         ui: Option<&crate::ui::UiCatalog>,
     ) -> Result<String> {
         let entry = self.entry(entry_id)?;
+        let review = changes.iter().all(|c| c.after != "stale");
+        let action = if review {
+            format!(
+                "Only file-level evidence changed, so nothing was marked stale. Triage: `concordance set <dir> <record> --platform {} --stale` if {} must change, or `--reviewed-unchanged` if not.",
+                sync.to_platform, sync.to_platform
+            )
+        } else {
+            format!(
+                "Bring {} back in line, then clear the stale status with `concordance set` (or record `--intended`). Records marked review only need triage.",
+                sync.to_platform
+            )
+        };
         let mut out = format!(
-            "# Parity task: {} (`{entry_id}`)\n\nThe {} baseline changed between `{}` and `{}` ({date}). Bring {} back in line, then clear the stale status with `concordance set` (or record `--intended`).\n\n## Records\n\n",
+            "# Parity task: {} (`{entry_id}`)\n\nKind: {}\n\nThe {} baseline changed between `{}` and `{}` ({date}). {action}\n\n## Records\n\n",
             entry.title,
+            if review { "review" } else { "stale" },
             sync.from,
             short(since),
             short(to),
-            sync.to_platform
         );
         let mut files = BTreeSet::new();
         for change in changes {

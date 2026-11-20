@@ -174,12 +174,18 @@ fn gate_requires_catalog_changes_for_user_visible_files_or_a_trailer() {
 }
 
 #[test]
-fn sync_marks_target_records_stale_writes_tasks_and_advances_the_pin_idempotently() {
+fn sync_marks_precise_hits_stale_and_queues_file_level_hits_for_review() {
     let f = Fixture::new();
     f.mutate("reader", |v| {
-        v[0]["platforms"]["android"] =
-            json!({"status": "implemented", "implemented_by": "sol", "source": ["Reader.kt"]});
+        v[0]["platforms"]["android"] = json!({"status": "implemented", "implemented_by": "sol", "source": ["Reader.kt"]});
+        v[0]["details"] = json!([{"id": "title-copy", "kind": "copy", "spec": {"text": "Reader title", "copy": {"text": "Open"}},
+            "platforms": {"android": {"status": "implemented"}}}]);
     });
+    fs::write(
+        f.0.join("native/Reader.swift"),
+        "struct Reader { let title = \"Open\" }\n",
+    )
+    .expect("base");
     f.git(&["init", "-q"]);
     let base = f.commit("base");
     f.config(&format!("[baselines.ios]\ncommit = '{base}'\n"));
@@ -203,11 +209,23 @@ fn sync_marks_target_records_stale_writes_tasks_and_advances_the_pin_idempotentl
     let dry = f.cli("sync", &args);
     assert!(dry.status.success(), "{}", text(&dry));
     let out = text(&dry);
+    // The file-level hit goes to review; the changed copy string makes its detail stale.
     assert!(
-        out.contains("dry run") && out.contains("| `reader.open-book` | implemented | stale |"),
+        out.contains("dry run") && out.contains("| `reader.open-book` | implemented | review |"),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "| `reader.open-book#title-copy` | implemented | stale | copy \"Open\" changed |"
+        ),
         "{out}"
     );
     assert!(!tasks.exists());
+    let all_stale = text(&f.cli("sync", &[&args[..], &["--coarse-as", "stale"]].concat()));
+    assert!(
+        all_stale.contains("| `reader.open-book` | implemented | stale |"),
+        "{all_stale}"
+    );
     // Issues are a dry run here: tests never call gh.
     let issues = f.cli(
         "sync",
@@ -217,14 +235,18 @@ fn sync_marks_target_records_stale_writes_tasks_and_advances_the_pin_idempotentl
     let apply = f.cli("sync", &[&args[..], &["--apply"]].concat());
     assert!(apply.status.success(), "{}", text(&apply));
     let catalog = concordance::Catalog::load(&f.0).expect("catalog");
-    let record = &catalog.entries["reader.open-book"].platforms["android"];
-    assert_eq!(record.status, concordance::Status::Stale);
+    let entry = &catalog.entries["reader.open-book"];
     assert_eq!(
-        record.previous_status,
+        entry.platforms["android"].status,
+        concordance::Status::Implemented
+    );
+    let detail = &entry.details[0].platforms["android"];
+    assert_eq!(detail.status, concordance::Status::Stale);
+    assert_eq!(
+        detail.previous_status,
         Some(concordance::Status::Implemented)
     );
-    assert_eq!(record.since_commit.as_deref(), Some(head.as_str()));
-    // Missing records stay missing; the pin moves to the synced commit.
+    assert_eq!(detail.since_commit.as_deref(), Some(head.as_str()));
     assert_eq!(
         catalog.entries["search.find-book"].platforms["android"].status,
         concordance::Status::Missing
@@ -232,15 +254,15 @@ fn sync_marks_target_records_stale_writes_tasks_and_advances_the_pin_idempotentl
     assert_eq!(catalog.baseline_commit("ios"), Some(head.as_str()));
     let task = fs::read_to_string(tasks.join("reader.open-book.md")).expect("task");
     assert!(
-        task.contains("# Parity task: Open a book (`reader.open-book`)")
+        task.contains("Kind: stale")
             && task.contains("+struct Reader { let title = \"Open book\" }"),
         "{task}"
     );
     assert!(task.contains("Retitle the reader"));
-    let report = catalog.report().expect("report");
+    let review = fs::read_to_string(tasks.join("search.find-book.md")).expect("review task");
     assert!(
-        report.contains("1 stale") && report.contains("## Stale after baseline changes"),
-        "{report}"
+        review.contains("Kind: review") || review.contains("android missing → missing"),
+        "{review}"
     );
     // A second run is a no-op.
     let catalog_before = fs::read(f.0.join("catalog/reader.yaml")).expect("area");
@@ -249,6 +271,64 @@ fn sync_marks_target_records_stale_writes_tasks_and_advances_the_pin_idempotentl
     assert_eq!(
         fs::read(f.0.join("catalog/reader.yaml")).expect("area"),
         catalog_before
+    );
+    // Triage the review item: reviewed unchanged, or stale against the current pin.
+    let dir = f.0.to_str().expect("path");
+    let set = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_concordance"))
+            .args(["set", dir, "reader.open-book", "--platform", "android"])
+            .args(args)
+            .output()
+            .expect("CLI")
+    };
+    assert!(set(&["--reviewed-unchanged"]).status.success());
+    let catalog = concordance::Catalog::load(&f.0).expect("catalog");
+    assert_eq!(
+        catalog.entries["reader.open-book"].platforms["android"]
+            .reviewed_commit
+            .as_deref(),
+        Some(head.as_str())
+    );
+    let output = set(&["--stale"]);
+    assert!(output.status.success(), "{}", text(&output));
+    let catalog = concordance::Catalog::load(&f.0).expect("catalog");
+    let record = &catalog.entries["reader.open-book"].platforms["android"];
+    assert_eq!(
+        (
+            record.status,
+            record.since_commit.as_deref(),
+            record.reviewed_commit.as_deref()
+        ),
+        (concordance::Status::Stale, Some(head.as_str()), None)
+    );
+    assert!(catalog
+        .report()
+        .expect("report")
+        .contains("## Stale after baseline changes"));
+}
+
+#[test]
+fn anchors_suggest_proposes_symbols_containing_identifiers_or_copy() {
+    let f = Fixture::new();
+    fs::write(
+        f.0.join("native/Reader.swift"),
+        "struct Reader {\n    var body: some View {\n        openButton()\n    }\n\n    func openButton() -> some View {\n        Button(\"Open\") {}\n            .accessibilityIdentifier(\"reader.open\")\n    }\n}\n",
+    )
+    .expect("source");
+    let out = Command::new(env!("CARGO_BIN_EXE_concordance"))
+        .args(["anchors", "suggest"])
+        .arg(&f.0)
+        .args(["reader.open-book"])
+        .output()
+        .expect("CLI");
+    assert!(out.status.success(), "{}", text(&out));
+    let out = text(&out);
+    assert!(out.contains("- ios `Reader.swift` → `Reader.swift#openButton` (\"Open\" at L7, \"reader.open\" at L8)"), "{out}");
+    // Anchored test references are left alone; files without a match say so.
+    assert!(!out.contains("ReaderTests.swift"), "{out}");
+    assert!(
+        out.contains("- android `Reader.kt`: no type or function contains"),
+        "{out}"
     );
 }
 
