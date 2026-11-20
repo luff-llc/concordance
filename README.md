@@ -33,6 +33,8 @@ concordance tokens path/to/catalog --platform css --out tokens.css
 concordance capture-plan path/to/catalog --platform android
 concordance capture-plan path/to/catalog --platform ios,android --coverage --captures captures
 concordance compare path/to/catalog --captures captures --out ui-report --check
+concordance set path/to/catalog player.skip-forward --platform android --status implemented --by lane-1 --clear gap
+concordance rebase-anchors path/to/catalog --root ios=../apple-reference --to <sha>
 concordance review set ui-report detail.dark --verdict differs --note "Title wraps"
 concordance verify path/to/catalog --review ui-report/review.json --out proposal.yaml
 concordance ui-report path/to/catalog --captures captures
@@ -50,7 +52,9 @@ date, commits, captures, journeys) records independent proof, and `verified` is
 derived from it. Reports show implemented and verified counts separately and list
 claimed-but-unverified work. Entries can carry `details` (motion, haptic, gesture,
 geometry, copy...) with numbers and per-platform status, so briefs carry the numbers.
-Evidence may be anchored (`path#Symbol`, `path:L10-L20`) so `drift` reports precise
+Blocked work names a registered blocker so `next` skips it and reports rank blockers;
+flavour platforms can inherit another platform's records.
+Evidence may be anchored (`path#Symbol`, preferred, or `path:L10-L20`) so `drift` reports precise
 hits rather than whole files. Capture coverage counts produced, skipped and missing
 captures per area and screen, and `compare` writes side-by-side pair images and a
 review page whose notes `verify` turns into a proposed patch, never an edit.

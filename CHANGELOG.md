@@ -38,6 +38,18 @@
   commit, fixture pack). `compare`, coverage and `ui-report` warn when fixture packs
   differ.
 - Report area and README links are relative to the output file's directory.
+- Blocker registry (`[blockers.<id>]`) and `blocked_by` on platform and detail records;
+  `next` skips blocked work (`--include-blocked`), reports split actionable and blocked
+  gaps and rank blockers by what they hold back.
+- `concordance set` edits statuses and bookkeeping in place, preserving key order and
+  JSON-style formatting, and clears stale fields; it never writes verification.
+- Validation warnings (`--strict` to fail): implemented records with a gap or open
+  details, resolved blockers still referenced, unknown motion tokens.
+- Detail `geometry` lists, `motion.token`, detail `verify_requires` (journey by default
+  for motion, haptic and gesture). The schema evaluator supports `anyOf`.
+- `concordance rebase-anchors --to <sha>` moves line anchors through the diff and
+  flags edited ranges and lost symbols; `--write` applies the moves.
+- Platform inheritance: `horizon = { root = "...", inherits = "android" }`.
 
 ## 0.2.0
 

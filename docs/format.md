@@ -199,6 +199,81 @@ and surfaces are also nonempty. Empty lists are allowed for settings, data reads
 and writes, copy, design, and dependency lists. Accessibility label/identifier may
 be empty to record the absence of established source evidence.
 
+## Blockers
+
+Work that waits on a decision or an outside dependency names it instead of hiding it in
+`gap` prose:
+
+```toml
+[blockers.ask-engine]
+title = "On-device LLM for Ask"
+kind = "dependency"            # decision | dependency | sdk | platform | hardware
+owner = "Mike"
+link = "docs/decisions-needed.md#1"
+status = "open"                # open (default) | decided | resolved
+```
+
+```yaml
+platforms:
+  android:
+    status: partial
+    blocked_by: [ask-engine]
+    gap: The unavailable state is shown; generation needs the engine.
+```
+
+Detail platform records take `blocked_by` too. Only `open` blockers hold work back.
+`validate` rejects unknown keys and `blocked_by` on `implemented` or `not-applicable`
+records, and warns when a `resolved` blocker is still referenced. `next` skips blocked
+entries and, transitively, entries that depend on unfinished blocked ones;
+`--include-blocked` lists them with `[blocked: key]` after the title (blocked detail
+rows likewise). The report splits the gap list into actionable and blocked gaps, adds a
+Blocked column to the area table and a **Blockers** table (key, title, kind, owner,
+status, entries and details held back, highest impact, link) ranked by how much each
+unblocks. Briefs print the blocker title, link and status.
+
+## Flavour platforms
+
+A platform that shares another's code can inherit its records:
+
+```toml
+[platforms]
+android = "apps/android"
+horizon = { root = "apps/android", inherits = "android" }
+```
+
+An entry (or detail) without a `horizon` record gets a copy of its `android` record;
+a `horizon` record that is present carries only its differences and is merged over the
+parent (its keys win; when it sets a different `status`, the parent's `verification`,
+`gap` and `blocked_by` are not inherited). Whole copies are not validated separately,
+so a broken parent path is reported once. Unknown parents and cycles are errors.
+
+## Editing records
+
+```sh
+concordance set spec/product reader.open-book --platform android \
+  --status implemented --by parity/player --clear gap
+concordance set spec/product reader.open-book/open-spring --platform android --status partial
+```
+
+`set` changes `status`, `implemented_by` (`--by`), `gap`, `notes` and `blocked_by`
+(comma-separated), and `--clear`s `gap`, `notes`, `implemented_by`, `blocked_by`,
+`verification`, `source` or `tests`. A detail is `entry/detail` or `entry#detail`; a
+missing record needs `--status`. It never writes `verification` (that is `verify`'s
+proposal, applied by a person). Keys keep their order and pretty-printed JSON-style
+area files are rewritten byte-for-byte apart from the edit; files that would be
+reformatted (comments, other layouts) are refused unless `--allow-reformat`. If the
+result has new validation errors for the record (for example verification left on a
+`missing` record) the file is restored and the errors printed; warnings are printed
+after a successful edit.
+
+## Warnings
+
+`validate` prints warnings without failing: an `implemented` record with a non-empty
+`gap`, an implemented entry with partial or missing details on that platform, a resolved
+blocker still referenced, and (with UI contracts) a detail `motion.token` that is not a
+motion in `tokens.yaml`. `validate --strict` turns warnings into errors. The report
+lists implemented entries with open work.
+
 ## Implemented versus verified
 
 A status of `shipped` means *implemented*. It is a claim, usually from source review
@@ -279,13 +354,20 @@ details:
     spec: {text: Empty state title, copy: {text: No books yet, locale: en}}
 ```
 
-`spec.text` is required; the structured fields are optional. `motion.curve` is
+`spec.text` is required; the structured fields are optional. `geometry` is one
+`{property, value, unit}` or a list of them (`[{property: width, value: 38, unit: pt},
+{property: corner-radius, value: 8, unit: pt}]`). `motion.token` names a design-token
+motion (for example `Motion.fold`) so the token and its numbers travel together; a
+motion needs a `curve` or a `token`, and numbers need a `curve`. `motion.curve` is
 `spring`, `ease` or `linear`. A spring takes `response` (with `damping`) **or**
 `duration` (with `bounce`, −1 to 1); ease and linear take only `duration`. Numbers
 are non-negative seconds or ratios. Detail IDs must be unique within an entry.
 `baseline` cites evidence on the report baseline platform and is validated and
 drift-checked like source evidence. Detail platforms must be configured platforms;
-an unrecorded detail status counts as open.
+an unrecorded detail status counts as open. A detail's optional `verify_requires`
+works like the entry field; by default `motion`, `haptic` and `gesture` details need a
+journey, because a still capture cannot prove them, and other details need a capture or
+a journey.
 
 The parity report adds a *Details implemented / verified / total* column to the
 area table, open-detail counts to the gap list and gap tables, and a **Detail gaps in
@@ -465,7 +547,22 @@ two revisions and the file's content at the baseline revision:
   baseline"), keep file-level behavior and are labelled **file-level (coarse)**.
 
 Each platform heading reports entries with precise hits versus coarse-only entries,
-and reference counts: precise, coarse, and anchored-unaffected. Evidence paths and
+and reference counts: precise, coarse, and anchored-unaffected.
+
+Prefer `path#Symbol` anchors for entry evidence: they survive edits elsewhere in the
+file and need no rewriting. When the baseline pin moves, re-locate line anchors:
+
+```sh
+concordance rebase-anchors spec/product --root ios=../apple --to <new-sha>
+concordance rebase-anchors spec/product --root ios=../apple --to <new-sha> --write
+```
+
+From the platform's pin (or `--from`) to `--to`, each cited reference on the platform
+(default: the report baseline) is **unchanged**, **moved** (a line range shifted by
+hunks above it, or its file renamed), **changed** (a hunk touches the range; left as is
+for review) or **lost** (file deleted, or `#Symbol` no longer declared). `--write`
+rewrites moved references in the area files with the same formatting rules as `set`;
+then update the baseline pin. Evidence paths and
 globs are relative to the resolved platform root, even when that root is a Git
 subdirectory. Uncited changed files matching `source_globs` appear as
 **Uncatalogued changes**. Without source globs, only cited evidence is examined.
