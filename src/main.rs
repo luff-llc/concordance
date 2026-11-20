@@ -88,6 +88,11 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Edit reviewer notes (review.json) without the browser.
+    Review {
+        #[command(subcommand)]
+        action: ReviewAction,
+    },
     /// Generate parity.md with a fresh screen summary for every platform.
     UiReport {
         dir: PathBuf,
@@ -162,6 +167,34 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+}
+#[derive(Subcommand)]
+enum ReviewAction {
+    /// Set a pair's verdict and note in <dir>/review.json (the compare --out directory).
+    Set {
+        dir: PathBuf,
+        /// Pair key, `screen.state`.
+        key: String,
+        #[arg(long, value_enum)]
+        verdict: VerdictArg,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long)]
+        reviewer: Option<String>,
+        /// Review date, YYYY-MM-DD.
+        #[arg(long)]
+        at: Option<String>,
+        #[arg(long)]
+        commit: Option<String>,
+        #[arg(long)]
+        baseline_commit: Option<String>,
+    },
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum VerdictArg {
+    Unreviewed,
+    Same,
+    Differs,
 }
 #[derive(clap::Args)]
 struct Roots {
@@ -298,7 +331,7 @@ fn run(cli: Cli) -> Result<()> {
         } => {
             let catalog = Catalog::load(&dir)?;
             let out = out.unwrap_or_else(|| dir.join("parity.md"));
-            let report = catalog.report_with_roots(&roots.options(&catalog)?)?;
+            let report = catalog.report_with_roots_at(&roots.options(&catalog)?, Some(&out))?;
             if check {
                 if fs::read_to_string(&out).ok().as_deref() != Some(&report) {
                     return Err(format!(
@@ -378,6 +411,9 @@ fn run(cli: Cli) -> Result<()> {
                 .as_deref()
                 .unwrap_or(&ui.catalog.config.report.target);
             let comparison = ui.compare(&captures, baseline, target, Some(&out))?;
+            if let Some(warning) = &comparison.fixture_warning {
+                eprintln!("WARNING: {warning}");
+            }
             print!("{}", comparison.summary());
             println!("Report: {}", out.join("index.html").display());
             if check && comparison.failed() {
@@ -385,6 +421,54 @@ fn run(cli: Cli) -> Result<()> {
                     "UI comparison failed: structural or token failures; see report".into(),
                 );
             }
+        }
+        Command::Review {
+            action:
+                ReviewAction::Set {
+                    dir,
+                    key,
+                    verdict,
+                    note,
+                    reviewer,
+                    at,
+                    commit,
+                    baseline_commit,
+                },
+        } => {
+            use concordance::ui::{Review, Verdict};
+            let path = dir.join("review.json");
+            let mut review = Review::load(&path)?;
+            review.set(
+                &key,
+                match verdict {
+                    VerdictArg::Unreviewed => Verdict::Unreviewed,
+                    VerdictArg::Same => Verdict::Same,
+                    VerdictArg::Differs => Verdict::Differs,
+                },
+                note.as_deref(),
+            )?;
+            if let Some(reviewer) = reviewer {
+                review.reviewer = reviewer;
+            }
+            if let Some(at) = at {
+                if !concordance::schema::valid_date(&at) {
+                    return Err("--at must be YYYY-MM-DD".into());
+                }
+                review.at = at;
+            }
+            for (field, value) in [
+                (&mut review.commit, commit),
+                (&mut review.baseline_commit, baseline_commit),
+            ] {
+                if let Some(value) = value {
+                    if !concordance::schema::valid_commit(&value) {
+                        return Err(format!("invalid commit {value:?}").into());
+                    }
+                    *field = Some(value);
+                }
+            }
+            review.save(&path)?;
+            println!("Updated {} in {}", key, path.display());
         }
         Command::Verify {
             dir,
@@ -425,10 +509,10 @@ fn run(cli: Cli) -> Result<()> {
                 .as_deref()
                 .unwrap_or(&ui.catalog.config.report.baseline);
             let options = roots.options(&ui.catalog)?;
-            let report = ui.ui_report(&captures, baseline)?
+            let out = out.unwrap_or_else(|| dir.join("parity.md"));
+            let report = ui.ui_report_at(&captures, baseline, Some(&out))?
                 + &ui.catalog.evidence_roots_section(&options)?
                 + &ui.catalog.baseline_drift_section(&options)?;
-            let out = out.unwrap_or_else(|| dir.join("parity.md"));
             if check {
                 if fs::read_to_string(&out).ok().as_deref() != Some(&report) {
                     return Err(format!("stale UI report: {}", out.display()).into());

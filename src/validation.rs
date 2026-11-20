@@ -385,6 +385,15 @@ pub(crate) fn check_platform(
             ),
         );
     }
+    if record.implemented_by.is_none() {
+        report.error(
+            "verification",
+            entry,
+            platform,
+            "",
+            "verification requires implemented_by",
+        );
+    }
     if record.implemented_by.as_deref() == Some(v.by.as_str()) {
         report.error(
             "verification",

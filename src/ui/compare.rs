@@ -27,6 +27,9 @@ pub struct PairResult {
 #[derive(Debug, Serialize)]
 pub struct Comparison {
     pub pairs: Vec<PairResult>,
+    /// Set when the two capture runs' manifests name different fixture packs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fixture_warning: Option<String>,
 }
 impl Comparison {
     pub fn failed(&self) -> bool {
@@ -35,14 +38,20 @@ impl Comparison {
             .any(|p| !p.baseline.failures.is_empty() || !p.target.failures.is_empty())
     }
     pub fn summary(&self) -> String {
-        screen_summary(self.pairs.iter().flat_map(|pair| {
-            [
-                Some(&pair.baseline),
-                (pair.baseline.platform != pair.target.platform).then_some(&pair.target),
-            ]
-            .into_iter()
-            .flatten()
-        }))
+        let warning = self
+            .fixture_warning
+            .as_ref()
+            .map(|w| format!("WARNING: {w}\n\n"))
+            .unwrap_or_default();
+        warning
+            + &screen_summary(self.pairs.iter().flat_map(|pair| {
+                [
+                    Some(&pair.baseline),
+                    (pair.baseline.platform != pair.target.platform).then_some(&pair.target),
+                ]
+                .into_iter()
+                .flatten()
+            }))
     }
 }
 fn screen_summary<'a>(results: impl IntoIterator<Item = &'a PlatformResult>) -> String {
@@ -488,8 +497,24 @@ impl UiCatalog {
             fs::create_dir_all(out.join("captures"))?;
             fs::create_dir_all(out.join("pairs"))?;
         }
-        let mut comparison = Comparison { pairs: vec![] };
+        let fixture_warning = super::fixture_warning(
+            (
+                baseline,
+                super::CaptureManifest::load(captures, baseline)?.as_ref(),
+            ),
+            (
+                target,
+                super::CaptureManifest::load(captures, target)?.as_ref(),
+            ),
+        );
+        let mut comparison = Comparison {
+            pairs: vec![],
+            fixture_warning: fixture_warning.clone(),
+        };
         let mut html = String::from("<!doctype html><html lang=\"en\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>Concordance screen parity</title><style>body{font:16px system-ui;margin:2rem;max-width:1200px;background:#fafafa;color:#171717}section{border-top:1px solid #aaa;padding:1rem 0}.pair{display:flex;gap:1rem;flex-wrap:wrap}.capture{width:min(45%,480px);min-width:240px}svg{width:100%;height:auto}rect{fill:none;stroke:#e00080;stroke-width:1}text{fill:#fff;stroke:#111;stroke-width:.2px;font-size:10px}pre{white-space:pre-wrap}li{margin:.3rem 0}</style><h1>Screen parity</h1><p>Structural and token checks gate parity. Luminance SSIM (0–1) is a trend only. Overlays mark anatomy; hide them to review the images.</p><label><input type=\"checkbox\" checked onchange=\"document.querySelectorAll('.overlay').forEach(e=>e.style.display=this.checked?'':'none')\"> Show anatomy</label>");
+        if let Some(warning) = &fixture_warning {
+            html.push_str(&format!("<p role=\"alert\" style=\"background:#fde68a;color:#111;padding:1rem;font-weight:700\">Warning: {}</p>", escape(warning)));
+        }
         html.push_str(REVIEW_HEADER);
         for screen in self.screens.values() {
             for (state_id, state) in &screen.states {
@@ -679,6 +704,15 @@ impl UiCatalog {
     /// Fresh comparison summary for all configured platforms against the chosen baseline,
     /// with capture coverage; skipped or missing captures withdraw derived verification.
     pub fn ui_report(&self, captures: &Path, baseline: &str) -> Result<String> {
+        self.ui_report_at(captures, baseline, None)
+    }
+    /// Like `ui_report`, with links relative to the directory of `out`.
+    pub fn ui_report_at(
+        &self,
+        captures: &Path,
+        baseline: &str,
+        out: Option<&Path>,
+    ) -> Result<String> {
         let comparisons = self
             .catalog
             .config
@@ -699,8 +733,16 @@ impl UiCatalog {
             .map(String::as_str)
             .collect();
         let coverage = self.coverage(captures, &platforms)?;
-        let mut report = self.catalog.report_with(&coverage.context())?;
+        let mut context = coverage.context();
+        context.link_base = out.map(crate::report::link_base);
+        let mut report = self.catalog.report_with(&context)?;
         report.push('\n');
+        for warning in comparisons
+            .iter()
+            .filter_map(|c| c.fixture_warning.as_ref())
+        {
+            report.push_str(&format!("**Warning: {warning}.**\n\n"));
+        }
         report.push_str(&summary);
         report.push('\n');
         report.push_str(&coverage.markdown(self));

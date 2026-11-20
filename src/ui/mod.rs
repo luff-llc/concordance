@@ -5,7 +5,9 @@ mod generate;
 mod model;
 mod review;
 pub use compare::{Comparison, PairResult, PlatformResult};
-pub use coverage::{CaptureRecord, Coverage};
+pub use coverage::{
+    fixture_warning, CaptureManifest, CaptureRecord, Coverage, ManifestCapture, ManifestStatus,
+};
 pub use model::*;
 pub use review::{PairReview, Proposal, Review, Verdict, VerifyOutcome};
 

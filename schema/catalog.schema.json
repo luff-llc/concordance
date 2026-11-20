@@ -76,9 +76,10 @@
       ],
       "properties": {
         "status": {
+          "description": "implemented (shipped is a deprecated read alias), partial, missing or not-applicable.",
           "enum": [
-            "shipped",
             "implemented",
+            "shipped",
             "partial",
             "missing",
             "not-applicable"
@@ -265,6 +266,18 @@
         },
         "notes": {
           "$ref": "#/$defs/texts"
+        },
+        "verify_requires": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "Evidence a verification must include. Default: capture, plus journey when data.writes is non-empty.",
+          "items": {
+            "enum": [
+              "capture",
+              "journey"
+            ]
+          }
         },
         "details": {
           "type": "array",

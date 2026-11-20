@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Status {
-    /// Implemented. `implemented` is accepted as a synonym; verification is recorded separately.
-    #[serde(alias = "implemented")]
-    Shipped,
+    /// Implemented; verification is recorded separately. `shipped` is a deprecated read alias.
+    #[serde(alias = "shipped")]
+    Implemented,
     Partial,
     Missing,
     NotApplicable,
@@ -17,7 +17,7 @@ impl Status {
     }
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Shipped => "shipped",
+            Self::Implemented => "implemented",
             Self::Partial => "partial",
             Self::Missing => "missing",
             Self::NotApplicable => "not-applicable",
@@ -122,7 +122,7 @@ impl Platform {
     /// Why this record does not count as verified, or `None` when it does.
     /// Capture availability is checked separately when capture coverage is known.
     pub fn unverified_reason(&self) -> Option<&'static str> {
-        if self.status != Status::Shipped {
+        if self.status != Status::Implemented {
             return Some("not implemented");
         }
         let Some(v) = &self.verification else {
@@ -131,8 +131,10 @@ impl Platform {
         if v.captures.is_empty() && v.journeys.is_empty() {
             return Some("verification has no captures or journeys");
         }
-        if self.implemented_by.as_deref() == Some(v.by.as_str()) {
-            return Some("verifier is the implementer");
+        match self.implemented_by.as_deref() {
+            None => return Some("implemented_by not recorded"),
+            Some(by) if by == v.by => return Some("verifier is the implementer"),
+            Some(_) => {}
         }
         None
     }
@@ -162,9 +164,42 @@ pub struct Entry {
     pub acceptance: Vec<Acceptance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// Evidence a verification must include. Default: a capture, plus a journey when the
+    /// entry changes state (non-empty `data.writes`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_requires: Option<Vec<VerifyEvidence>>,
     /// Measurable details (motion, haptics, geometry, copy...) tracked per platform.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub details: Vec<Detail>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VerifyEvidence {
+    Capture,
+    Journey,
+}
+impl Entry {
+    /// Explicit `verify_requires`, or the inferred default: purely visual entries need a
+    /// capture; entries whose interactions write state need a capture and a journey.
+    pub fn verification_requirements(&self) -> Vec<VerifyEvidence> {
+        match &self.verify_requires {
+            Some(explicit) => explicit.clone(),
+            None if self.data.writes.is_empty() => vec![VerifyEvidence::Capture],
+            None => vec![VerifyEvidence::Capture, VerifyEvidence::Journey],
+        }
+    }
+    /// Which required kinds of evidence a verification record lacks.
+    pub fn missing_verification_evidence(&self, v: &Verification) -> Vec<&'static str> {
+        self.verification_requirements()
+            .into_iter()
+            .filter_map(|r| match r {
+                VerifyEvidence::Capture if v.captures.is_empty() => Some("capture"),
+                VerifyEvidence::Journey if v.journeys.is_empty() => Some("journey"),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

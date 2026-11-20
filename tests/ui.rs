@@ -58,6 +58,12 @@ impl Fixture {
             .output()
             .expect("CLI")
     }
+    fn cli_bare(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_concordance"))
+            .args(args)
+            .output()
+            .expect("CLI")
+    }
     fn matching_only(&self) {
         self.edit("screens/demo.yaml", |s| {
             s["states"].as_object_mut().expect("states").remove("dark");
@@ -831,6 +837,9 @@ fn compare_writes_side_by_side_pairs_and_review_notes_fold_into_proposed_verific
         .expect("review")
         .contains("Title row is taller"));
 
+    f.edit("catalog/demo.yaml", |v| {
+        v[0]["platforms"]["android"]["implemented_by"] = json!("sol");
+    });
     let catalog_before = fs::read(f.0.join("catalog/demo.yaml")).expect("catalog");
     let review = out.join("review.json");
     let review_arg = review.to_str().expect("path");
@@ -843,6 +852,16 @@ fn compare_writes_side_by_side_pairs_and_review_notes_fold_into_proposed_verific
     assert!(patch.contains("action: verify"), "{patch}");
     assert!(patch.contains("by: agy") && patch.contains("- demo.populated"));
     assert!(!patch.contains("demo.dark"));
+    // An entry that must be verified with a journey gets an incomplete proposal.
+    f.edit("catalog/demo.yaml", |v| {
+        v[0]["verify_requires"] = json!(["capture", "journey"])
+    });
+    let patch = success(f.cli("verify", &["--review", review_arg]));
+    assert!(
+        patch.contains("action: incomplete") && patch.contains("add a journey (verify_requires)"),
+        "{patch}"
+    );
+    fs::write(f.0.join("catalog/demo.yaml"), &catalog_before).expect("restore");
     let file = f.0.join("proposed.yaml");
     let file_arg = file.to_str().expect("path");
     success(f.cli("verify", &["--review", review_arg, "--out", file_arg]));
@@ -870,4 +889,93 @@ fn compare_writes_side_by_side_pairs_and_review_notes_fold_into_proposed_verific
     let patch = success(output);
     assert!(patch.contains("# Excluded pair: demo.populated: android capture skipped: No fixture"));
     assert!(patch.contains("[]"));
+}
+
+#[test]
+fn review_set_edits_notes_and_manifests_record_skips_and_fixture_packs() {
+    let f = Fixture::new();
+    let out = f.0.join("review");
+    f.ui()
+        .compare(&f.0.join("captures"), "ios", "android", Some(&out))
+        .expect("compare");
+    let dir = out.to_str().expect("path");
+    success(f.cli_bare(&[
+        "review",
+        "set",
+        dir,
+        "demo.dark",
+        "--verdict",
+        "differs",
+        "--note",
+        "Title wraps",
+        "--reviewer",
+        "agy",
+        "--at",
+        "2026-11-20",
+    ]));
+    let review: Value =
+        serde_json::from_str(&fs::read_to_string(out.join("review.json")).expect("review"))
+            .expect("JSON");
+    assert_eq!(review["reviewer"], "agy");
+    let dark = review["pairs"]
+        .as_array()
+        .expect("pairs")
+        .iter()
+        .find(|p| p["state"] == "dark")
+        .expect("dark")
+        .clone();
+    assert_eq!(
+        (dark["verdict"].as_str(), dark["differences"].as_str()),
+        (Some("differs"), Some("Title wraps"))
+    );
+    assert!(!f
+        .cli_bare(&["review", "set", dir, "demo.none", "--verdict", "same"])
+        .status
+        .success());
+
+    // Manifests record skips with reasons, run metadata, and fixture packs.
+    let manifest = |platform: &str, pack: &str, skipped: bool| {
+        fs::create_dir_all(f.0.join("captures").join(platform)).expect("mkdir");
+        let captures = if skipped {
+            json!([{"screen": "demo", "state": "dark", "status": "skipped", "reason": "No dark fixture"}])
+        } else {
+            json!([])
+        };
+        fs::write(
+            f.0.join("captures").join(platform).join("manifest.json"),
+            json!({"platform": platform, "device": "Pixel 8", "commit": "abcdef1", "fixture_pack": pack, "captures": captures}).to_string(),
+        )
+        .expect("manifest");
+    };
+    manifest("ios", "pack-1", false);
+    manifest("android", "pack-2", true);
+    for name in ["demo.dark.android.png", "demo.dark.android.json"] {
+        fs::remove_file(f.0.join("captures").join(name)).expect("remove");
+    }
+    let ui = f.ui();
+    let coverage = ui
+        .coverage(&f.0.join("captures"), &["ios", "android"])
+        .expect("coverage");
+    assert_eq!(coverage.counts("android"), [2, 1, 1, 0]);
+    let markdown = coverage.markdown(&ui);
+    assert!(
+        markdown.contains("No dark fixture")
+            && markdown.contains("| android | Pixel 8 | abcdef1 | pack-2 |")
+    );
+    assert!(markdown.contains("fixtures differ: visual comparison is structural only"));
+    let captures = f.0.join("captures");
+    let output = f.cli(
+        "compare",
+        &["--captures", captures.to_str().expect("path"), "--out", dir],
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("WARNING: fixtures differ: visual comparison is structural only (ios: pack-1, android: pack-2)"));
+    assert!(fs::read_to_string(out.join("index.html"))
+        .expect("HTML")
+        .contains("role=\"alert\""));
+    manifest("android", "pack-1", true);
+    let comparison = f
+        .ui()
+        .compare(&captures, "ios", "android", None)
+        .expect("compare");
+    assert!(comparison.fixture_warning.is_none());
 }

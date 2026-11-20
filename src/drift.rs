@@ -541,7 +541,19 @@ impl Catalog {
         ))
     }
     pub fn report_with_roots(&self, options: &RootOptions) -> Result<String> {
-        Ok(self.report()?
+        self.report_with_roots_at(options, None)
+    }
+    /// Like `report_with_roots`, with links relative to the directory of `out`.
+    pub fn report_with_roots_at(
+        &self,
+        options: &RootOptions,
+        out: Option<&Path>,
+    ) -> Result<String> {
+        let context = crate::ReportContext {
+            link_base: out.map(crate::report::link_base),
+            ..Default::default()
+        };
+        Ok(self.report_with(&context)?
             + &self.evidence_roots_section(options)?
             + &self.baseline_drift_section(options)?)
     }

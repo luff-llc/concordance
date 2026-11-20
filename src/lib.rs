@@ -7,7 +7,7 @@ mod report;
 mod validation;
 pub use drift::*;
 pub use evidence::{split_anchor, Anchor};
-pub use report::{CaptureState, ReportContext};
+pub use report::{relative_path, CaptureState, ReportContext};
 pub use validation::*;
 pub mod schema;
 pub mod ui;
@@ -430,7 +430,7 @@ impl Catalog {
                     && e.platforms.get(platform).is_some_and(|p| {
                         p.status.is_gap()
                             || (details
-                                && p.status == Status::Shipped
+                                && p.status == Status::Implemented
                                 && !self.open_details(e, platform).is_empty())
                     })
             })
@@ -452,7 +452,7 @@ impl Catalog {
             let status = entry.platforms[platform].status;
             status.is_gap()
                 || (details
-                    && status == Status::Shipped
+                    && status == Status::Implemented
                     && !self.open_details(entry, platform).is_empty())
         });
         Ok(self

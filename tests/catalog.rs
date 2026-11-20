@@ -760,7 +760,7 @@ fn verification_is_derived_from_independent_evidence() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("verifier must differ"));
     let catalog = fixture.load_collect_only();
     let record = &catalog.entries["reader.native-menu"].platforms["android"];
-    assert_eq!(record.status, concordance::Status::Shipped);
+    assert_eq!(record.status, concordance::Status::Implemented);
     assert_eq!(
         record.unverified_reason(),
         Some("verifier is the implementer")
@@ -780,10 +780,52 @@ fn verification_is_derived_from_independent_evidence() {
         "shipped",
     );
     success(fixture.cli("validate", &[]));
+    // The entry writes state, so by default it needs a capture as well as a journey.
+    let report = fixture.load().report().expect("report");
+    assert!(report.contains("verification lacks a required capture (verify_requires)"));
+    fixture.mutate("reader", |v| v[1]["verify_requires"] = json!(["journey"]));
     let catalog = fixture.load();
     assert!(catalog.entries["reader.native-menu"].platforms["android"].verified());
     let report = catalog.report().expect("report");
     assert!(report.contains("0 of 1 Android implemented entries"));
+    // The tool writes `implemented`; `shipped` is only a read alias.
+    let json: Value = serde_json::from_str(&success(fixture.cli("entry", &["reader.native-menu"])))
+        .expect("entry JSON");
+    assert_eq!(json["platforms"]["android"]["status"], "implemented");
+    // A purely visual entry (no writes) verifies on a capture alone.
+    fs::write(fixture.0.join("shot.png"), "png").expect("capture");
+    fixture.mutate("reader", |v| {
+        v[1].as_object_mut()
+            .expect("entry")
+            .remove("verify_requires");
+        v[1]["data"]["writes"] = json!([]);
+        v[1]["platforms"]["android"]["verification"] =
+            json!({"by": "agy", "at": "2026-11-20", "captures": ["shot.png"]});
+    });
+    success(fixture.cli("validate", &[]));
+    assert!(fixture
+        .load()
+        .report()
+        .expect("report")
+        .contains("0 of 1 Android implemented entries"));
+    // verification requires implemented_by.
+    fixture.mutate("reader", |v| {
+        v[1]["platforms"]["android"]
+            .as_object_mut()
+            .expect("record")
+            .remove("implemented_by");
+    });
+    let output = fixture.cli("validate", &[]);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("verification requires implemented_by")
+    );
+    set(
+        json!({"by": "agy", "at": "2026-11-20", "commit": "abcdef1", "journeys": ["ReaderTests.swift#ReaderTests.testOpen"]}),
+        "sol",
+        "shipped",
+    );
+    fixture.mutate("reader", |v| v[1]["verify_requires"] = json!(["journey"]));
+    let catalog = fixture.load();
     assert!(catalog
         .brief("reader.native-menu")
         .expect("brief")
@@ -854,11 +896,11 @@ fn detail_items_carry_numbers_status_and_baseline_evidence() {
     assert!(brief.contains("## Details"));
     assert!(brief.contains("Spec: motion spring response 0.4 damping 0.8"));
     assert!(brief.contains("Baseline (ios): Reader.swift:1"));
-    assert!(brief.contains("android: shipped; verified by agy"));
+    assert!(brief.contains("android: implemented; verified by agy"));
     let plain = success(fixture.cli("entry", &["reader.native-menu", "--format", "brief"]));
     assert!(!plain.contains("## Details"));
     let queue = success(fixture.cli("next", &["--platform", "android", "--details"]));
-    assert!(queue.contains("reader.native-menu\tmedium\tshipped"));
+    assert!(queue.contains("reader.native-menu\tmedium\timplemented"));
     assert!(queue.contains(
         "reader.native-menu#open-spring\tdetail:motion\tmissing\tMenu opens with a settling spring [motion spring response 0.4 damping 0.8]"
     ));
@@ -957,4 +999,31 @@ fn drift_matches_symbol_and_line_anchors_against_changed_hunks() {
     let ios = &drift.platforms[0];
     assert_eq!(ios.precise_hits, 2);
     assert!(drift.markdown().contains("file deleted"));
+}
+
+#[test]
+fn report_links_resolve_from_the_output_location() {
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.0.join("docs/out")).expect("mkdir");
+    success(fixture.cli(
+        "report",
+        &[
+            "--out",
+            fixture.0.join("docs/out/parity.md").to_str().expect("path"),
+        ],
+    ));
+    let report = fs::read_to_string(fixture.0.join("docs/out/parity.md")).expect("report");
+    assert!(
+        report.contains("[reader](../../catalog/reader.yaml)"),
+        "{report}"
+    );
+    assert!(report.contains("[README](../../README.md)"));
+    success(fixture.cli(
+        "report",
+        &[
+            "--out",
+            fixture.0.join("docs/out/parity.md").to_str().expect("path"),
+            "--check",
+        ],
+    ));
 }

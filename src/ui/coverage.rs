@@ -1,7 +1,7 @@
 //! Capture coverage: which required screen/state captures exist, were skipped, or are missing.
 use super::{capture_file, UiCatalog};
 use crate::{is_capture_key, CaptureState, Issue, ReportContext, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
@@ -19,6 +19,81 @@ impl CaptureRecord {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ManifestStatus {
+    Produced,
+    Skipped,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestCapture {
+    pub screen: String,
+    pub state: String,
+    pub status: ManifestStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+/// A capture run's record: `<captures>/<platform>/manifest.json` or
+/// `<captures>/manifest.<platform>.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureManifest {
+    pub platform: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixture_pack: Option<String>,
+    #[serde(default)]
+    pub captures: Vec<ManifestCapture>,
+}
+impl CaptureManifest {
+    pub fn load(captures: &Path, platform: &str) -> Result<Option<Self>> {
+        for relative in [
+            format!("{platform}/manifest.json"),
+            format!("manifest.{platform}.json"),
+        ] {
+            let path = super::reference(captures, &relative)?;
+            if !path.is_file() {
+                continue;
+            }
+            let manifest: Self = serde_json::from_str(&fs::read_to_string(&path)?)
+                .map_err(|e| format!("{}: {e}", path.display()))?;
+            if manifest.platform != platform {
+                return crate::fail(format!(
+                    "{}: manifest platform {} does not match {platform}",
+                    path.display(),
+                    manifest.platform
+                ));
+            }
+            return Ok(Some(manifest));
+        }
+        Ok(None)
+    }
+    fn entry(&self, screen: &str, state: &str) -> Option<&ManifestCapture> {
+        self.captures
+            .iter()
+            .find(|c| c.screen == screen && c.state == state)
+    }
+}
+
+/// A loud warning when two platforms' capture runs used different fixture packs.
+pub fn fixture_warning(
+    baseline: (&str, Option<&CaptureManifest>),
+    target: (&str, Option<&CaptureManifest>),
+) -> Option<String> {
+    let a = baseline.1.and_then(|m| m.fixture_pack.as_deref())?;
+    let b = target.1.and_then(|m| m.fixture_pack.as_deref())?;
+    (a != b).then(|| {
+        format!(
+            "fixtures differ: visual comparison is structural only ({}: {a}, {}: {b})",
+            baseline.0, target.0
+        )
+    })
+}
+
 /// Required captures and their state for a set of platforms.
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct Coverage {
@@ -26,6 +101,8 @@ pub struct Coverage {
     pub records: Vec<CaptureRecord>,
     /// Screen ID to the behavior areas of its linked entries.
     pub screen_areas: BTreeMap<String, BTreeSet<String>>,
+    /// Capture-run manifests by platform, when present.
+    pub manifests: BTreeMap<String, CaptureManifest>,
 }
 
 /// [required, produced, skipped, missing]
@@ -51,6 +128,7 @@ impl Coverage {
                 .iter()
                 .map(|r| ((r.key(), r.platform.clone()), r.capture.clone()))
                 .collect(),
+            link_base: None,
         }
     }
 
@@ -66,6 +144,30 @@ impl Coverage {
                 "| {platform} | {} | {} | {} | {} |\n",
                 c[0], c[1], c[2], c[3]
             ));
+        }
+        if !self.manifests.is_empty() {
+            out.push_str("\n### Capture runs\n\n| Platform | Device | Commit | Fixture pack |\n| --- | --- | --- | --- |\n");
+            for platform in &self.platforms {
+                let m = self.manifests.get(platform);
+                let field =
+                    |f: Option<&String>| f.map(String::as_str).unwrap_or("not recorded").to_owned();
+                out.push_str(&format!(
+                    "| {platform} | {} | {} | {} |\n",
+                    field(m.and_then(|m| m.device.as_ref())),
+                    field(m.and_then(|m| m.commit.as_ref())),
+                    field(m.and_then(|m| m.fixture_pack.as_ref())),
+                ));
+            }
+            let packs: BTreeSet<&str> = self
+                .manifests
+                .values()
+                .filter_map(|m| m.fixture_pack.as_deref())
+                .collect();
+            if packs.len() > 1 {
+                out.push_str(
+                    "\n**Warning: fixtures differ: visual comparison is structural only.**\n",
+                );
+            }
         }
         let mut areas: BTreeSet<&str> = BTreeSet::new();
         for set in self.screen_areas.values() {
@@ -156,6 +258,9 @@ impl UiCatalog {
         };
         for platform in platforms {
             self.require_platform(platform)?;
+            if let Some(manifest) = CaptureManifest::load(captures, platform)? {
+                coverage.manifests.insert((*platform).to_owned(), manifest);
+            }
         }
         for screen in self.screens.values() {
             let areas = screen
@@ -177,8 +282,19 @@ impl UiCatalog {
                     let png = capture_file(captures, platform, &stem, "png")?.is_file();
                     let json = capture_file(captures, platform, &stem, "json")?.is_file();
                     let skip = capture_file(captures, platform, &stem, "skip")?;
+                    let listed = coverage
+                        .manifests
+                        .get(*platform)
+                        .and_then(|m| m.entry(&screen.id, state));
                     let capture = match (png, json) {
                         (true, true) => CaptureState::Produced,
+                        _ if listed.is_some_and(|c| c.status == ManifestStatus::Skipped) => {
+                            CaptureState::Skipped(
+                                listed.and_then(|c| c.reason.clone()).unwrap_or_else(|| {
+                                    "skipped in manifest; no reason recorded".into()
+                                }),
+                            )
+                        }
                         _ if skip.is_file() => {
                             let reason = fs::read_to_string(&skip)?
                                 .lines()
@@ -188,6 +304,9 @@ impl UiCatalog {
                                 .to_owned();
                             CaptureState::Skipped(reason)
                         }
+                        _ if listed.is_some() => CaptureState::Missing(
+                            "manifest lists it as produced, but the PNG/JSON pair is absent".into(),
+                        ),
                         (true, false) => CaptureState::Missing("PNG without JSON".into()),
                         (false, true) => CaptureState::Missing("JSON without PNG".into()),
                         (false, false) => CaptureState::Missing("no PNG/JSON pair".into()),

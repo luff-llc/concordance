@@ -47,11 +47,11 @@ Order: critical, high, medium, low. Within a tier, catalog priority comes first,
 
 These entries have no iOS counterpart and are excluded from the iOS parity totals.
 
-- `reader.native-menu`: Android shipped. Open saved reading material with native controls.
+- `reader.native-menu`: Android implemented. Open saved reading material with native controls.
 
 ## Evidence limits
 
 - iOS entries without linked tests: 0.
-- Android shipped/partial entries without linked tests: 1.
+- Android implemented/partial entries without linked tests: 1.
 - Native implementations preserve behavior contracts using each platform's own UI conventions.
 - See [README](README.md) for status rules, exclusions, source roots, and audit limitations.

@@ -59,13 +59,33 @@ impl Review {
     }
 }
 
+impl Review {
+    /// Set one pair's verdict (and note) by its `screen.state` key.
+    pub fn set(&mut self, key: &str, verdict: Verdict, note: Option<&str>) -> Result<()> {
+        let pair = self
+            .pairs
+            .iter_mut()
+            .find(|p| format!("{}.{}", p.screen, p.state) == key)
+            .ok_or_else(|| format!("review.json has no pair {key}"))?;
+        pair.verdict = verdict;
+        if let Some(note) = note {
+            pair.differences = note.to_owned();
+        }
+        Ok(())
+    }
+    pub fn save(&self, path: &Path) -> Result<()> {
+        fs::write(path, serde_json::to_string_pretty(self)? + "\n")?;
+        Ok(())
+    }
+}
+
 /// One proposed change to an entry's target platform record. Never applied automatically.
 #[derive(Debug, Clone, Serialize)]
 pub struct Proposal {
     pub id: String,
     pub file: String,
     pub platform: String,
-    /// `verify`, `needs-work`, `not-implemented` or `rejected`.
+    /// `verify`, `incomplete`, `needs-work`, `not-implemented` or `rejected`.
     pub action: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -98,8 +118,9 @@ impl VerifyOutcome {
     pub fn summary(&self) -> String {
         let count = |a: &str| self.proposals.iter().filter(|p| p.action == a).count();
         format!(
-            "{} verify, {} needs-work, {} not-implemented, {} rejected; {} pair(s) excluded.",
+            "{} verify, {} incomplete, {} needs-work, {} not-implemented, {} rejected; {} pair(s) excluded.",
             count("verify"),
+            count("incomplete"),
             count("needs-work"),
             count("not-implemented"),
             count("rejected"),
@@ -201,7 +222,7 @@ impl UiCatalog {
                 verification: None,
                 gap: None,
             };
-            if record.is_none_or(|r| r.status != Status::Shipped) {
+            if record.is_none_or(|r| r.status != Status::Implemented) {
                 proposal.action = "not-implemented".into();
                 proposal.reason = Some(format!(
                     "{} status is {}",
@@ -251,6 +272,20 @@ impl UiCatalog {
                         )
                     }),
                 });
+                // Proposals must satisfy the entry's verify_requires and the implemented_by rule.
+                let mut missing: Vec<String> = Vec::new();
+                if record.is_some_and(|r| r.implemented_by.is_none()) {
+                    missing.push("record implemented_by first".into());
+                }
+                if let Some(v) = &proposal.verification {
+                    for kind in entry.missing_verification_evidence(v) {
+                        missing.push(format!("add a {kind} (verify_requires)"));
+                    }
+                }
+                if !missing.is_empty() {
+                    proposal.action = "incomplete".into();
+                    proposal.reason = Some(missing.join("; "));
+                }
             }
             outcome.proposals.push(proposal);
         }
