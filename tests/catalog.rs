@@ -883,3 +883,78 @@ fn detail_items_carry_numbers_status_and_baseline_evidence() {
     assert!(stderr.contains("invalid slug"), "{stderr}");
     assert!(stderr.contains("invalid value \"sound\""), "{stderr}");
 }
+
+#[test]
+fn drift_matches_symbol_and_line_anchors_against_changed_hunks() {
+    let fixture = Fixture::new();
+    let player = "struct Player {\n    func play() {\n        start()\n    }\n\n    func pause() {\n        stop()\n    }\n}\n";
+    fs::write(fixture.0.join("native/Player.swift"), player).expect("player");
+    git_test(&fixture.0, &["init", "-q"]);
+    let before = commit_test(&fixture.0);
+    let config = fs::read_to_string(fixture.0.join("catalog.toml")).expect("config");
+    fs::write(
+        fixture.0.join("catalog.toml"),
+        format!("{config}\n[baseline]\ncommit = '{before}'\n"),
+    )
+    .expect("config");
+    let cite = |area: &str, index: usize, source: &str| {
+        fixture.mutate(area, |v| {
+            v[index]["platforms"]["ios"]["source"] = json!([source]);
+            v[index]["platforms"]["ios"]["tests"] = json!([]);
+        });
+    };
+    cite("reader", 0, "Player.swift#Player.pause");
+    cite("reader", 1, "Player.swift:L2-L4");
+    cite("search", 0, "Player.swift");
+    cite("library", 0, "Player.swift#missingSymbol");
+    // Change only the body of pause().
+    fs::write(
+        fixture.0.join("native/Player.swift"),
+        player.replace("stop()", "stop(fade: true)"),
+    )
+    .expect("edit");
+    commit_test(&fixture.0);
+    let drift = fixture
+        .load()
+        .drift(&Default::default(), Some("ios"), None, "HEAD")
+        .expect("drift");
+    let ios = &drift.platforms[0];
+    let ids: Vec<&str> = ios.entries.iter().map(|e| e.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "library.open-library",
+            "reader.open-book",
+            "search.find-book"
+        ]
+    );
+    let pause = &ios.entries[1].hits[0];
+    assert_eq!(pause.precision, concordance::Precision::Precise);
+    assert_eq!(pause.lines, Some((6, 8)));
+    assert_eq!(
+        ios.entries[0].hits[0].note.as_deref(),
+        Some("symbol not found at baseline")
+    );
+    assert_eq!(
+        ios.entries[2].hits[0].precision,
+        concordance::Precision::Coarse
+    );
+    assert_eq!(
+        (ios.precise_hits, ios.coarse_hits, ios.anchored_unaffected),
+        (1, 2, 1)
+    );
+    let markdown = drift.markdown();
+    assert!(markdown.contains("`Player.swift#Player.pause` precise (L6-L8)"));
+    assert!(markdown.contains("`Player.swift` file-level (coarse)"));
+    assert!(markdown.contains("3 entries: 1 with precise hits, 2 file-level (coarse) only"));
+    // Deleting the file is a precise hit for every anchored reference.
+    fs::remove_file(fixture.0.join("native/Player.swift")).expect("delete");
+    commit_test(&fixture.0);
+    let drift = fixture
+        .load()
+        .drift(&Default::default(), Some("ios"), None, "HEAD")
+        .expect("drift");
+    let ios = &drift.platforms[0];
+    assert_eq!(ios.precise_hits, 2);
+    assert!(drift.markdown().contains("file deleted"));
+}
