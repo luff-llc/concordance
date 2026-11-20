@@ -370,6 +370,42 @@ default. A limit of 0 fails any stale record; otherwise a record fails when its 
 days (from `since_date`, UTC today unless `--today`) exceeds the limit. A stale record
 without `since_date` always fails. Exit 2 on errors.
 
+### Shared version
+
+When every platform must ship one marketing version, name the file that holds it and
+how each platform's version is found:
+
+```toml
+[version]
+source = "metadata/app/version.txt"    # repository-relative (repo_root or --repo)
+
+[version.platforms.ios]
+file = "scripts/generate-project.py"   # relative to the platform root
+pattern = "'bundle': 'org\\.example\\.app'[^}]*?'version': '([^']+)'"
+
+[[version.platforms.android]]           # several checks per platform: all must pass
+file = "app/build.gradle.kts"
+pattern = 'versionName\s*=.*version\.txt'
+reads_source = true
+
+[[version.platforms.android]]
+command = "./gradlew -q :app:printVersionName"
+timeout_seconds = 600
+```
+
+The source's first non-empty line is the version. A check reads `file` and takes the
+first capture group of `pattern` (a Rust `regex`; without a group, the whole match; with
+no pattern, the file's first non-empty line), or runs `command` with `sh -c` from the
+platform root and takes the last non-empty stdout line (default timeout 300 s). With
+`reads_source = true` the check passes when `pattern` matches (or, without a pattern,
+when the file mentions the source path or file name): a static proof that a build reads
+the shared file instead of a literal. `concordance version-check <dir> [--platform p]
+[--root …] [--repo …]` prints a table and exits 0 when everything matches, 1 on any
+mismatch or failed check, 2 on errors. Platforms whose external root is not supplied are
+listed as unchecked. `gate-release` runs the check for its platform when `[version]`
+exists; `--skip-version` opts out. The `regex` crate is the one dependency added for
+this, because the patterns are written by catalog owners.
+
 ### `strings export`
 
 ```sh

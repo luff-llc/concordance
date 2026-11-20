@@ -66,6 +66,9 @@
   string catalogs) and queues file-level hits as review tasks (`--coarse-as stale|review`,
   default review); `set --stale` and `set --reviewed-unchanged` (`reviewed_commit`) triage
   them. `anchors suggest` proposes `#Symbol` anchors for file-level evidence.
+- Shared marketing version: `[version] source` plus per-platform `file`/`pattern`,
+  `command` (with timeout) or `reads_source` checks; `version-check` (exit 0/1/2) and the
+  same check inside `gate-release` (`--skip-version`). Adds the `regex` dependency.
 - `strings export` writes Android `strings_<app>_shared.xml` resources (with locales)
   for copy-detail keys from an `.xcstrings` file, with documented deterministic resource
   names; `copy.key` on copy details.
