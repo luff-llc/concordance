@@ -1364,11 +1364,62 @@ fn flavour_platforms_inherit_records_unless_overridden() {
     );
     let search = &catalog.entries["search.find-book"].platforms["horizon"];
     assert!(search.inherited);
+    // An explicit null unsets an inherited key.
+    fixture.mutate("search", |v| {
+        v[0]["platforms"]["horizon"] = json!({"gap": null, "source": null})
+    });
+    let catalog = fixture.load_collect_only();
+    let unset = &catalog.entries["search.find-book"].platforms["horizon"];
+    assert!(unset.gap.is_none() && unset.source.is_empty() && !unset.inherited);
+    assert_eq!(unset.status, concordance::Status::Missing);
+    fixture.mutate("search", |v| {
+        v[0]["platforms"]
+            .as_object_mut()
+            .expect("platforms")
+            .remove("horizon");
+    });
     // Inherited copies are validated once, through the parent.
     let stderr = String::from_utf8(fixture.cli("validate", &[]).stderr).expect("UTF8");
     assert_eq!(stderr.matches("Gone.kt").count(), 1, "{stderr}");
     let queue = success(fixture.cli("next", &["--platform", "horizon"]));
     assert!(queue.contains("reader.open-book\tcritical\tmissing"));
+    // set --unset writes null on the inheriting platform; --unset elsewhere is refused.
+    let dir = fixture.0.to_str().expect("path");
+    let set = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_concordance"))
+            .args(["set", dir])
+            .args(args)
+            .output()
+            .expect("CLI")
+    };
+    let output = set(&[
+        "search.find-book",
+        "--platform",
+        "horizon",
+        "--status",
+        "missing",
+        "--unset",
+        "gap",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        fixture.load_collect_only().entries["search.find-book"].platforms["horizon"]
+            .gap
+            .is_none()
+    );
+    assert!(!set(&[
+        "search.find-book",
+        "--platform",
+        "android",
+        "--unset",
+        "gap"
+    ])
+    .status
+    .success());
     let config = fs::read_to_string(fixture.0.join("catalog.toml")).expect("config");
     fs::write(
         fixture.0.join("catalog.toml"),

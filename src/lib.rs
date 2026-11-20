@@ -798,7 +798,8 @@ fn inheritance_order(config: &Config) -> Vec<(String, String)> {
 }
 
 /// Fill inherited platform records in a raw entry. A missing child record is copied whole
-/// from its parent; a present one is merged over the parent's (child keys win).
+/// from its parent; a present one is merged over the parent's (child keys win, and a key
+/// set to `null` removes the parent's value).
 /// Returns the whole copies as (detail index, platform).
 fn inherit(
     entry: &mut serde_json::Value,
@@ -836,6 +837,8 @@ fn inherit(
                     }
                     own.entry(key).or_insert(value);
                 }
+                // An explicit null unsets a parent key.
+                own.retain(|_, value| !value.is_null());
             }
         }
     }

@@ -244,7 +244,9 @@ horizon = { root = "apps/android", inherits = "android" }
 An entry (or detail) without a `horizon` record gets a copy of its `android` record;
 a `horizon` record that is present carries only its differences and is merged over the
 parent (its keys win; when it sets a different `status`, the parent's `verification`,
-`gap` and `blocked_by` are not inherited). Whole copies are not validated separately,
+`gap` and `blocked_by` are not inherited). To drop a parent value, set the key to
+`null` in the inheriting record, for example `horizon: {gap: null}`; `null` is accepted
+only in records of inheriting platforms and means "unset". Whole copies are not validated separately,
 so a broken parent path is reported once. Unknown parents and cycles are errors.
 
 ## Editing records
@@ -257,7 +259,8 @@ concordance set spec/product reader.open-book/open-spring --platform android --s
 
 `set` changes `status`, `implemented_by` (`--by`), `gap`, `notes` and `blocked_by`
 (comma-separated), and `--clear`s `gap`, `notes`, `implemented_by`, `blocked_by`,
-`verification`, `source` or `tests`. A detail is `entry/detail` or `entry#detail`; a
+`verification`, `source` or `tests`. On an inheriting platform, `--unset <field>`
+writes `null` so the parent's value is dropped rather than re-inherited. A detail is `entry/detail` or `entry#detail`; a
 missing record needs `--status`. It never writes `verification` (that is `verify`'s
 proposal, applied by a person). Keys keep their order and pretty-printed JSON-style
 area files are rewritten byte-for-byte apart from the edit; files that would be

@@ -27,6 +27,8 @@ pub struct SetRequest {
     pub notes: Option<String>,
     pub blocked_by: Option<Vec<String>>,
     pub clear: Vec<String>,
+    /// Fields to set to `null`, unsetting a value inherited from the parent platform.
+    pub unset: Vec<String>,
     pub allow_reformat: bool,
 }
 #[derive(Debug)]
@@ -53,7 +55,7 @@ impl Catalog {
     /// Edit one platform record in its area file, then reload; the edit is reverted if it
     /// introduces validation errors for that record.
     pub fn set_record(directory: &Path, request: &SetRequest) -> Result<SetOutcome> {
-        for field in &request.clear {
+        for field in request.clear.iter().chain(&request.unset) {
             if !CLEARABLE.contains(&field.as_str()) {
                 return fail(format!(
                     "cannot clear {field}; clearable: {}",
@@ -70,8 +72,14 @@ impl Catalog {
             None => entry_id.to_owned(),
         };
         let (catalog, before) = Catalog::load_collect(directory)?;
-        if !catalog.config.platforms.contains_key(&request.platform) {
+        let Some(platform_config) = catalog.config.platforms.get(&request.platform) else {
             return fail(format!("unknown platform: {}", request.platform));
+        };
+        if !request.unset.is_empty() && platform_config.inherits().is_none() {
+            return fail(format!(
+                "--unset needs an inheriting platform; {} inherits nothing (use --clear)",
+                request.platform
+            ));
         }
         let area = catalog
             .areas
@@ -112,6 +120,9 @@ impl Catalog {
                 .ok_or("platform record is not a mapping")?;
             for field in &request.clear {
                 record.remove(field.as_str());
+            }
+            for field in &request.unset {
+                record.insert(key(field), Value::Null);
             }
             if let Some(status) = request.status {
                 record.insert(key("status"), key(status.as_str()));

@@ -49,7 +49,8 @@
   for motion, haptic and gesture). The schema evaluator supports `anyOf`.
 - `concordance rebase-anchors --to <sha>` moves line anchors through the diff and
   flags edited ranges and lost symbols; `--write` applies the moves.
-- Platform inheritance: `horizon = { root = "...", inherits = "android" }`.
+- Platform inheritance: `horizon = { root = "...", inherits = "android" }`; an
+  inheriting record unsets a parent key with an explicit `null`.
 
 ## 0.2.0
 

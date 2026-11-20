@@ -112,6 +112,9 @@ enum Command {
         /// Field to remove: gap, notes, implemented_by, blocked_by, verification, source, tests.
         #[arg(long)]
         clear: Vec<String>,
+        /// Set a field to null on an inheriting platform, unsetting the parent's value.
+        #[arg(long)]
+        unset: Vec<String>,
         /// Allow rewriting a file whose layout is not canonical (comments are lost).
         #[arg(long)]
         allow_reformat: bool,
@@ -528,6 +531,7 @@ fn run(cli: Cli) -> Result<()> {
             notes,
             blocked_by,
             clear,
+            unset,
             allow_reformat,
         } => {
             use concordance::Status;
@@ -545,6 +549,7 @@ fn run(cli: Cli) -> Result<()> {
                 notes,
                 blocked_by,
                 clear,
+                unset,
                 allow_reformat,
             };
             let outcome = Catalog::set_record(&dir, &request)?;
