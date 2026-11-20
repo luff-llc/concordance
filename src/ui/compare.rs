@@ -1,4 +1,6 @@
-use super::{reference, rgb, Frame, Node, Region, Screen, ScreenState, Snapshot, Theme, UiCatalog};
+use super::{
+    capture_file, rgb, Frame, Node, Region, Screen, ScreenState, Snapshot, Theme, UiCatalog,
+};
 use crate::{fail, Result};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -247,8 +249,8 @@ impl UiCatalog {
         captures: &Path,
     ) -> Result<Evidence> {
         let stem = format!("{}.{state_id}.{platform}", screen.id);
-        let png = reference(captures, &format!("{stem}.png"))?;
-        let json = reference(captures, &format!("{stem}.json"))?;
+        let png = capture_file(captures, platform, &stem, "png")?;
+        let json = capture_file(captures, platform, &stem, "json")?;
         let mut result = PlatformResult {
             platform: platform.into(),
             captured: png.is_file() && json.is_file(),
@@ -538,7 +540,12 @@ impl UiCatalog {
                                 "{}.{}.{}.png",
                                 screen.id, state_id, evidence.result.platform
                             );
-                            let source = reference(captures, &filename)?;
+                            let source = capture_file(
+                                captures,
+                                &evidence.result.platform,
+                                &format!("{}.{}.{}", screen.id, state_id, evidence.result.platform),
+                                "png",
+                            )?;
                             let destination = out.join("captures").join(&filename);
                             if !destination.exists()
                                 || source.canonicalize()? != destination.canonicalize()?
@@ -597,7 +604,8 @@ impl UiCatalog {
         }
         Ok(comparison)
     }
-    /// Fresh comparison summary for all configured platforms against the chosen baseline.
+    /// Fresh comparison summary for all configured platforms against the chosen baseline,
+    /// with capture coverage; skipped or missing captures withdraw derived verification.
     pub fn ui_report(&self, captures: &Path, baseline: &str) -> Result<String> {
         let comparisons = self
             .catalog
@@ -611,9 +619,19 @@ impl UiCatalog {
                 .iter()
                 .flat_map(|c| c.pairs.iter().map(|pair| &pair.target)),
         );
-        let mut report = self.catalog.report()?;
+        let platforms: Vec<&str> = self
+            .catalog
+            .config
+            .platforms
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let coverage = self.coverage(captures, &platforms)?;
+        let mut report = self.catalog.report_with(&coverage.context())?;
         report.push('\n');
         report.push_str(&summary);
+        report.push('\n');
+        report.push_str(&coverage.markdown(self));
         Ok(report)
     }
 }

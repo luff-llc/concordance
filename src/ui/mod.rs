@@ -1,8 +1,10 @@
 //! Optional design contracts and native capture comparison.
 mod compare;
+mod coverage;
 mod generate;
 mod model;
 pub use compare::{Comparison, PairResult, PlatformResult};
+pub use coverage::{CaptureRecord, Coverage};
 pub use model::*;
 
 use crate::{fail, schema, Catalog, Result};
@@ -48,6 +50,21 @@ pub(super) fn reference(root: &Path, relative: &str) -> Result<PathBuf> {
         return fail(format!("capture escapes directory: {relative}"));
     }
     Ok(path)
+}
+/// A capture file in the capture directory, or in its `<platform>/` subdirectory.
+pub(super) fn capture_file(
+    captures: &Path,
+    platform: &str,
+    stem: &str,
+    extension: &str,
+) -> Result<PathBuf> {
+    let name = format!("{stem}.{extension}");
+    let flat = reference(captures, &name)?;
+    if flat.exists() {
+        return Ok(flat);
+    }
+    let nested = reference(captures, &format!("{platform}/{name}"))?;
+    Ok(if nested.exists() { nested } else { flat })
 }
 impl UiCatalog {
     pub fn load(directory: impl AsRef<Path>) -> Result<Self> {

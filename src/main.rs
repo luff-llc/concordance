@@ -56,6 +56,10 @@ enum Command {
         captures: Option<PathBuf>,
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Print per-area and per-screen capture coverage (Markdown) instead of the plan,
+        /// without writing stubs. --platform may list several platforms, comma-separated.
+        #[arg(long)]
+        coverage: bool,
     },
     /// Compare native captures and write an HTML report; similarity never gates parity.
     Compare {
@@ -234,14 +238,15 @@ fn run(cli: Cli) -> Result<()> {
             report.errors.extend(evidence.errors);
             report.unchecked.extend(evidence.unchecked);
             if dir.join("tokens.yaml").exists() || dir.join("screens").exists() {
-                if let Err(error) = UiCatalog::load(&dir) {
-                    report.errors.push(concordance::Issue {
+                match UiCatalog::load(&dir) {
+                    Ok(ui) => report.errors.extend(ui.verification_issues()),
+                    Err(error) => report.errors.push(concordance::Issue {
                         group: "ui".into(),
                         entry: String::new(),
                         platform: String::new(),
                         reference: String::new(),
                         message: error.to_string(),
-                    });
+                    }),
                 }
             }
             report.sort();
@@ -312,8 +317,15 @@ fn run(cli: Cli) -> Result<()> {
             language,
             captures,
             out,
+            coverage,
         } => {
             let ui = UiCatalog::load(&dir)?;
+            if coverage {
+                let captures = captures.unwrap_or_else(|| dir.join("captures"));
+                let platforms: Vec<&str> = platform.split(',').map(str::trim).collect();
+                print!("{}", ui.coverage(&captures, &platforms)?.markdown(&ui));
+                return Ok(());
+            }
             let language = match language {
                 Some(language) => language,
                 None => match platform.as_str() {

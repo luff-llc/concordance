@@ -709,3 +709,73 @@ fn ui_report_accepts_repeated_platform_roots_and_checks_freshness() {
         .status
         .success());
 }
+
+#[test]
+fn capture_coverage_counts_produced_skipped_and_missing_and_blocks_verification() {
+    let f = Fixture::new();
+    // Platform subdirectories are accepted alongside the flat layout.
+    let nested = f.0.join("captures/android");
+    fs::create_dir_all(&nested).expect("mkdir");
+    for name in ["demo.populated.android.png", "demo.populated.android.json"] {
+        fs::rename(f.0.join("captures").join(name), nested.join(name)).expect("move");
+    }
+    for name in ["demo.dark.android.png", "demo.dark.android.json"] {
+        fs::remove_file(f.0.join("captures").join(name)).expect("remove");
+    }
+    fs::write(
+        nested.join("demo.dark.android.skip"),
+        "\nNo dark fixture on this device\n",
+    )
+    .expect("skip marker");
+    fs::remove_file(f.0.join("captures/demo.dark.ios.json")).expect("remove");
+    let verify = |captures: Value| {
+        f.edit("catalog/demo.yaml", |v| {
+            v[0]["platforms"]["android"]["implemented_by"] = json!("sol");
+            v[0]["platforms"]["android"]["verification"] =
+                json!({"by": "agy", "at": "2026-11-20", "captures": captures});
+        });
+    };
+    verify(json!(["demo.dark"]));
+    success(f.cli("validate", &[]));
+    let ui = f.ui();
+    let coverage = ui
+        .coverage(&f.0.join("captures"), &["ios", "android"])
+        .expect("coverage");
+    assert_eq!(coverage.counts("android"), [2, 1, 1, 0]);
+    assert_eq!(coverage.counts("ios"), [2, 1, 0, 1]);
+    let markdown = coverage.markdown(&ui);
+    for expected in [
+        "| android | 2 | 1 | 1 | 0 |",
+        "| demo | android | 2 | 1 | 1 | 0 |",
+        "- `demo.dark.android`: No dark fixture on this device",
+        "- `demo.dark.ios`: PNG without JSON",
+        "capture demo.dark skipped: No dark fixture on this device",
+    ] {
+        assert!(
+            markdown.contains(expected),
+            "missing {expected}:\n{markdown}"
+        );
+    }
+    let area = ui.catalog.areas.values().next().expect("area").clone();
+    assert!(markdown.contains(&format!("| {area} | android | 2 | 1 | 1 | 0 |")));
+    // Coverage mode prints Markdown and writes no stubs.
+    let printed = success(f.cli("capture-plan", &["--platform", "ios,android", "--coverage"]));
+    assert!(printed.contains("## Capture coverage"));
+    assert!(!f.0.join("capture-tests").exists());
+    // A skipped capture withdraws verification in the UI report; a produced one supports it.
+    success(f.cli("ui-report", &[]));
+    let report = fs::read_to_string(f.0.join("parity.md")).expect("report");
+    assert!(report.contains("capture demo.dark skipped"), "{report}");
+    verify(json!(["demo.populated"]));
+    success(f.cli("ui-report", &[]));
+    let report = fs::read_to_string(f.0.join("parity.md")).expect("report");
+    assert!(
+        report.contains("0 of 1 Android implemented entries"),
+        "{report}"
+    );
+    // Unknown capture keys are validation errors.
+    verify(json!(["demo.unknown"]));
+    let output = f.cli("validate", &[]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not a declared screen.state"));
+}
