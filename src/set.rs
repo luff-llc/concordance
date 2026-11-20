@@ -27,6 +27,8 @@ pub struct SetRequest {
     pub notes: Option<String>,
     pub blocked_by: Option<Vec<String>>,
     pub clear: Vec<String>,
+    /// Record an intended difference; a stale record returns to its previous status.
+    pub intended: Option<String>,
     /// Fields to set to `null`, unsetting a value inherited from the parent platform.
     pub unset: Vec<String>,
     pub allow_reformat: bool,
@@ -39,7 +41,7 @@ pub struct SetOutcome {
     pub warnings: Vec<Issue>,
 }
 
-fn key(s: &str) -> Value {
+pub(crate) fn key(s: &str) -> Value {
     Value::String(s.into())
 }
 
@@ -49,6 +51,49 @@ fn find<'a>(items: &'a mut Value, id: &str) -> Option<&'a mut Mapping> {
         .iter_mut()
         .filter_map(Value::as_mapping_mut)
         .find(|m| m.get("id").and_then(Value::as_str) == Some(id))
+}
+
+/// The platform record mapping for `entry_id` (or its detail) in an area file's value.
+/// Missing records are created with `create` as their status; `None` leaves them absent.
+pub(crate) fn record_mut<'a>(
+    value: &'a mut Value,
+    entry_id: &str,
+    detail_id: Option<&str>,
+    platform: &str,
+    create: Option<Status>,
+) -> Result<Option<&'a mut Mapping>> {
+    let entry = find(value, entry_id).ok_or("entry not found in its area file")?;
+    let holder = match detail_id {
+        None => entry,
+        Some(detail) => entry
+            .get_mut("details")
+            .and_then(|d| find(d, detail))
+            .ok_or_else(|| format!("unknown detail: {entry_id}#{detail}"))?,
+    };
+    if !holder.contains_key("platforms") {
+        holder.insert(key("platforms"), Value::Mapping(Mapping::new()));
+    }
+    let platforms = holder
+        .get_mut("platforms")
+        .and_then(Value::as_mapping_mut)
+        .ok_or("platforms is not a mapping")?;
+    if !platforms.contains_key(platform) {
+        let Some(status) = create else {
+            return Ok(None);
+        };
+        let mut record = Mapping::new();
+        record.insert(key("status"), key(status.as_str()));
+        platforms.insert(key(platform), Value::Mapping(record));
+    }
+    Ok(platforms.get_mut(platform).and_then(Value::as_mapping_mut))
+}
+
+/// Split `entry`, `entry#detail` or `entry/detail`.
+pub(crate) fn split_target(target: &str) -> (&str, Option<&str>) {
+    match target.split_once(['#', '/']) {
+        Some((entry, detail)) => (entry, Some(detail)),
+        None => (target, None),
+    }
 }
 
 impl Catalog {
@@ -63,10 +108,7 @@ impl Catalog {
                 ));
             }
         }
-        let (entry_id, detail_id) = match request.target.split_once(['#', '/']) {
-            Some((entry, detail)) => (entry, Some(detail)),
-            None => (request.target.as_str(), None),
-        };
+        let (entry_id, detail_id) = split_target(&request.target);
         let label = match detail_id {
             Some(d) => format!("{entry_id}#{d}"),
             None => entry_id.to_owned(),
@@ -88,36 +130,19 @@ impl Catalog {
         let file = catalog.directory.join(&catalog.area_files[area]);
         let original = fs::read(&file)?;
         let changed = edit_file(&file, request.allow_reformat, |value| {
-            let entry = find(value, entry_id).ok_or("entry not found in its area file")?;
-            let holder = match detail_id {
-                None => entry,
-                Some(detail) => entry
-                    .get_mut("details")
-                    .and_then(|d| find(d, detail))
-                    .ok_or_else(|| format!("unknown detail: {label}"))?,
-            };
-            if !holder.contains_key("platforms") {
-                holder.insert(key("platforms"), Value::Mapping(Mapping::new()));
-            }
-            let platforms = holder
-                .get_mut("platforms")
-                .and_then(Value::as_mapping_mut)
-                .ok_or("platforms is not a mapping")?;
-            if !platforms.contains_key(request.platform.as_str()) {
-                let Some(status) = request.status else {
-                    return fail(format!(
-                        "{label} has no {} record; pass --status to create one",
-                        request.platform
-                    ));
-                };
-                let mut record = Mapping::new();
-                record.insert(key("status"), key(status.as_str()));
-                platforms.insert(key(&request.platform), Value::Mapping(record));
-            }
-            let record = platforms
-                .get_mut(request.platform.as_str())
-                .and_then(Value::as_mapping_mut)
-                .ok_or("platform record is not a mapping")?;
+            let record = record_mut(
+                value,
+                entry_id,
+                detail_id,
+                &request.platform,
+                request.status,
+            )?
+            .ok_or_else(|| {
+                format!(
+                    "{label} has no {} record; pass --status to create one",
+                    request.platform
+                )
+            })?;
             for field in &request.clear {
                 record.remove(field.as_str());
             }
@@ -134,6 +159,24 @@ impl Catalog {
             ] {
                 if let Some(value) = value {
                     record.insert(key(field), key(value));
+                }
+            }
+            if let Some(reason) = &request.intended {
+                record.insert(key("intended_difference"), key(reason));
+                if record.get("status").and_then(Value::as_str) == Some("stale") {
+                    let previous = record
+                        .get("previous_status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("implemented")
+                        .to_owned();
+                    if request.status.is_none() {
+                        record.insert(key("status"), key(&previous));
+                    }
+                }
+                if record.get("status").and_then(Value::as_str) != Some("stale") {
+                    for field in ["previous_status", "since_commit", "since_date"] {
+                        record.remove(field);
+                    }
                 }
             }
             if let Some(keys) = &request.blocked_by {

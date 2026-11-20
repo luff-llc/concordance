@@ -409,6 +409,37 @@ pub(crate) fn check_platform(
     if record.inherited {
         return; // validated through the platform it was copied from
     }
+    let stale_fields = record.previous_status.is_some()
+        || record.since_commit.is_some()
+        || record.since_date.is_some();
+    if record.status == Status::Stale {
+        if record.previous_status.is_none() || record.since_commit.is_none() {
+            report.error(
+                "stale",
+                entry,
+                platform,
+                "",
+                "stale records need previous_status and since_commit",
+            );
+        }
+        if record.previous_status == Some(Status::Stale) {
+            report.error(
+                "stale",
+                entry,
+                platform,
+                "",
+                "previous_status cannot be stale",
+            );
+        }
+    } else if stale_fields {
+        report.error(
+            "stale",
+            entry,
+            platform,
+            "",
+            "previous_status and since_* belong only to stale records",
+        );
+    }
     let Some(v) = &record.verification else {
         return;
     };

@@ -288,7 +288,7 @@ pub(crate) fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
 }
 
 // Root-relative globs: * matches within a component, ** across components, ? one character.
-fn glob(pattern: &[u8], path: &[u8]) -> bool {
+pub(crate) fn glob(pattern: &[u8], path: &[u8]) -> bool {
     match pattern {
         [] => path.is_empty(),
         [b'*', b'*', b'/', rest @ ..] => {
@@ -500,7 +500,7 @@ impl Catalog {
                     hits,
                 })
                 .collect();
-            let patterns = self.config.source_globs.get(name);
+            let patterns = self.config.source_globs.get(name).map(|g| g.all());
             let uncatalogued = changed
                 .into_iter()
                 .filter(|p| {

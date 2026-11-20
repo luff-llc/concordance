@@ -1,7 +1,13 @@
 //! Product behavior catalogs shared by native implementations and their tests.
+mod continuous;
 mod drift;
 pub mod edit;
 mod rebase;
+pub mod strings;
+pub use continuous::{
+    parse_date, patch_paths, today, GateFile, GateInput, GateReport, ReleaseFinding, SyncChange,
+    SyncOptions, SyncReport,
+};
 mod set;
 pub use rebase::{AnchorFate, AnchorMove, RebaseReport};
 pub use set::{SetOutcome, SetRequest, CLEARABLE};

@@ -174,9 +174,9 @@ impl Catalog {
             .values()
             .filter(|e| e.platforms[base].status == Status::Implemented)
             .collect();
-        // [implemented, verified, partial, missing, not-applicable]
-        let counts = |entries: &[&Entry]| -> [usize; 5] {
-            let mut c = [0; 5];
+        // [implemented, verified, partial, missing, not-applicable, stale]
+        let counts = |entries: &[&Entry]| -> [usize; 6] {
+            let mut c = [0; 6];
             for entry in entries {
                 let p = &entry.platforms[target];
                 match p.status {
@@ -184,6 +184,7 @@ impl Catalog {
                     Status::Partial => c[2] += 1,
                     Status::Missing => c[3] += 1,
                     Status::NotApplicable => c[4] += 1,
+                    Status::Stale => c[5] += 1,
                 }
                 if self.verification_gap(entry, target, context).is_none() {
                     c[1] += 1;
@@ -202,6 +203,9 @@ impl Catalog {
             totals[2],
             totals[3]
         );
+        if totals[5] != 0 {
+            summary.push_str(&format!(", {} stale", totals[5]));
+        }
         if has_na {
             summary.push_str(&format!(", {} not-applicable", totals[4]));
         }
@@ -427,10 +431,21 @@ impl Catalog {
                 ));
             }
         }
-        for (status, heading) in [
+        let stale_heading: &[(Status, &str)] = if totals[5] != 0 {
+            &[(
+                Status::Stale,
+                "Stale after baseline changes, by user impact",
+            )]
+        } else {
+            &[]
+        };
+        for &(status, heading) in [
             (Status::Missing, "Missing capabilities, by user impact"),
             (Status::Partial, "Partial capabilities, by user impact"),
-        ] {
+        ]
+        .iter()
+        .chain(stale_heading)
+        {
             lines.extend([
                 String::new(),
                 format!("## {heading}"),

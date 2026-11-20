@@ -112,6 +112,10 @@ enum Command {
         /// Field to remove: gap, notes, implemented_by, blocked_by, verification, source, tests.
         #[arg(long)]
         clear: Vec<String>,
+        /// Record an intended difference from the baseline; a stale record returns to its
+        /// previous status.
+        #[arg(long)]
+        intended: Option<String>,
         /// Set a field to null on an inheriting platform, unsetting the parent's value.
         #[arg(long)]
         unset: Vec<String>,
@@ -139,6 +143,74 @@ enum Command {
         allow_reformat: bool,
         #[arg(long, value_enum, default_value = "markdown")]
         format: DriftFormat,
+    },
+    /// CI gate: user-visible changes need a covering catalog change. Exit 0 pass, 1 fail, 2 error.
+    Gate {
+        dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
+        #[arg(long)]
+        platform: String,
+        #[arg(long, requires = "head", conflicts_with = "patch")]
+        base: Option<String>,
+        #[arg(long, requires = "base")]
+        head: Option<String>,
+        /// A unified diff (for example from an integration script) instead of a range.
+        #[arg(long)]
+        patch: Option<PathBuf>,
+        /// Commit message for --patch, searched for a `Catalog: none — <reason>` trailer.
+        #[arg(long, requires = "patch")]
+        message_file: Option<PathBuf>,
+        /// Repository checkout containing the platform root.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Also write the Markdown summary here (for example $GITHUB_STEP_SUMMARY).
+        #[arg(long)]
+        summary: Option<PathBuf>,
+    },
+    /// Mark target records stale where the source baseline changed; tasks, issues, new pin.
+    Sync {
+        dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
+        #[arg(long)]
+        platform_from: String,
+        #[arg(long)]
+        platform_to: String,
+        #[arg(long, default_value = "HEAD")]
+        to: String,
+        #[arg(long)]
+        tasks_dir: Option<PathBuf>,
+        /// Capture directory whose files are listed in tasks.
+        #[arg(long)]
+        captures: Option<PathBuf>,
+        /// Open or update issues: only `gh` is supported.
+        #[arg(long)]
+        issues: Option<String>,
+        #[arg(long, default_value = "parity")]
+        label: String,
+        /// Write records, tasks, issues and the new pin (default: dry run).
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Release check: stale records older than their limit fail. Exit 0 pass, 1 fail, 2 error.
+    GateRelease {
+        dir: PathBuf,
+        #[arg(long)]
+        platform: String,
+        #[arg(long)]
+        max_age_days: u32,
+        /// Per detail kind, KIND=DAYS (repeatable), for example copy=0.
+        #[arg(long = "max-age-days-for", value_parser = parse_kind_limit)]
+        max_age_days_for: Vec<(concordance::DetailKind, u32)>,
+        /// Date to measure age from (default: today, UTC).
+        #[arg(long)]
+        today: Option<String>,
+    },
+    /// String resources from an Apple string catalog.
+    Strings {
+        #[command(subcommand)]
+        action: StringsAction,
     },
     /// Edit reviewer notes (review.json) without the browser.
     Review {
@@ -225,6 +297,40 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+}
+#[derive(Subcommand)]
+enum StringsAction {
+    /// Write Android `strings_<app>_shared.xml` files for keys used by copy details.
+    Export {
+        dir: PathBuf,
+        /// The `.xcstrings` file.
+        #[arg(long)]
+        from: PathBuf,
+        /// Export keys referenced by copy details (`copy.key`); required.
+        #[arg(long)]
+        keys_from_catalog: bool,
+        /// Also look up copy details without a key by their text (English-text keys).
+        #[arg(long)]
+        match_text: bool,
+        #[arg(long, default_value = "android")]
+        platform: String,
+        /// App name used in file and resource names (default: the catalog directory name).
+        #[arg(long)]
+        app: Option<String>,
+        /// Android `res` directory.
+        #[arg(long)]
+        out: PathBuf,
+        /// Fail if the files on disk differ, without writing.
+        #[arg(long)]
+        check: bool,
+    },
+}
+fn parse_kind_limit(value: &str) -> std::result::Result<(concordance::DetailKind, u32), String> {
+    let (kind, days) = value.split_once('=').ok_or("expected KIND=DAYS")?;
+    let kind: concordance::DetailKind =
+        serde_json::from_value(serde_json::Value::String(kind.into()))
+            .map_err(|_| format!("unknown detail kind {kind}"))?;
+    Ok((kind, days.parse().map_err(|_| "DAYS must be a number")?))
 }
 #[derive(Subcommand)]
 enum ReviewAction {
@@ -505,6 +611,185 @@ fn run(cli: Cli) -> Result<()> {
                 );
             }
         }
+        Command::Gate {
+            dir,
+            roots,
+            platform,
+            base,
+            head,
+            patch,
+            message_file,
+            repo,
+            summary,
+        } => {
+            let outcome = (|| -> Result<concordance::GateReport> {
+                let catalog = Catalog::load(&dir)?;
+                let mut options = roots.options(&catalog)?;
+                options.repo = repo;
+                let input = match (base, head, patch) {
+                    (Some(base), Some(head), None) => concordance::GateInput::Range { base, head },
+                    (None, None, Some(patch)) => concordance::GateInput::Patch {
+                        patch: fs::read_to_string(patch)?,
+                        message: match message_file {
+                            Some(path) => fs::read_to_string(path)?,
+                            None => String::new(),
+                        },
+                    },
+                    _ => return Err("pass --base and --head, or --patch".into()),
+                };
+                catalog.gate_input(&options, &platform, &input)
+            })();
+            match outcome {
+                Ok(report) => {
+                    let markdown = report.markdown();
+                    print!("{markdown}");
+                    if let Some(path) = summary {
+                        let previous = fs::read_to_string(&path).unwrap_or_default();
+                        fs::write(&path, previous + &markdown)?;
+                    }
+                    if !report.passed {
+                        std::process::exit(1);
+                    }
+                }
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        Command::Sync {
+            dir,
+            roots,
+            platform_from,
+            platform_to,
+            to,
+            tasks_dir,
+            captures,
+            issues,
+            label,
+            apply,
+        } => {
+            let catalog = Catalog::load(&dir)?;
+            let options = roots.options(&catalog)?;
+            if issues.as_deref().is_some_and(|i| i != "gh") {
+                return Err("--issues supports only gh".into());
+            }
+            let report = catalog.sync(
+                &options,
+                &concordance::SyncOptions {
+                    from: platform_from,
+                    to_platform: platform_to,
+                    to,
+                    tasks_dir,
+                    captures,
+                    issues: issues.is_some(),
+                    label,
+                    apply,
+                },
+            )?;
+            print!("{}", report.markdown());
+        }
+        Command::GateRelease {
+            dir,
+            platform,
+            max_age_days,
+            max_age_days_for,
+            today,
+        } => {
+            let outcome = (|| -> Result<Vec<concordance::ReleaseFinding>> {
+                let catalog = Catalog::load(&dir)?;
+                let today = today.unwrap_or_else(concordance::today);
+                catalog.gate_release(
+                    &platform,
+                    max_age_days,
+                    &max_age_days_for.into_iter().collect(),
+                    &today,
+                )
+            })();
+            match outcome {
+                Ok(findings) if findings.is_empty() => {
+                    println!("## Release gate: {platform}\n\nPassed: no stale records beyond their limit.");
+                }
+                Ok(findings) => {
+                    println!("## Release gate: {platform}\n\nFailed: {} stale record(s) beyond their limit without an intended difference.\n\n| Record | Stale since | Age (days) | Limit (days) |\n| --- | --- | ---: | ---: |", findings.len());
+                    for f in findings {
+                        println!(
+                            "| `{}` | {} | {} | {} |",
+                            f.label,
+                            f.since_date.as_deref().unwrap_or("unknown"),
+                            f.age_days
+                                .map(|a| a.to_string())
+                                .unwrap_or_else(|| "?".into()),
+                            f.limit_days
+                        );
+                    }
+                    std::process::exit(1);
+                }
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        Command::Strings {
+            action:
+                StringsAction::Export {
+                    dir,
+                    from,
+                    keys_from_catalog,
+                    match_text,
+                    platform,
+                    app,
+                    out,
+                    check,
+                },
+        } => {
+            if !keys_from_catalog {
+                return Err("pass --keys-from-catalog (the only supported key source)".into());
+            }
+            if platform != "android" {
+                return Err("strings export supports --platform android only".into());
+            }
+            let catalog = Catalog::load(&dir)?;
+            let app = app.unwrap_or_else(|| {
+                catalog
+                    .directory
+                    .canonicalize()
+                    .ok()
+                    .and_then(|d| d.file_name().map(|f| f.to_string_lossy().into_owned()))
+                    .unwrap_or_else(|| "app".into())
+            });
+            let result = catalog.export_strings(&from, &app, &out, match_text)?;
+            let mut stale = Vec::new();
+            for (path, contents) in &result.files {
+                if check {
+                    if fs::read_to_string(path).ok().as_deref() != Some(contents.as_str()) {
+                        stale.push(path.display().to_string());
+                    }
+                } else {
+                    if let Some(parent) = path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::write(path, contents)?;
+                }
+            }
+            println!(
+                "{} keys in {} file(s); {} missing from the string catalog; {} with unsupported variations.",
+                result.keys,
+                result.files.len(),
+                result.missing.len(),
+                result.unsupported.len()
+            );
+            for key in &result.missing {
+                eprintln!("missing: {key:?}");
+            }
+            for key in &result.unsupported {
+                eprintln!("unsupported variations (not exported): {key:?}");
+            }
+            if !stale.is_empty() {
+                return Err(format!("stale string resources: {}", stale.join(", ")).into());
+            }
+        }
         Command::RebaseAnchors {
             dir,
             roots,
@@ -541,6 +826,7 @@ fn run(cli: Cli) -> Result<()> {
             notes,
             blocked_by,
             clear,
+            intended,
             unset,
             allow_reformat,
         } => {
@@ -559,6 +845,7 @@ fn run(cli: Cli) -> Result<()> {
                 notes,
                 blocked_by,
                 clear,
+                intended,
                 unset,
                 allow_reformat,
             };

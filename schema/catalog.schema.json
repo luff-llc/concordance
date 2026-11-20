@@ -76,13 +76,14 @@
       ],
       "properties": {
         "status": {
-          "description": "implemented (shipped is a deprecated read alias), partial, missing or not-applicable.",
+          "description": "implemented (shipped is a deprecated read alias), partial, missing, not-applicable, or stale (set by sync after a baseline change).",
           "enum": [
             "implemented",
             "shipped",
             "partial",
             "missing",
-            "not-applicable"
+            "not-applicable",
+            "stale"
           ]
         },
         "source": {
@@ -106,6 +107,27 @@
         "blocked_by": {
           "$ref": "#/$defs/texts",
           "description": "Keys of [blockers] entries in catalog.toml."
+        },
+        "previous_status": {
+          "enum": [
+            "implemented",
+            "shipped",
+            "partial",
+            "missing",
+            "not-applicable"
+          ],
+          "description": "For stale records: the status before the baseline changed."
+        },
+        "since_commit": {
+          "$ref": "#/$defs/text",
+          "description": "For stale records: the baseline commit that made this stale."
+        },
+        "since_date": {
+          "$ref": "#/$defs/date"
+        },
+        "intended_difference": {
+          "$ref": "#/$defs/text",
+          "description": "An intended difference from the baseline."
         }
       }
     },
@@ -425,6 +447,10 @@
                 },
                 "locale": {
                   "$ref": "#/$defs/text"
+                },
+                "key": {
+                  "$ref": "#/$defs/text",
+                  "description": "String-catalog key used by strings export."
                 }
               }
             }

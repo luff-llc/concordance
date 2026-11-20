@@ -10,10 +10,13 @@ pub enum Status {
     Partial,
     Missing,
     NotApplicable,
+    /// The baseline changed after this was implemented; see `previous_status` and `since_*`.
+    Stale,
 }
 impl Status {
+    /// Work remains: missing, partial, or stale after a baseline change.
     pub fn is_gap(self) -> bool {
-        matches!(self, Self::Missing | Self::Partial)
+        matches!(self, Self::Missing | Self::Partial | Self::Stale)
     }
     pub fn as_str(self) -> &'static str {
         match self {
@@ -21,6 +24,7 @@ impl Status {
             Self::Partial => "partial",
             Self::Missing => "missing",
             Self::NotApplicable => "not-applicable",
+            Self::Stale => "stale",
         }
     }
 }
@@ -91,6 +95,18 @@ pub struct Platform {
     /// Keys of `[blockers]` entries holding this work back.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_by: Vec<String>,
+    /// For `stale` records: the status before the baseline changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_status: Option<Status>,
+    /// For `stale` records: the baseline commit whose change made this stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_commit: Option<String>,
+    /// For `stale` records: YYYY-MM-DD of that commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_date: Option<String>,
+    /// A recorded, intended difference from the baseline (set with `set --intended`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intended_difference: Option<String>,
     /// True when the record was copied whole from an inherited platform.
     #[serde(skip)]
     pub inherited: bool,
@@ -369,6 +385,9 @@ pub struct CopySpec {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locale: Option<String>,
+    /// String-catalog key (for example an `.xcstrings` key) for `strings export`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 fn number(value: f64) -> String {
     format!("{value}")
@@ -457,7 +476,7 @@ pub struct Config {
     pub baselines: BTreeMap<String, Baseline>,
     /// Root-relative glob patterns used to discover uncatalogued changes.
     #[serde(default)]
-    pub source_globs: BTreeMap<String, Vec<String>>,
+    pub source_globs: BTreeMap<String, SourceGlobs>,
     /// Registry of decisions and dependencies that block work, referenced by `blocked_by`.
     #[serde(default)]
     pub blockers: BTreeMap<String, Blocker>,
@@ -499,6 +518,41 @@ pub struct UiTolerance {
     pub position_dp: Option<f64>,
     pub size_ratio: Option<f64>,
     pub radius_dp: Option<f64>,
+}
+
+/// Root-relative globs for a platform: a plain list (every source file), or a table that
+/// also names user-visible files and string catalogs for `gate`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum SourceGlobs {
+    All(Vec<String>),
+    Table {
+        #[serde(default)]
+        all: Vec<String>,
+        #[serde(default)]
+        user_visible: Vec<String>,
+        #[serde(default)]
+        strings: Vec<String>,
+    },
+}
+impl SourceGlobs {
+    pub fn all(&self) -> &[String] {
+        match self {
+            Self::All(all) | Self::Table { all, .. } => all,
+        }
+    }
+    pub fn user_visible(&self) -> &[String] {
+        match self {
+            Self::All(_) => &[],
+            Self::Table { user_visible, .. } => user_visible,
+        }
+    }
+    pub fn strings(&self) -> &[String] {
+        match self {
+            Self::All(_) => &[],
+            Self::Table { strings, .. } => strings,
+        }
+    }
 }
 
 /// A platform's root directory, optionally inheriting records from another platform.
