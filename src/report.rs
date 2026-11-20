@@ -346,7 +346,7 @@ impl Catalog {
             "## Claimed shipped but unverified".into(),
             String::new(),
             format!(
-                "{} of {implemented} {tl} implemented entries have no independent verification (a reviewer other than the implementer, with captures or journeys).",
+                "{} of {implemented} {tl} implemented entries (all entries, including any outside the {bl} baseline) have no independent verification (a reviewer other than the implementer, with captures or journeys).",
                 claimed.len()
             ),
         ]);

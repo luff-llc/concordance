@@ -37,7 +37,7 @@ Order: critical, high, medium, low. Within a tier, catalog priority comes first,
 
 ## Claimed shipped but unverified
 
-1 of 1 Android implemented entries have no independent verification (a reviewer other than the implementer, with captures or journeys).
+1 of 1 Android implemented entries (all entries, including any outside the iOS baseline) have no independent verification (a reviewer other than the implementer, with captures or journeys).
 
 | Impact | ID | Area | Reason |
 | --- | --- | --- | --- |

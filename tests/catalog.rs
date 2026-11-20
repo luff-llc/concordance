@@ -770,7 +770,7 @@ fn verification_is_derived_from_independent_evidence() {
     set(json!({"by": "agy", "at": "2026-11-20"}), "sol", "shipped");
     success(fixture.cli("validate", &[]));
     let report = fixture.load().report().expect("report");
-    assert!(report.contains("1 of 1 Android implemented entries have no independent verification"));
+    assert!(report.contains("1 of 1 Android implemented entries (all entries, including any outside the iOS baseline) have no independent verification"));
     assert!(report.contains("verification has no captures or journeys"));
 
     // An independent journey verifies it; the report counts it separately from implemented.
