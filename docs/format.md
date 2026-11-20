@@ -11,7 +11,8 @@ comparison. See [UI contracts](ui.md) for their schemas, commands and reviewer w
 
 The Rust library exposes serde types, `Catalog::load`, `Catalog::validate`,
 `ValidationReport`, `RootOptions`, `validate_evidence`, `drift`, `validate_paths`, `entry`,
-`brief`, `next`, `report`, `identifiers`, and `journeys`. The binary provides the same workflow to implementing agents and CI.
+`brief`/`brief_with`, `next`/`next_with`, `report`/`report_with`, `verification_gap`,
+`split_anchor`, `identifiers`, and `journeys`. The binary provides the same workflow to implementing agents and CI.
 
 ```sh
 cargo install --path .
@@ -181,8 +182,10 @@ can only be detected for IDs actually recorded in this file.
 from 1 through 1000, with lower numbers first. The priority of remaining work can
 differ from the importance of the entire feature.
 
-Platform status is always one of `shipped`, `partial`, `missing`, or
-`not-applicable`. `source`, `tests`, `gap`, and `notes` are optional on a platform
+Platform status is always one of `shipped` (or its synonym `implemented`), `partial`,
+`missing`, or `not-applicable`. Status records implementation only; whether anyone
+independently checked it is recorded separately (see
+[Implemented versus verified](#implemented-versus-verified)). `source`, `tests`, `gap`, and `notes` are optional on a platform
 record, allowing a device variant to record status before evidence is collected.
 Unrecorded platforms are not inferred to be shipped or missing. Include explicit
 statuses for every entry on platforms whose work queue or report you maintain.
@@ -195,6 +198,111 @@ and surfaces are also nonempty. Empty lists are allowed for settings, data reads
 and writes, copy, design, and dependency lists. Accessibility label/identifier may
 be empty to record the absence of established source evidence.
 
+## Implemented versus verified
+
+A status of `shipped` means *implemented*. It is a claim, usually from source review
+or from the implementing agent. Verification is a separate, optional record:
+
+```yaml
+platforms:
+  android:
+    status: shipped              # or: implemented
+    implemented_by: sol          # optional agent or person ID
+    source: [app/src/main/kotlin/Player.kt]
+    verification:
+      by: agy                    # reviewer ID; must differ from implemented_by
+      at: 2026-11-20             # YYYY-MM-DD
+      commit: 0123abc            # target commit reviewed (hex, optional)
+      baseline_commit: 6c29f3e   # baseline commit compared against (hex, optional)
+      captures: [now-playing.playing, build/reviews/2026-11-20/player.png]
+      journeys: [app/src/androidTest/PlayerJourney.kt#PlayerJourney.skipForward]
+      notes: Side-by-side review; no differences noted.
+```
+
+`verified` is derived, never stored. A record is verified only when its status is
+implemented, `verification` is present with at least one capture or journey, and
+`by` differs from `implemented_by` (when that is recorded). A capture is either a
+capture key `screen.state` (for the record's platform, resolved through UI contracts)
+or a file path relative to the repository root. In UI reports, a capture key whose
+capture is skipped or missing withdraws verification (see [UI contracts](ui.md)).
+
+`validate` rejects a verifier equal to `implemented_by`, verification on a `missing`
+or `not-applicable` record, invalid dates, non-hexadecimal commits, missing capture
+files, missing journey files, and capture keys that are not declared screen states.
+Existing catalogs need no change: `shipped` without `verification` is simply
+implemented and unverified.
+
+Reports never print a single "shipped" total. The summary and area table show
+implemented, verified, partial and missing counts, and a **Claimed shipped but
+unverified** table lists every implemented target entry without independent
+verification, with the reason (no record, no captures or journeys, verifier is the
+implementer, or a skipped/missing capture).
+
+## Detail items
+
+Behavior contracts in prose lose the numbers: spring response, haptic kind, swipe
+threshold, corner radius, exact copy. An entry can carry `details`, each tracked
+per platform with the same implemented/verified model:
+
+```yaml
+details:
+  - id: open-spring              # entry-scoped slug; referenced as reader.open-book#open-spring
+    kind: motion                 # motion | haptic | gesture | geometry | copy | state |
+                                 # accessibility | layout | other
+    spec:
+      text: The reader settles into place with a soft spring.
+      motion: {curve: spring, response: 0.42, damping: 0.78}
+    baseline: [Sources/Reader.swift:L120-L134, Sources/Reader.swift#ReaderTransition]
+    platforms:
+      android:
+        status: missing
+        gap: Uses a 300 ms tween.
+  - id: swipe-dismiss
+    kind: gesture
+    spec:
+      text: Swipe down dismisses after a third of the height.
+      gesture: {kind: vertical-drag, threshold: 0.33, unit: fraction}
+  - id: artwork-radius
+    kind: geometry
+    spec: {text: Artwork corner radius, geometry: {property: corner-radius, value: 12, unit: pt}}
+  - id: tap-haptic
+    kind: haptic
+    spec: {text: Light impact on open, haptic: {kind: light-impact}}
+  - id: empty-copy
+    kind: copy
+    spec: {text: Empty state title, copy: {text: No books yet, locale: en}}
+```
+
+`spec.text` is required; the structured fields are optional. `motion.curve` is
+`spring`, `ease` or `linear`. A spring takes `response` (with `damping`) **or**
+`duration` (with `bounce`, −1 to 1); ease and linear take only `duration`. Numbers
+are non-negative seconds or ratios. Detail IDs must be unique within an entry.
+`baseline` cites evidence on the report baseline platform and is validated and
+drift-checked like source evidence. Detail platforms must be configured platforms;
+an unrecorded detail status counts as open.
+
+The parity report adds a *Details implemented / verified / total* column to the
+area table, open-detail counts to the gap list and gap tables, and a **Detail gaps in
+implemented entries** table: entries already claimed shipped whose details are not.
+`entry ID --format brief --details` adds a Details section with each spec's numbers,
+baseline evidence and per-platform status. `next --details` also selects implemented
+entries with open details and prints one extra row per open detail in the same four
+tab-separated columns: `entry#detail`, `detail:<kind>`, status, and the spec text
+with its numbers in brackets.
+
+## Evidence anchors
+
+Source, test, journey and detail-baseline references may carry an anchor:
+
+| Form | Meaning |
+| --- | --- |
+| `path` | The whole file (file-level, coarse). |
+| `path#Symbol` or `path#Suite.method` | A declaration; the last dot-separated component is the symbol. |
+| `path:L10-L20`, `path:10-20` | Inclusive, 1-based baseline line range. |
+| `path:L10`, `path:10` | A single line. |
+
+Validation checks the file. Anchors make `drift` precise (below).
+
 ## Agent workflow
 
 ```sh
@@ -205,6 +313,7 @@ concordance entry spec/product reader.open-book --format yaml
 concordance entry spec/product reader.open-book --format json
 ```
 
+Add `--details` to `next` or `entry --format brief` to include detail items.
 Start with `next`, then read the implementation brief and the linked source. A brief
 includes behavior, surfaces, interactions, states, settings, data, exact copy,
 accessibility, acceptance, dependency statuses, implementation gaps, iOS source
@@ -265,8 +374,9 @@ current working directory. `--check` compares exact contents, exits nonzero for 
 missing/stale file, and never writes it. Report links are relative to the catalog
 directory, so keep the output beside `catalog.toml` for working area links.
 
-Reports count entries shipped on the configured baseline, tally target statuses by
-area, list the ten highest-impact gaps, list missing and partial capabilities, and
+Reports count entries shipped on the configured baseline, tally target statuses
+(implemented, verified, partial, missing) by area, list implemented-but-unverified
+entries, list the ten highest-impact gaps, list missing and partial capabilities, and
 expose test-evidence gaps. Areas are alphabetic; gap ordering uses the same impact,
 priority, area, and ID ranking as the work queue, without dependency reordering.
 Nonbaseline adaptations are excluded from parity totals. Partial/missing baseline
@@ -321,15 +431,43 @@ revisions are resolved as commits. The comparison uses `git diff --name-only`,
 includes deletions and both sides of renames, and excludes uncommitted changes.
 Git is read-only and never fetches revisions.
 
-Every entry citing a changed source or file-based test is listed, regardless of its
-status. Test anchors are stripped and runner labels ignored. Evidence paths and
+Every entry citing a changed source, file-based test, verification journey or
+detail baseline reference is listed, regardless of its status; detail evidence is
+listed as `entry#detail`. Runner labels are ignored.
+
+For each changed file cited with an anchor, `drift` reads `git diff -U0` between the
+two revisions and the file's content at the baseline revision:
+
+- `path:Lstart-Lend` is a **precise** hit when an old-side hunk intersects the range.
+  Pure insertions count only when they land strictly inside it.
+- `path#Symbol` resolves the symbol at the baseline revision. A declaration line
+  contains the symbol as a whole word after a declaration keyword (`func`, `fun`,
+  `class`, `struct`, `enum`, `protocol`, `extension`, `interface`, `object`, `var`,
+  `let`, `val`, `const`, `def`, `fn`, `type`, `typealias`, `case`, `init`, `actor`,
+  `trait`, `impl`, `mod`, `function`, `macro`, `record`). Its block is brace-delimited
+  when a `{` opens on that line or on a continuation of its signature (unclosed
+  parentheses, a trailing `,` `(` `->` `:` `=`, or a next line beginning with `{`,
+  `where`, `throws` or `->`); braces after `//` and inside double-quoted strings are
+  ignored. Without a brace, the block is the following lines indented deeper than the
+  declaration (Python, YAML). Otherwise it is the declaration line alone. All
+  declarations of the name (overloads) are considered. It is a heuristic: block
+  comments, raw strings, and macros can mislead it.
+- A deleted file is a precise hit for every anchored reference, noted "file deleted".
+- An anchored reference whose lines did not change is not listed; it is counted as
+  *anchored, unaffected*.
+- Unanchored references, and anchors that cannot be resolved ("symbol not found at
+  baseline"), keep file-level behavior and are labelled **file-level (coarse)**.
+
+Each platform heading reports entries with precise hits versus coarse-only entries,
+and reference counts: precise, coarse, and anchored-unaffected. Evidence paths and
 globs are relative to the resolved platform root, even when that root is a Git
 subdirectory. Uncited changed files matching `source_globs` appear as
 **Uncatalogued changes**. Without source globs, only cited evidence is examined.
 Globs support `*` within a path component, `?` for one character, and `**` across
 components; `**/` also matches zero directories. JSON contains `platforms` with
-`platform`, `since`, `to`, `entries` (`id`, `files`), and `uncatalogued`, plus
-`unchecked` messages. Output is sorted by platform, ID, and file.
+`platform`, `since`, `to`, `entries` (`id`, `files`, `hits` with `reference`, `file`,
+`precision`, optional `lines` and `note`), `uncatalogued`, `precise_hits`,
+`coarse_hits` and `anchored_unaffected`, plus `unchecked` messages. Output is sorted by platform, ID, and file.
 
 `report` and `ui-report` append a Baseline drift section when the configured baseline
 has both a pin and an available root. Changed baseline evidence signals that the

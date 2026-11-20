@@ -24,14 +24,16 @@ concordance validate path/to/catalog
 concordance validate path/to/catalog --root ios=../apple-reference --require-roots
 concordance report path/to/catalog --out parity.md
 concordance drift path/to/catalog --root ios=../apple-reference --platform ios
-concordance next path/to/catalog --platform android --limit 10
-concordance entry path/to/catalog player.skip-forward --format brief
+concordance next path/to/catalog --platform android --limit 10 --details
+concordance entry path/to/catalog player.skip-forward --format brief --details
 concordance ids path/to/catalog --platform kotlin --out Ids.kt --package org.example
 concordance journeys path/to/catalog --platform swift --out Tests/Journeys
 concordance tokens path/to/catalog --platform swift --out DesignTokens.swift
 concordance tokens path/to/catalog --platform css --out tokens.css
 concordance capture-plan path/to/catalog --platform android
+concordance capture-plan path/to/catalog --platform ios,android --coverage --captures captures
 concordance compare path/to/catalog --captures captures --out ui-report --check
+concordance verify path/to/catalog --review ui-report/review.json --out proposal.yaml
 concordance ui-report path/to/catalog --captures captures
 ```
 
@@ -41,6 +43,16 @@ one sorted report. External checkouts can be supplied with repeatable
 Declared external roots are optional unless `--require-roots` is set. Git baseline
 pins let `drift` identify entries whose evidence changed and uncatalogued source
 changes; parity reports also flag baseline drift when the checkout is available.
+
+Status records what is implemented; an optional `verification` record (reviewer,
+date, commits, captures, journeys) records independent proof, and `verified` is
+derived from it. Reports show implemented and verified counts separately and list
+claimed-but-unverified work. Entries can carry `details` (motion, haptic, gesture,
+geometry, copy...) with numbers and per-platform status, so briefs carry the numbers.
+Evidence may be anchored (`path#Symbol`, `path:L10-L20`) so `drift` reports precise
+hits rather than whole files. Capture coverage counts produced, skipped and missing
+captures per area and screen, and `compare` writes side-by-side pair images and a
+review page whose notes `verify` turns into a proposed patch, never an edit.
 
 The format is in [docs/format.md](docs/format.md) and the JSON Schema in
 [schema/catalog.schema.json](schema/catalog.schema.json).

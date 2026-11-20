@@ -218,12 +218,35 @@ skeletons use `@Ignore` and `TODO`. They cannot silently count as capture covera
 Add native launch/navigation, state fixtures and screenshot/snapshot export, then
 remove the skip. The tool does not run a simulator or invent a generic app harness.
 
-Every run writes these two files into one flat captures directory:
+Every run writes these two files into the captures directory, either flat or in a
+`<platform>/` subdirectory (the flat file wins when both exist):
 
 ```text
 <screen-id>.<state>.<platform>.png
 <screen-id>.<state>.<platform>.json
+<screen-id>.<state>.<platform>.skip   # optional: why this capture was not produced
 ```
+
+A harness that cannot produce a capture (no fixture, unsupported state) writes a
+`.skip` marker whose first nonblank line is the reason, so coverage separates a
+deliberate skip from a forgotten capture.
+
+### Capture coverage
+
+```sh
+concordance capture-plan spec/product --platform ios,android --coverage \
+  --captures artifacts/captures
+```
+
+`--coverage` prints Markdown instead of the plan and writes no stubs. For each listed
+platform it counts required (declared screen states), produced (PNG and JSON),
+skipped (a `.skip` marker, with its reason) and missing captures, per platform, per
+area (a screen counts toward every area of its linked `entries`; unlinked screens
+appear as `(unlinked)`) and per screen. It lists each skipped and missing capture
+and every entry whose verification relies on one. `ui-report` appends the same
+section for all configured platforms. A skipped or missing capture cannot support
+`verified`: an entry citing it as a verification capture key is reported as
+unverified with that reason.
 
 For example, this is a complete snapshot for a tiny standalone region:
 
@@ -270,12 +293,57 @@ concordance ui-report spec/product --captures artifacts/captures --check
 ```
 
 Baseline/target default to `[report]` configuration (normally ios/android).
-`compare` writes `index.html`, `comparison.json` and copies of the PNGs into its
-report directory. Keep the output directory separate from input captures. The HTML
+`compare` writes `index.html`, `comparison.json`, `review.json`, copies of the PNGs,
+and one side-by-side image per screen state, `pairs/<screen>.<state>.png`: baseline
+on the left, target on the right, scaled to the same height (the smaller of the
+two, at most 1600 px) with a label bar naming each platform and the screen state.
+A missing capture renders as a grey "NO CAPTURE" panel; a PNG without its JSON is
+still shown. Images are drawn with the existing PNG dependency and a built-in 5×7
+bitmap font; no image or font crate is added. Keep the output directory separate from input captures. The HTML
 opens directly as a static file: side-by-side images, toggleable anatomy overlays,
 failures by platform, and a short **For reviewers** prompt containing roles, token
 usage, priorities and native adaptation notes. Give that report to a vision-capable
 agent or human reviewer; judge whether it expresses the same product design.
+
+### Reviewer notes and proposed verification
+
+Each pair in `index.html` has a verdict (`unreviewed`, `same`, `differs`) and a
+**Differences noted** field. The page autosaves to the browser and **Save review.json**
+downloads the notes; place the file next to the page (or edit `review.json`, which
+`compare` writes once as a template and never overwrites). Rerunning `compare` reads
+an existing `review.json` and pre-fills the form.
+
+```json
+{
+  "version": 1, "reviewer": "agy", "at": "2026-11-20",
+  "commit": "0123abc", "baseline_commit": "6c29f3e",
+  "baseline": "ios", "target": "android",
+  "pairs": [
+    {"screen": "detail", "state": "populated", "verdict": "same", "differences": ""},
+    {"screen": "detail", "state": "dark", "verdict": "differs", "differences": "Title wraps"}
+  ]
+}
+```
+
+```sh
+concordance verify spec/product --review artifacts/ui-report/review.json \
+  --captures artifacts/captures --out verification-proposal.yaml
+```
+
+`verify` maps reviewed pairs to the entries their screens link and writes a commented
+YAML patch (stdout without `--out`; an existing `--out` file is never replaced). For
+each entry and the review's target platform it proposes one action:
+
+- `verify`: every reviewed pair is `same`; proposes a `verification` record with the
+  reviewer, date, commits, the pair keys as capture keys (merged with existing ones),
+  existing journeys, and the reviewer's notes.
+- `needs-work`: some pair `differs`; proposes a `gap` from the noted differences.
+- `not-implemented`: the target status is not implemented; differences become a gap.
+- `rejected`: the reviewer is the entry's `implemented_by`.
+
+Unreviewed pairs are ignored. Pairs whose baseline or target capture is skipped or
+missing are excluded and listed in the patch header. **The catalog is never edited**:
+a person or agent reviews the proposal and applies it by hand, then `validate`.
 
 Mechanical pass/fail checks are:
 
@@ -314,6 +382,6 @@ samples make the gate useful; passing it is evidence of those checks, not proof 
 identical design. Keep the human/vision review for the remaining design intent.
 
 The Rust API is under `concordance::ui`: `Tokens::load/native/write_native`,
-`UiCatalog::load/capture_plan/capture_stubs/compare/ui_report`, and serializable
-`Comparison` results. A generic fixture is in `tests/ui-fixtures`; it contains a
+`UiCatalog::load/capture_plan/capture_stubs/coverage/compare/ui_report/verify_review`,
+`Review`, `Coverage`, and serializable `Comparison` results. A generic fixture is in `tests/ui-fixtures`; it contains a
 matching light pair and a deliberately drifting dark pair.
