@@ -5,12 +5,34 @@ use serde_json::Value;
 pub const SCHEMA: &str = include_str!("../schema/catalog.schema.json");
 
 pub fn valid_id(id: &str) -> bool {
-    fn part(s: &str) -> bool {
-        s.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
-            && s.bytes()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+    id.split_once('.')
+        .is_some_and(|(a, b)| valid_slug(a) && valid_slug(b))
+}
+
+/// Lowercase slug: a letter, then letters, digits and hyphens.
+pub fn valid_slug(s: &str) -> bool {
+    s.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+        && s.bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+}
+
+/// Calendar date in YYYY-MM-DD form with a plausible month and day.
+pub fn valid_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return false;
     }
-    id.split_once('.').is_some_and(|(a, b)| part(a) && part(b))
+    let digits = |r: std::ops::Range<usize>| -> Option<u32> {
+        s.get(r)
+            .filter(|p| p.bytes().all(|c| c.is_ascii_digit()))
+            .and_then(|p| p.parse().ok())
+    };
+    matches!((digits(0..4), digits(5..7), digits(8..10)), (Some(_), Some(m), Some(d)) if (1..=12).contains(&m) && (1..=31).contains(&d))
+}
+
+/// Abbreviated or full hexadecimal Git object name.
+pub fn valid_commit(s: &str) -> bool {
+    (7..=64).contains(&s.len()) && s.bytes().all(|c| c.is_ascii_hexdigit())
 }
 
 pub fn validate(value: &Value) -> Result<()> {
@@ -169,11 +191,15 @@ fn check(
             errors.push(format!("{at}: empty text"));
         }
         if let Some(pattern) = rule.get("pattern") {
-            if pattern.as_str() != Some(r"^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$") {
-                return fail("unsupported schema pattern");
-            }
-            if !valid_id(text) {
-                errors.push(format!("{at}: invalid stable ID {text:?}"));
+            // Only the bundled patterns are understood; anything else fails closed.
+            let (valid, what) = match pattern.as_str() {
+                Some(r"^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$") => (valid_id(text), "stable ID"),
+                Some(r"^[a-z][a-z0-9-]*$") => (valid_slug(text), "slug"),
+                Some(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$") => (valid_date(text), "date (YYYY-MM-DD)"),
+                _ => return fail("unsupported schema pattern"),
+            };
+            if !valid {
+                errors.push(format!("{at}: invalid {what} {text:?}"));
             }
         }
     }

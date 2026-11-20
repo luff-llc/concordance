@@ -1,4 +1,6 @@
-use crate::{is_test_path, safe_relative, Catalog, Result};
+use crate::{
+    is_capture_key, is_test_path, safe_relative, schema, Catalog, Entry, Platform, Result, Status,
+};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -101,7 +103,66 @@ impl RootOptions {
         self
     }
 }
+/// Source, file-based tests and verification journeys cited by a platform record.
+pub(crate) fn evidence_refs(record: &Platform) -> impl Iterator<Item = &String> {
+    record
+        .source
+        .iter()
+        .chain(record.tests.iter().filter(|s| is_test_path(s)))
+        .chain(
+            record
+                .verification
+                .iter()
+                .flat_map(|v| v.journeys.iter().filter(|s| is_test_path(s))),
+        )
+}
+
 impl Catalog {
+    /// Every platform record with a display label: entry IDs, plus `entry#detail` for details.
+    pub fn records(&self) -> Vec<(String, &str, &Platform)> {
+        let mut out = Vec::new();
+        for entry in self.entries.values() {
+            for (platform, record) in &entry.platforms {
+                out.push((entry.id.clone(), platform.as_str(), record));
+            }
+        }
+        out
+    }
+
+    fn check_capture_files(
+        &self,
+        label: &str,
+        platform: &str,
+        record: &Platform,
+        repo: std::result::Result<&Path, &std::io::Error>,
+        report: &mut ValidationReport,
+    ) {
+        let Some(v) = &record.verification else {
+            return;
+        };
+        for capture in v.captures.iter().filter(|c| !is_capture_key(c)) {
+            if !safe_relative(capture, false) {
+                report.error(
+                    "verification",
+                    label,
+                    platform,
+                    capture,
+                    "unsafe capture path",
+                );
+                continue;
+            }
+            let message = match repo {
+                Ok(repo) => match repo.join(capture).canonicalize() {
+                    Ok(path) if path.starts_with(repo) && path.is_file() => continue,
+                    Ok(_) => "capture is not a file within the repository root".to_owned(),
+                    Err(error) => format!("missing capture: {error}"),
+                },
+                Err(error) => format!("repository root unavailable: {error}"),
+            };
+            report.error("verification", label, platform, capture, &message);
+        }
+    }
+
     pub(crate) fn evidence_relative<'a>(
         &self,
         platform: &str,
@@ -164,19 +225,24 @@ impl Catalog {
             .keys()
             .map(|p| (p, self.platform_root(p, options)))
             .collect();
-        for entry in self.entries.values() {
-            for (platform, evidence) in &entry.platforms {
-                for reference in evidence
-                    .source
-                    .iter()
-                    .chain(evidence.tests.iter().filter(|s| is_test_path(s)))
-                {
+        let repo = options
+            .repo
+            .clone()
+            .unwrap_or_else(|| self.directory.join(&self.config.repo_root))
+            .canonicalize();
+        for (label, platform, record) in self.records() {
+            self.check_capture_files(&label, platform, record, repo.as_deref(), &mut report);
+        }
+        for (label, platform, evidence) in self.records() {
+            let entry_id = label;
+            {
+                for reference in evidence_refs(evidence) {
                     let relative = match self.evidence_relative(platform, reference) {
                         Ok(path) => path,
                         Err(error) => {
                             report.error(
                                 "evidence",
-                                &entry.id,
+                                &entry_id,
                                 platform,
                                 reference,
                                 &error.to_string(),
@@ -184,7 +250,7 @@ impl Catalog {
                             continue;
                         }
                     };
-                    let Some(root) = roots.get(platform) else {
+                    let Some(root) = roots.get(&platform.to_owned()) else {
                         continue;
                     };
                     match root {
@@ -195,7 +261,7 @@ impl Catalog {
                                 Ok(_) => "evidence is not a file within platform root".into(),
                                 Err(error) => format!("missing evidence: {error}"),
                             };
-                            report.error("evidence", &entry.id, platform, reference, &message);
+                            report.error("evidence", &entry_id, platform, reference, &message);
                         }
                         Ok(None) => {
                             let hint = self.config.external_roots[platform].hint();
@@ -206,7 +272,7 @@ impl Catalog {
                             if options.require_roots {
                                 report.error(
                                     "roots",
-                                    &entry.id,
+                                    &entry_id,
                                     platform,
                                     reference,
                                     &format!("root not supplied. {message}"),
@@ -214,8 +280,8 @@ impl Catalog {
                             } else {
                                 report.unchecked.push(Issue {
                                     group: "roots".into(),
-                                    entry: entry.id.clone(),
-                                    platform: platform.clone(),
+                                    entry: entry_id.clone(),
+                                    platform: platform.to_owned(),
                                     reference: reference.clone(),
                                     message,
                                 });
@@ -223,7 +289,7 @@ impl Catalog {
                         }
                         Err(error) => report.error(
                             "roots",
-                            &entry.id,
+                            &entry_id,
                             platform,
                             reference,
                             &error.to_string(),
@@ -267,5 +333,60 @@ impl Catalog {
         report.unchecked.extend(paths.unchecked);
         report.sort();
         Ok(report)
+    }
+}
+
+/// Check one platform record's verification semantics beyond the schema.
+pub(crate) fn check_platform(
+    entry: &str,
+    platform: &str,
+    record: &Platform,
+    report: &mut ValidationReport,
+) {
+    let Some(v) = &record.verification else {
+        return;
+    };
+    if matches!(record.status, Status::Missing | Status::NotApplicable) {
+        report.error(
+            "verification",
+            entry,
+            platform,
+            "",
+            &format!(
+                "verification recorded for a {} status",
+                record.status.as_str()
+            ),
+        );
+    }
+    if record.implemented_by.as_deref() == Some(v.by.as_str()) {
+        report.error(
+            "verification",
+            entry,
+            platform,
+            &v.by,
+            "verifier must differ from implemented_by",
+        );
+    }
+    for (field, commit) in [
+        ("commit", &v.commit),
+        ("baseline_commit", &v.baseline_commit),
+    ] {
+        if let Some(commit) = commit {
+            if !schema::valid_commit(commit) {
+                report.error(
+                    "verification",
+                    entry,
+                    platform,
+                    commit,
+                    &format!("{field} must be a hexadecimal commit SHA"),
+                );
+            }
+        }
+    }
+}
+
+pub(crate) fn check_entry(entry: &Entry, report: &mut ValidationReport) {
+    for (platform, record) in &entry.platforms {
+        check_platform(&entry.id, platform, record, report);
     }
 }

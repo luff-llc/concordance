@@ -1,11 +1,66 @@
-use crate::{fail, Catalog, Entry, Result, Status};
+use crate::{fail, is_capture_key, Catalog, Entry, Result, Status};
+use serde::Serialize;
+use std::collections::BTreeMap;
 
 fn table(value: &str) -> String {
     value.replace('|', "\\|").replace(['\n', '\r'], " ")
 }
 
+/// Optional knowledge that refines derived verification, such as capture coverage.
+#[derive(Debug, Default, Clone)]
+pub struct ReportContext {
+    /// Capture state keyed by (`screen.state`, platform). Empty means coverage is unknown.
+    pub captures: BTreeMap<(String, String), CaptureState>,
+}
+
+/// Whether a required screen/state capture exists for a platform.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", content = "reason", rename_all = "lowercase")]
+pub enum CaptureState {
+    Produced,
+    Skipped(String),
+    Missing(String),
+}
+
 impl Catalog {
+    /// Why an entry's platform record is not verified (including capture coverage), if it is not.
+    pub fn verification_gap(
+        &self,
+        entry: &Entry,
+        platform: &str,
+        context: &ReportContext,
+    ) -> Option<String> {
+        let record = entry.platforms.get(platform)?;
+        if let Some(reason) = record.unverified_reason() {
+            return Some(reason.into());
+        }
+        let verification = record.verification.as_ref()?;
+        if context.captures.is_empty() {
+            return None;
+        }
+        for capture in verification.captures.iter().filter(|c| is_capture_key(c)) {
+            match context
+                .captures
+                .get(&(capture.clone(), platform.to_owned()))
+            {
+                Some(CaptureState::Produced) => {}
+                Some(CaptureState::Skipped(reason)) => {
+                    return Some(format!("capture {capture} skipped: {reason}"))
+                }
+                Some(CaptureState::Missing(reason)) => {
+                    return Some(format!("capture {capture} missing: {reason}"))
+                }
+                None => return Some(format!("capture {capture} is not a declared screen state")),
+            }
+        }
+        None
+    }
+
     pub fn report(&self) -> Result<String> {
+        self.report_with(&ReportContext::default())
+    }
+
+    pub fn report_with(&self, context: &ReportContext) -> Result<String> {
         let config = &self.config.report;
         let (base, target) = (&config.baseline, &config.target);
         let (bl, tl) = (config.label(base), config.label(target));
@@ -22,31 +77,36 @@ impl Catalog {
             .values()
             .filter(|e| e.platforms[base].status == Status::Shipped)
             .collect();
-        let counts = |entries: &[&Entry]| -> [usize; 4] {
-            [
-                Status::Shipped,
-                Status::Partial,
-                Status::Missing,
-                Status::NotApplicable,
-            ]
-            .map(|s| {
-                entries
-                    .iter()
-                    .filter(|e| e.platforms[target].status == s)
-                    .count()
-            })
+        // [implemented, verified, partial, missing, not-applicable]
+        let counts = |entries: &[&Entry]| -> [usize; 5] {
+            let mut c = [0; 5];
+            for entry in entries {
+                let p = &entry.platforms[target];
+                match p.status {
+                    Status::Shipped => c[0] += 1,
+                    Status::Partial => c[2] += 1,
+                    Status::Missing => c[3] += 1,
+                    Status::NotApplicable => c[4] += 1,
+                }
+                if self.verification_gap(entry, target, context).is_none() {
+                    c[1] += 1;
+                }
+            }
+            c
         };
         let totals = counts(&baseline);
-        let has_na = totals[3] != 0;
+        let has_na = totals[4] != 0;
+        // Never a single "shipped" total: implemented and verified are separate claims.
         let mut summary = format!(
-            "**{} {bl} capabilities: {} {tl} shipped, {} partial, {} missing",
+            "**{} {bl} capabilities: {} {tl} implemented ({} verified), {} partial, {} missing",
             baseline.len(),
             totals[0],
             totals[1],
-            totals[2]
+            totals[2],
+            totals[3]
         );
         if has_na {
-            summary.push_str(&format!(", {} not-applicable", totals[3]));
+            summary.push_str(&format!(", {} not-applicable", totals[4]));
         }
         summary.push_str(".**");
         let mut lines = vec![
@@ -59,11 +119,11 @@ impl Catalog {
             summary,
             String::new(),
             format!(
-                "| Area | Entries | {bl} baseline | {tl} shipped | Partial | Missing |{}",
+                "| Area | Entries | {bl} baseline | {tl} implemented | Verified | Partial | Missing |{}",
                 if has_na { " Not applicable |" } else { "" }
             ),
             format!(
-                "| --- | ---: | ---: | ---: | ---: | ---: |{}",
+                "| --- | ---: | ---: | ---: | ---: | ---: | ---: |{}",
                 if has_na { " ---: |" } else { "" }
             ),
         ];
@@ -80,14 +140,15 @@ impl Catalog {
                 .collect();
             let c = counts(&included);
             lines.push(format!(
-                "| [{area}]({file}) | {} | {} | {} | {} | {} |{}",
+                "| [{area}]({file}) | {} | {} | {} | {} | {} | {} |{}",
                 group.len(),
                 included.len(),
                 c[0],
                 c[1],
                 c[2],
+                c[3],
                 if has_na {
-                    format!(" {} |", c[3])
+                    format!(" {} |", c[4])
                 } else {
                     String::new()
                 }
@@ -95,14 +156,15 @@ impl Catalog {
         }
         lines.extend([
             format!(
-                "| **Total** | **{}** | **{}** | **{}** | **{}** | **{}** |{}",
+                "| **Total** | **{}** | **{}** | **{}** | **{}** | **{}** | **{}** |{}",
                 self.entries.len(),
                 baseline.len(),
                 totals[0],
                 totals[1],
                 totals[2],
+                totals[3],
                 if has_na {
-                    format!(" **{}** |", totals[3])
+                    format!(" **{}** |", totals[4])
                 } else {
                     String::new()
                 }
@@ -153,6 +215,44 @@ impl Catalog {
                         table(p.gap.as_deref().unwrap_or("No gap recorded."))
                     ));
                 }
+            }
+        }
+        let claimed: Vec<_> = self
+            .entries
+            .values()
+            .filter(|e| e.platforms[target].status == Status::Shipped)
+            .filter_map(|e| self.verification_gap(e, target, context).map(|r| (e, r)))
+            .collect();
+        let implemented = self
+            .entries
+            .values()
+            .filter(|e| e.platforms[target].status == Status::Shipped)
+            .count();
+        lines.extend([
+            String::new(),
+            "## Claimed shipped but unverified".into(),
+            String::new(),
+            format!(
+                "{} of {implemented} {tl} implemented entries have no independent verification (a reviewer other than the implementer, with captures or journeys).",
+                claimed.len()
+            ),
+        ]);
+        if !claimed.is_empty() {
+            lines.extend([
+                String::new(),
+                "| Impact | ID | Area | Reason |".into(),
+                "| --- | --- | --- | --- |".into(),
+            ]);
+            let mut claimed = claimed;
+            claimed.sort_by_key(|(e, _)| self.gap_key(e));
+            for (entry, reason) in claimed {
+                lines.push(format!(
+                    "| {} | `{}` | {} | {} |",
+                    entry.impact.as_str(),
+                    entry.id,
+                    self.areas[&entry.id],
+                    table(&reason)
+                ));
             }
         }
         let extras: Vec<_> = self

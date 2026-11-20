@@ -36,6 +36,9 @@ impl Fixture {
     fn load(&self) -> Catalog {
         Catalog::load(&self.0).expect("valid fixture")
     }
+    fn load_collect_only(&self) -> Catalog {
+        Catalog::load_collect(&self.0).expect("loadable fixture").0
+    }
     fn mutate(&self, area: &str, edit: impl FnOnce(&mut Value)) {
         let path = self.0.join(format!("catalog/{area}.yaml"));
         let mut value: Value =
@@ -360,7 +363,8 @@ fn report_order_baseline_and_markdown_escaping() {
         v[0]["platforms"]["android"]["gap"] = json!("Missing | action\nnext");
     });
     let report = fixture.load().report().expect("report");
-    assert!(report.contains("3 iOS capabilities: 0 Android shipped, 1 partial, 2 missing"));
+    assert!(report
+        .contains("3 iOS capabilities: 0 Android implemented (0 verified), 1 partial, 2 missing"));
     assert!(report.contains("Find \\| books now | Missing \\| action next"));
     assert!(report.contains("## Android-specific adaptations"));
     fixture.mutate("search", |v| {
@@ -732,4 +736,73 @@ fn drift_marks_missing_pins_and_roots_unchecked() {
     assert!(fs::read_to_string(fixture.0.join("parity.md"))
         .expect("report")
         .contains("unchecked (root not supplied)"));
+}
+
+#[test]
+fn verification_is_derived_from_independent_evidence() {
+    let fixture = Fixture::new();
+    let set = |verification: Value, implementer: &str, status: &str| {
+        fixture.mutate("reader", |v| {
+            let android = &mut v[1]["platforms"]["android"];
+            android["status"] = json!(status);
+            android["implemented_by"] = json!(implementer);
+            android["verification"] = verification;
+        });
+    };
+    // A self-review is a validation error and never counts as verified.
+    set(
+        json!({"by": "sol", "at": "2026-11-20", "journeys": ["ReaderTests.swift#ReaderTests.testOpen"]}),
+        "sol",
+        "implemented",
+    );
+    let output = fixture.cli("validate", &[]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("verifier must differ"));
+    let catalog = fixture.load_collect_only();
+    let record = &catalog.entries["reader.native-menu"].platforms["android"];
+    assert_eq!(record.status, concordance::Status::Shipped);
+    assert_eq!(
+        record.unverified_reason(),
+        Some("verifier is the implementer")
+    );
+
+    // A record with no captures or journeys is accepted but unverified.
+    set(json!({"by": "agy", "at": "2026-11-20"}), "sol", "shipped");
+    success(fixture.cli("validate", &[]));
+    let report = fixture.load().report().expect("report");
+    assert!(report.contains("1 of 1 Android implemented entries have no independent verification"));
+    assert!(report.contains("verification has no captures or journeys"));
+
+    // An independent journey verifies it; the report counts it separately from implemented.
+    set(
+        json!({"by": "agy", "at": "2026-11-20", "commit": "abcdef1", "journeys": ["ReaderTests.swift#ReaderTests.testOpen"]}),
+        "sol",
+        "shipped",
+    );
+    success(fixture.cli("validate", &[]));
+    let catalog = fixture.load();
+    assert!(catalog.entries["reader.native-menu"].platforms["android"].verified());
+    let report = catalog.report().expect("report");
+    assert!(report.contains("0 of 1 Android implemented entries"));
+    assert!(catalog
+        .brief("reader.native-menu")
+        .expect("brief")
+        .contains("verified by agy on 2026-11-20 at abcdef1"));
+
+    // Evidence and semantics: missing capture files, bad dates and commits, verified missing work.
+    set(
+        json!({"by": "agy", "at": "2026-13-01", "commit": "not-a-sha", "captures": ["build/missing.png"], "journeys": ["Gone.kt#GoneTest.run"]}),
+        "sol",
+        "missing",
+    );
+    let stderr = String::from_utf8(fixture.cli("validate", &[]).stderr).expect("UTF8");
+    for expected in [
+        "invalid date",
+        "commit must be a hexadecimal commit SHA",
+        "missing capture",
+        "Gone.kt#GoneTest.run",
+        "verification recorded for a missing status",
+    ] {
+        assert!(stderr.contains(expected), "missing {expected}: {stderr}");
+    }
 }

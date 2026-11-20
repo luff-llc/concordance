@@ -78,6 +78,7 @@
         "status": {
           "enum": [
             "shipped",
+            "implemented",
             "partial",
             "missing",
             "not-applicable"
@@ -91,6 +92,48 @@
         },
         "gap": {
           "type": "string"
+        },
+        "notes": {
+          "type": "string"
+        },
+        "implemented_by": {
+          "$ref": "#/$defs/text"
+        },
+        "verification": {
+          "$ref": "#/$defs/verification"
+        }
+      }
+    },
+    "date": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Independent review of an implementation. verified is derived: an implemented status, at least one capture or journey, and a reviewer other than implemented_by.",
+      "required": [
+        "by",
+        "at"
+      ],
+      "properties": {
+        "by": {
+          "$ref": "#/$defs/text"
+        },
+        "at": {
+          "$ref": "#/$defs/date"
+        },
+        "commit": {
+          "$ref": "#/$defs/text"
+        },
+        "baseline_commit": {
+          "$ref": "#/$defs/text"
+        },
+        "captures": {
+          "$ref": "#/$defs/texts"
+        },
+        "journeys": {
+          "$ref": "#/$defs/texts"
         },
         "notes": {
           "type": "string"

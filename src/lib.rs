@@ -5,6 +5,7 @@ mod model;
 mod report;
 mod validation;
 pub use drift::*;
+pub use report::{CaptureState, ReportContext};
 pub use validation::*;
 pub mod schema;
 pub mod ui;
@@ -192,6 +193,7 @@ impl Catalog {
                     Ok(entry) => entry,
                     Err(_) => continue,
                 };
+                validation::check_entry(&entry, &mut report);
                 for platform in entry.platforms.keys() {
                     if !catalog.config.platforms.contains_key(platform) {
                         report.error(
@@ -492,8 +494,9 @@ impl Catalog {
                 .iter()
                 .map(|(p, e)| {
                     format!(
-                        "{p}: {}. {} {}",
+                        "{p}: {}; {}. {} {}",
                         e.status.as_str(),
+                        verification_line(e),
                         e.gap.as_deref().unwrap_or(""),
                         e.notes.as_deref().unwrap_or("")
                     )
@@ -521,6 +524,23 @@ impl Catalog {
         section(&mut lines, "Design", &entry.design);
         section(&mut lines, "Notes", &entry.notes);
         Ok(lines.join("\n") + "\n")
+    }
+}
+
+/// One-line verification summary for briefs.
+pub(crate) fn verification_line(record: &Platform) -> String {
+    match (&record.verification, record.unverified_reason()) {
+        (Some(v), None) => format!(
+            "verified by {} on {}{}",
+            v.by,
+            v.at,
+            v.commit
+                .as_ref()
+                .map(|c| format!(" at {c}"))
+                .unwrap_or_default()
+        ),
+        (_, Some(reason)) => format!("unverified ({reason})"),
+        (None, None) => "unverified".into(),
     }
 }
 

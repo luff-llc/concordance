@@ -4,6 +4,8 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Status {
+    /// Implemented. `implemented` is accepted as a synonym; verification is recorded separately.
+    #[serde(alias = "implemented")]
     Shipped,
     Partial,
     Missing,
@@ -80,6 +82,63 @@ pub struct Platform {
     pub gap: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// Who implemented this platform's behavior (agent or person ID).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implemented_by: Option<String>,
+    /// Independent review evidence. `verified` is derived from it, never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<Verification>,
+}
+
+/// A reviewer's record that an implementation was checked against the baseline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Verification {
+    pub by: String,
+    /// ISO date, YYYY-MM-DD.
+    pub at: String,
+    /// Target commit that was reviewed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// Baseline commit the target was compared against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_commit: Option<String>,
+    /// Capture keys (`screen.state`) or capture file paths relative to the repository root.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub captures: Vec<String>,
+    /// Test references that exercised the journey, in the same form as platform tests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub journeys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+/// A capture key names a declared `screen.state`; anything path-like is a file.
+pub fn is_capture_key(capture: &str) -> bool {
+    !capture.contains('/') && !capture.ends_with(".png") && !capture.ends_with(".json")
+}
+
+impl Platform {
+    /// Why this record does not count as verified, or `None` when it does.
+    /// Capture availability is checked separately when capture coverage is known.
+    pub fn unverified_reason(&self) -> Option<&'static str> {
+        if self.status != Status::Shipped {
+            return Some("not implemented");
+        }
+        let Some(v) = &self.verification else {
+            return Some("no verification record");
+        };
+        if v.captures.is_empty() && v.journeys.is_empty() {
+            return Some("verification has no captures or journeys");
+        }
+        if self.implemented_by.as_deref() == Some(v.by.as_str()) {
+            return Some("verifier is the implementer");
+        }
+        None
+    }
+    pub fn verified(&self) -> bool {
+        self.unverified_reason().is_none()
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
