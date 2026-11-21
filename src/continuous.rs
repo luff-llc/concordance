@@ -853,7 +853,8 @@ impl Catalog {
                 }
             }
         }
-        let excerpt: Vec<&str> = diff.lines().take(120).collect();
+        // Trim line ends so blank context lines don't leave trailing whitespace in the task file.
+        let excerpt: Vec<&str> = diff.lines().take(120).map(str::trim_end).collect();
         out.push_str(&format!(
             "\n<details><summary>Diff excerpt ({} lines)</summary>\n\n```diff\n{}\n```\n\n</details>\n",
             diff.lines().count(),
