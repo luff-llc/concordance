@@ -657,3 +657,23 @@ fn setting_a_non_stale_status_closes_stale_records_and_notes_the_task() {
             .is_none()
     );
 }
+
+#[test]
+fn reviewed_unchanged_closes_a_stale_detail_back_to_its_previous_status() {
+    let f = Fixture::new();
+    f.mutate("reader", |v| {
+        v[1]["details"] = json!([{"id": "title-copy", "kind": "copy", "spec": {"text": "Title", "copy": {"text": "Open book"}},
+            "platforms": {"android": {"status": "stale", "previous_status": "partial", "since_commit": "abcdef1", "since_date": "2026-11-20"}}}]);
+    });
+    f.config("[baselines.ios]\ncommit = 'abcdef1234567'\n");
+    let dir = f.0.to_str().expect("path");
+    let set = Command::new(env!("CARGO_BIN_EXE_concordance"))
+        .args(["set", dir, "reader.native-menu#title-copy", "--platform", "android", "--reviewed-unchanged"])
+        .output()
+        .expect("CLI");
+    assert!(set.status.success(), "{}", text(&set));
+    let catalog = concordance::Catalog::load(&f.0).expect("catalog");
+    let record = &catalog.entries["reader.native-menu"].details[0].platforms["android"];
+    assert_eq!(record.status, concordance::Status::Partial);
+    assert!(record.previous_status.is_none() && record.reviewed_commit.is_some());
+}

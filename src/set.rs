@@ -222,6 +222,18 @@ impl Catalog {
             }
             if request.reviewed_unchanged {
                 record.insert(key("reviewed_commit"), key(&pin));
+                // Reviewed and unchanged closes a stale record: it returns to its previous
+                // status (the stale bookkeeping is dropped below), unless --status says otherwise.
+                if request.status.is_none()
+                    && record.get("status").and_then(Value::as_str) == Some("stale")
+                {
+                    let previous = record
+                        .get("previous_status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("implemented")
+                        .to_owned();
+                    record.insert(key("status"), key(&previous));
+                }
             }
             if let Some(reason) = &request.intended {
                 record.insert(key("intended_difference"), key(reason));
