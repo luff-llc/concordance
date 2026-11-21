@@ -562,3 +562,98 @@ fn version_check_compares_files_patterns_commands_and_source_wiring() {
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out).contains("timed out after 1s"));
 }
+
+#[test]
+fn setting_a_non_stale_status_closes_stale_records_and_notes_the_task() {
+    let f = Fixture::new();
+    let stale = json!({"status": "stale", "previous_status": "implemented", "since_commit": "abcdef1", "since_date": "2026-11-20"});
+    f.mutate("reader", |v| {
+        v[0]["platforms"]["android"] = stale.clone();
+        v[1]["platforms"]["android"] = stale.clone();
+        v[1]["details"] = json!([{"id": "title-copy", "kind": "copy", "spec": {"text": "Title"}, "platforms": {"android": stale.clone()}}]);
+    });
+    let tasks = f.0.join("tasks");
+    fs::create_dir_all(&tasks).expect("tasks");
+    fs::write(tasks.join("reader.open-book.md"), "<!-- concordance:task reader.open-book -->\n# Task\n<!-- concordance:task end -->\n\n## Notes\n").expect("task");
+    let dir = f.0.to_str().expect("path");
+    let set = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_concordance"))
+            .args(["set", dir])
+            .args(args)
+            .output()
+            .expect("CLI")
+    };
+    // stale → implemented clears the bookkeeping and notes the task.
+    let out = set(&[
+        "reader.open-book",
+        "--platform",
+        "android",
+        "--status",
+        "implemented",
+        "--tasks-dir",
+        tasks.to_str().expect("p"),
+        "--closing-commit",
+        "1234abc",
+    ]);
+    assert!(out.status.success(), "{}", text(&out));
+    let task = fs::read_to_string(tasks.join("reader.open-book.md")).expect("task");
+    assert!(
+        task.contains("- Closed `reader.open-book` on android (stale → implemented) on ")
+            && task.contains(" at `1234abc`; stale since `abcdef1`."),
+        "{task}"
+    );
+    // stale → intended restores the previous status.
+    assert!(set(&[
+        "reader.native-menu",
+        "--platform",
+        "android",
+        "--intended",
+        "Native menu differs by design"
+    ])
+    .status
+    .success());
+    // Detail-level stale → partial.
+    assert!(set(&[
+        "reader.native-menu/title-copy",
+        "--platform",
+        "android",
+        "--status",
+        "partial"
+    ])
+    .status
+    .success());
+    let catalog = concordance::Catalog::load(&f.0).expect("catalog");
+    let open = &catalog.entries["reader.open-book"].platforms["android"];
+    let menu = &catalog.entries["reader.native-menu"];
+    let detail = &menu.details[0].platforms["android"];
+    assert_eq!(open.status, concordance::Status::Implemented);
+    assert_eq!(
+        menu.platforms["android"].status,
+        concordance::Status::Implemented
+    );
+    assert_eq!(detail.status, concordance::Status::Partial);
+    for record in [open, &menu.platforms["android"], detail] {
+        assert!(
+            record.previous_status.is_none()
+                && record.since_commit.is_none()
+                && record.since_date.is_none()
+        );
+    }
+    // --clear accepts the stale fields too.
+    f.mutate("reader", |v| v[0]["platforms"]["android"] = json!({"status": "stale", "previous_status": "partial", "since_commit": "abcdef1", "since_date": "2026-11-20"}));
+    assert!(set(&[
+        "reader.open-book",
+        "--platform",
+        "android",
+        "--clear",
+        "since_date"
+    ])
+    .status
+    .success());
+    assert!(
+        concordance::Catalog::load(&f.0).expect("catalog").entries["reader.open-book"].platforms
+            ["android"]
+            .since_date
+            .is_none()
+    );
+}

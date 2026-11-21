@@ -66,6 +66,9 @@
   string catalogs) and queues file-level hits as review tasks (`--coarse-as stale|review`,
   default review); `set --stale` and `set --reviewed-unchanged` (`reviewed_commit`) triage
   them. `anchors suggest` proposes `#Symbol` anchors for file-level evidence.
+- Setting a non-stale status on a stale record clears `previous_status`, `since_commit`
+  and `since_date`, and with `--tasks-dir` notes the closure (date, `--closing-commit` or
+  the platform root's HEAD) in the task file; `--clear` accepts those fields.
 - Shared marketing version: `[version] source` plus per-platform `file`/`pattern`,
   `command` (with timeout) or `reads_source` checks; `version-check` (exit 0/1/2) and the
   same check inside `gate-release` (`--skip-version`). Adds the `regex` dependency.

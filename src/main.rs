@@ -116,6 +116,12 @@ enum Command {
         /// previous status.
         #[arg(long)]
         intended: Option<String>,
+        /// Task directory from `sync --tasks-dir`; closing a stale record appends a note there.
+        #[arg(long)]
+        tasks_dir: Option<PathBuf>,
+        /// Commit that closed a stale record (default: HEAD of the platform root).
+        #[arg(long)]
+        closing_commit: Option<String>,
         /// Mark the record stale against the current baseline pin (triage of a review task).
         #[arg(long)]
         stale: bool,
@@ -962,6 +968,8 @@ fn run(cli: Cli) -> Result<()> {
             intended,
             stale,
             reviewed_unchanged,
+            tasks_dir,
+            closing_commit,
             unset,
             allow_reformat,
         } => {
@@ -983,6 +991,8 @@ fn run(cli: Cli) -> Result<()> {
                 intended,
                 stale,
                 reviewed_unchanged,
+                tasks_dir,
+                closing_commit,
                 unset,
                 allow_reformat,
             };
@@ -996,6 +1006,9 @@ fn run(cli: Cli) -> Result<()> {
                 },
                 outcome.file.display()
             );
+            if let Some(note) = &outcome.closed {
+                println!("{note}");
+            }
             for warning in outcome.warnings {
                 eprintln!(
                     "warning: {} {} {}: {}",

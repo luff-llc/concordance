@@ -295,7 +295,12 @@ android:
 ```
 
 `previous_status` and `since_*` are errors on any other status. Fix the target, then
-`concordance set … --status implemented --clear …`, or record an intended difference:
+`concordance set … --status implemented` (or any non-stale status): leaving `stale` drops
+`previous_status`, `since_commit` and `since_date` automatically, and with `--tasks-dir`
+appends `- Closed <record> on <platform> (stale → <status>) on <date> at <commit>; stale
+since <commit>.` to that entry's task file (`--closing-commit`, default the platform
+root's `HEAD` when it is a Git checkout). `--clear` also accepts those three fields. Or
+record an intended difference:
 `concordance set <dir> <id>[/<detail>] --platform android --intended "<reason>"` writes
 `intended_difference` and returns a stale record to its previous status. Reports count
 stale entries and list them under **Stale after baseline changes**.

@@ -16,6 +16,9 @@ pub const CLEARABLE: &[&str] = &[
     "tests",
     "reviewed_commit",
     "intended_difference",
+    "previous_status",
+    "since_commit",
+    "since_date",
 ];
 
 #[derive(Debug, Default, Clone)]
@@ -35,6 +38,10 @@ pub struct SetRequest {
     pub stale: bool,
     /// Record that the record needs no change at the current baseline pin.
     pub reviewed_unchanged: bool,
+    /// Task directory from `sync --tasks-dir`; closing a stale record notes it there.
+    pub tasks_dir: Option<PathBuf>,
+    /// Commit that closed a stale record (default: HEAD of the platform root, if any).
+    pub closing_commit: Option<String>,
     /// Fields to set to `null`, unsetting a value inherited from the parent platform.
     pub unset: Vec<String>,
     pub allow_reformat: bool,
@@ -45,6 +52,8 @@ pub struct SetOutcome {
     pub changed: bool,
     /// Warnings for the edited record after the change.
     pub warnings: Vec<Issue>,
+    /// Set when a stale record was closed: (previous stale since_commit, new status).
+    pub closed: Option<String>,
 }
 
 pub(crate) fn key(s: &str) -> Value {
@@ -148,6 +157,7 @@ impl Catalog {
             .ok_or_else(|| format!("unknown entry: {entry_id}"))?;
         let file = catalog.directory.join(&catalog.area_files[area]);
         let original = fs::read(&file)?;
+        let mut closed: Option<(String, String)> = None;
         let changed = edit_file(&file, request.allow_reformat, |value| {
             let record = record_mut(
                 value,
@@ -168,6 +178,12 @@ impl Catalog {
             for field in &request.unset {
                 record.insert(key(field), Value::Null);
             }
+            let was_stale = record.get("status").and_then(Value::as_str) == Some("stale");
+            let stale_since = record
+                .get("since_commit")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
             if let Some(status) = request.status {
                 record.insert(key("status"), key(status.as_str()));
             }
@@ -231,6 +247,18 @@ impl Catalog {
                     Value::Sequence(keys.iter().map(|k| key(k)).collect()),
                 );
             }
+            // Leaving `stale` drops its bookkeeping: the record is current again.
+            if was_stale && record.get("status").and_then(Value::as_str) != Some("stale") {
+                for field in ["previous_status", "since_commit", "since_date"] {
+                    record.remove(field);
+                }
+                let now = record
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                closed = Some((stale_since.clone(), now));
+            }
             Ok(())
         })?;
         let mine = |issue: &Issue| issue.entry == label && issue.platform == request.platform;
@@ -269,10 +297,45 @@ impl Catalog {
         let warnings = after
             .map(|r| r.warnings.into_iter().filter(|i| mine(i)).collect())
             .unwrap_or_default();
+        let mut closed_note = None;
+        if let Some((since, now)) = closed {
+            let commit = request.closing_commit.clone().or_else(|| {
+                catalog
+                    .platform_root(&request.platform, &crate::RootOptions::default())
+                    .ok()
+                    .flatten()
+                    .and_then(|root| crate::drift::git(&root, &["rev-parse", "HEAD"]).ok())
+                    .map(|b| String::from_utf8_lossy(&b).trim().to_owned())
+            });
+            let note = format!(
+                "- Closed `{label}` on {} ({} → {now}) on {}{}{}.\n",
+                request.platform,
+                "stale",
+                crate::today(),
+                commit.map(|c| format!(" at `{c}`")).unwrap_or_default(),
+                if since.is_empty() {
+                    String::new()
+                } else {
+                    format!("; stale since `{since}`")
+                }
+            );
+            if let Some(dir) = &request.tasks_dir {
+                let path = dir.join(format!("{entry_id}.md"));
+                if let Ok(mut text) = fs::read_to_string(&path) {
+                    if !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    text.push_str(&note);
+                    fs::write(&path, text)?;
+                }
+            }
+            closed_note = Some(note.trim_end().to_owned());
+        }
         Ok(SetOutcome {
             file,
             changed,
             warnings,
+            closed: closed_note,
         })
     }
 }
