@@ -205,7 +205,9 @@ Choices where the proposal left room:
 - **Empty catalogs.** A catalog with a `catalog/` directory and no area files is valid
   (`validate`, `track`); a flat catalog still needs at least one area file.
 - **Inventory.** Files are the user-visible sources (`user_visible`, else `all`; with no
-  `[source_globs]`, common source extensions). A candidate area is the first non-generic
+  `[source_globs]`, common source extensions). String catalogs default to `.xcstrings`,
+  `Localizable.strings` and `res/values/strings.xml` only when the `strings` key is absent; an
+  explicit `strings = []` (as `init` writes when it found none) means none. A candidate area is the first non-generic
   folder below the matched glob's fixed prefix (`src`, `main`, `kotlin`, `java`, `sources`,
   `views`, `screens`, `features` and similar are skipped); in Kotlin and Java the package
   directories every file shares are stripped first. Files at that root are `app` for the
@@ -220,7 +222,10 @@ Choices where the proposal left room:
   and match entry identifiers as a glob. Citations: files by entry evidence on that platform
   (after `[path_prefixes]`), identifiers by `accessibility.identifier`, strings by `copy` or
   a copy detail's text or key. External platforms without `--root` are listed as unchecked.
-- **`plan-audit`.** Briefs go to `DIR/tasks` (or `--out`) as `audit-<platform>-<area>.md`, or
+- **`plan-audit`.** The output directory must be inside the catalog's repository (or the
+  catalog directory, when the catalog sits outside the repository) and is checked and created
+  with `init`'s rules: no existing component may be a symbolic link and nothing is written
+  through one. Briefs go to `DIR/tasks` (or `--out`) as `audit-<platform>-<area>.md`, or
   `parity-<baseline>-<target>-<area>.md` with `--target`, created exclusively; edited briefs
   are preserved. `--platform` defaults to `[report].baseline`. The parity findings file is
   named `<brief>-findings.md`.

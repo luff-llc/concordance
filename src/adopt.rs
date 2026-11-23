@@ -1205,6 +1205,54 @@ fn relative_inside(repo: &Path, path: &Path) -> Result<String> {
     Ok(parts.join("/"))
 }
 
+/// `path` made absolute (against the current directory) with `.` and `..` resolved
+/// lexically, so no symbolic link is followed.
+fn lexical_absolute(path: &Path) -> Result<PathBuf> {
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut normal = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::ParentDir => {
+                normal.pop();
+            }
+            Component::CurDir => {}
+            other => normal.push(other),
+        }
+    }
+    Ok(normal)
+}
+
+/// An output directory inside a repository that init and plan-audit write into without
+/// following symbolic links.
+pub(crate) struct SafeDir {
+    repo: PathBuf,
+    relative: String,
+}
+impl SafeDir {
+    /// Refuse `dir` unless it is inside `repo`, no existing component below the repository
+    /// is a symbolic link, and its nearest existing ancestor resolves inside the repository.
+    pub(crate) fn new(repo: &Path, dir: &Path) -> Result<Self> {
+        let repo = lexical_absolute(repo)?;
+        let relative = relative_inside(&repo, &lexical_absolute(dir)?)?;
+        check_no_symlinks(&repo, &relative)?;
+        Ok(Self { repo, relative })
+    }
+    /// Create the directory one component at a time.
+    pub(crate) fn create(&self) -> Result<()> {
+        create_dirs(&self.repo, &self.relative)
+    }
+    /// The path of `name` in the directory, after the same checks.
+    pub(crate) fn file(&self, name: &str) -> Result<PathBuf> {
+        let relative = join(&self.relative, name);
+        check_no_symlinks(&self.repo, &relative)?;
+        Ok(self.repo.join(relative))
+    }
+}
+
 /// Refuse a path under the canonical `repo` when an existing component is a symbolic link,
 /// or when its nearest existing ancestor resolves outside the repository.
 fn check_no_symlinks(repo: &Path, relative: &str) -> Result<()> {
@@ -1229,7 +1277,7 @@ fn check_no_symlinks(repo: &Path, relative: &str) -> Result<()> {
             break;
         }
     }
-    if !probe.canonicalize()?.starts_with(repo) {
+    if !probe.canonicalize()?.starts_with(repo.canonicalize()?) {
         return fail(format!(
             "{} resolves outside the repository {}",
             repo.join(relative).display(),

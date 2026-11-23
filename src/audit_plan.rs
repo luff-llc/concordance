@@ -415,11 +415,37 @@ impl Catalog {
             }
             None => areas,
         };
-        fs::create_dir_all(out)?;
+        // Same rules as init: inside the repository (or the catalog directory, which may
+        // sit outside it), never through a symbolic link.
+        let repo = roots
+            .repo
+            .clone()
+            .unwrap_or_else(|| self.directory.join(&self.config.repo_root));
+        let safe = match crate::adopt::SafeDir::new(&repo, out) {
+            Ok(safe) => safe,
+            Err(error) if error.to_string().contains("is not inside") => {
+                match crate::adopt::SafeDir::new(&self.directory, out) {
+                    Ok(safe) => safe,
+                    Err(inner) if inner.to_string().contains("is not inside") => {
+                        return Err(format!(
+                            "--out {} must be inside the repository {} or the catalog directory {}",
+                            out.display(),
+                            repo.display(),
+                            self.directory.display()
+                        )
+                        .into())
+                    }
+                    Err(inner) => return Err(inner),
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        safe.create()?;
         let mut result = AuditResult::default();
         for area in selected {
             let text = self.audit_brief(options, &base, target.as_ref(), area);
             let name = brief_name(&platform, options.target.as_deref(), area);
+            safe.file(&name)?;
             let path = out.join(name);
             match fs::OpenOptions::new()
                 .write(true)

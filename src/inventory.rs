@@ -311,7 +311,7 @@ fn is_locale(stem: &str) -> bool {
     let bytes = stem.as_bytes();
     (bytes.len() == 2 && stem.bytes().all(|b| b.is_ascii_lowercase()))
         || (bytes.len() == 5
-            && stem[..2].bytes().all(|b| b.is_ascii_lowercase())
+            && bytes[..2].iter().all(|b| b.is_ascii_lowercase())
             && matches!(bytes[2], b'-' | b'_'))
 }
 
@@ -537,20 +537,32 @@ struct Globs {
 impl Globs {
     fn of(catalog: &Catalog, platform: &str) -> Self {
         let configured = catalog.config.source_globs.get(platform);
+        // An explicit `strings = []` means none; the defaults apply only when the key is absent.
+        let strings_key = fs::read_to_string(catalog.directory.join("catalog.toml"))
+            .ok()
+            .and_then(|text| text.parse::<toml::Table>().ok())
+            .is_some_and(|table| {
+                table
+                    .get("source_globs")
+                    .and_then(|g| g.get(platform))
+                    .and_then(|p| p.as_table())
+                    .is_some_and(|p| p.contains_key("strings"))
+            });
         Self::from_lists(
             configured.map(|g| g.all().to_vec()).unwrap_or_default(),
             configured
                 .map(|g| g.user_visible().to_vec())
                 .unwrap_or_default(),
-            configured.map(|g| g.strings().to_vec()).unwrap_or_default(),
+            strings_key.then(|| configured.map(|g| g.strings().to_vec()).unwrap_or_default()),
             configured.map(|g| g.tests().to_vec()).unwrap_or_default(),
         )
     }
     /// The globs in effect for these `[source_globs]` lists, with inventory's defaults.
+    /// `strings: None` (no `strings` key) uses the default string catalogs.
     fn from_lists(
         all: Vec<String>,
         user_visible: Vec<String>,
-        strings: Vec<String>,
+        strings: Option<Vec<String>>,
         tests: Vec<String>,
     ) -> Self {
         let all = if all.is_empty() && user_visible.is_empty() {
@@ -562,8 +574,8 @@ impl Globs {
             all
         };
         let strings = match strings {
-            s if !s.is_empty() => s,
-            _ => vec![
+            Some(s) => s,
+            None => vec![
                 "**/*.xcstrings".into(),
                 "**/Localizable.strings".into(),
                 "**/res/values/strings.xml".into(),
@@ -782,7 +794,7 @@ pub(crate) fn count_sources(
     let globs = Globs::from_lists(
         all.to_vec(),
         user_visible.to_vec(),
-        strings.to_vec(),
+        Some(strings.to_vec()),
         tests.to_vec(),
     );
     Ok(classify(root, &globs)?.sources.len())
