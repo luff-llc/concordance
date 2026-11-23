@@ -5,12 +5,34 @@ use serde_json::Value;
 pub const SCHEMA: &str = include_str!("../schema/catalog.schema.json");
 
 pub fn valid_id(id: &str) -> bool {
-    fn part(s: &str) -> bool {
-        s.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
-            && s.bytes()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+    id.split_once('.')
+        .is_some_and(|(a, b)| valid_slug(a) && valid_slug(b))
+}
+
+/// Lowercase slug: a letter, then letters, digits and hyphens.
+pub fn valid_slug(s: &str) -> bool {
+    s.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+        && s.bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+}
+
+/// Calendar date in YYYY-MM-DD form with a plausible month and day.
+pub fn valid_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return false;
     }
-    id.split_once('.').is_some_and(|(a, b)| part(a) && part(b))
+    let digits = |r: std::ops::Range<usize>| -> Option<u32> {
+        s.get(r)
+            .filter(|p| p.bytes().all(|c| c.is_ascii_digit()))
+            .and_then(|p| p.parse().ok())
+    };
+    matches!((digits(0..4), digits(5..7), digits(8..10)), (Some(_), Some(m), Some(d)) if (1..=12).contains(&m) && (1..=31).contains(&d))
+}
+
+/// Abbreviated or full hexadecimal Git object name.
+pub fn valid_commit(s: &str) -> bool {
+    (7..=64).contains(&s.len()) && s.bytes().all(|c| c.is_ascii_hexdigit())
 }
 
 pub fn validate(value: &Value) -> Result<()> {
@@ -19,15 +41,40 @@ pub fn validate(value: &Value) -> Result<()> {
 
 pub fn validate_document(value: &Value, document: &str) -> Result<()> {
     let root: Value = serde_json::from_str(document)?;
-    check(value, &root, &root, "$")
+    let mut errors = Vec::new();
+    check(value, &root, &root, "$", &mut errors)?;
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        fail(errors.join("\n"))
+    }
 }
 
-fn check(value: &Value, rule: &Value, root: &Value, at: &str) -> Result<()> {
+/// Every independent schema violation in a document.
+pub fn validate_all(value: &Value) -> Vec<String> {
+    let mut errors = Vec::new();
+    let result = serde_json::from_str(SCHEMA)
+        .map_err(|e| e.to_string())
+        .and_then(|root| check(value, &root, &root, "$", &mut errors).map_err(|e| e.to_string()));
+    if let Err(error) = result {
+        errors.push(error);
+    }
+    errors
+}
+
+fn check(
+    value: &Value,
+    rule: &Value,
+    root: &Value,
+    at: &str,
+    errors: &mut Vec<String>,
+) -> Result<()> {
     if rule == &Value::Bool(true) {
         return Ok(());
     }
     if rule == &Value::Bool(false) {
-        return fail(format!("{at}: unknown field"));
+        errors.push(format!("{at}: unknown field"));
+        return Ok(());
     }
     let rules = rule.as_object().ok_or("invalid bundled schema")?;
     // New assertion keywords must be implemented, never silently ignored.
@@ -53,10 +100,28 @@ fn check(value: &Value, rule: &Value, root: &Value, at: &str) -> Result<()> {
             "minimum",
             "maximum",
             "minProperties",
+            "anyOf",
         ]
         .contains(&key.as_str())
         {
             return fail(format!("unsupported bundled schema keyword: {key}"));
+        }
+    }
+    if let Some(alternatives) = rule.get("anyOf").and_then(Value::as_array) {
+        let mut first = None;
+        let mut matched = false;
+        for alternative in alternatives {
+            let mut attempt = Vec::new();
+            check(value, alternative, root, at, &mut attempt)?;
+            if attempt.is_empty() {
+                matched = true;
+                break;
+            }
+            first.get_or_insert(attempt);
+        }
+        if !matched {
+            errors.push(format!("{at}: matches none of the allowed forms"));
+            errors.extend(first.unwrap_or_default());
         }
     }
     if let Some(reference) = rule.get("$ref").and_then(Value::as_str) {
@@ -67,7 +132,7 @@ fn check(value: &Value, rule: &Value, root: &Value, at: &str) -> Result<()> {
                     .ok_or("nonlocal schema reference")?,
             )
             .ok_or("missing schema reference")?;
-        check(value, target, root, at)?;
+        check(value, target, root, at, errors)?;
     }
     if let Some(kind) = rule.get("type").and_then(Value::as_str) {
         let matches = match kind {
@@ -80,12 +145,13 @@ fn check(value: &Value, rule: &Value, root: &Value, at: &str) -> Result<()> {
             _ => return fail(format!("unsupported schema type: {kind}")),
         };
         if !matches {
-            return fail(format!("{at}: expected {kind}"));
+            errors.push(format!("{at}: expected {kind}"));
+            return Ok(());
         }
     }
     if let Some(allowed) = rule.get("enum").and_then(Value::as_array) {
         if !allowed.contains(value) {
-            return fail(format!(
+            errors.push(format!(
                 "{at}: invalid value {value}; expected one of {allowed:?}"
             ));
         }
@@ -97,13 +163,13 @@ fn check(value: &Value, rule: &Value, root: &Value, at: &str) -> Result<()> {
                 .and_then(Value::as_u64)
                 .unwrap_or(0) as usize
         {
-            return fail(format!("{at}: needs at least one platform"));
+            errors.push(format!("{at}: needs at least one platform"));
         }
         if let Some(required) = rule.get("required").and_then(Value::as_array) {
             for name in required {
                 let name = name.as_str().ok_or("invalid required key")?;
                 if !object.contains_key(name) {
-                    return fail(format!("{at}: missing required field {name}"));
+                    errors.push(format!("{at}: missing required field {name}"));
                 }
             }
         }
@@ -113,26 +179,26 @@ fn check(value: &Value, rule: &Value, root: &Value, at: &str) -> Result<()> {
                 .get("properties")
                 .and_then(|p| p.get(name))
                 .unwrap_or_else(|| rule.get("additionalProperties").unwrap_or(&default));
-            check(child, child_rule, root, &format!("{at}.{name}"))?;
+            check(child, child_rule, root, &format!("{at}.{name}"), errors)?;
         }
     }
     if let Some(array) = value.as_array() {
         if array.len() < rule.get("minItems").and_then(Value::as_u64).unwrap_or(0) as usize {
-            return fail(format!("{at}: too few items"));
+            errors.push(format!("{at}: too few items"));
         }
         if rule
             .get("maxItems")
             .and_then(Value::as_u64)
             .is_some_and(|max| array.len() > max as usize)
         {
-            return fail(format!("{at}: too many items"));
+            errors.push(format!("{at}: too many items"));
         }
         for (i, child) in array.iter().enumerate() {
             if rule.get("uniqueItems") == Some(&Value::Bool(true)) && array[..i].contains(child) {
-                return fail(format!("{at}: duplicate item {child}"));
+                errors.push(format!("{at}: duplicate item {child}"));
             }
             if let Some(items) = rule.get("items") {
-                check(child, items, root, &format!("{at}[{i}]"))?;
+                check(child, items, root, &format!("{at}[{i}]"), errors)?;
             }
         }
     }
@@ -140,14 +206,22 @@ fn check(value: &Value, rule: &Value, root: &Value, at: &str) -> Result<()> {
         if text.chars().count()
             < rule.get("minLength").and_then(Value::as_u64).unwrap_or(0) as usize
         {
-            return fail(format!("{at}: empty text"));
+            errors.push(format!("{at}: empty text"));
         }
         if let Some(pattern) = rule.get("pattern") {
-            if pattern.as_str() != Some(r"^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$") {
-                return fail("unsupported schema pattern");
-            }
-            if !valid_id(text) {
-                return fail(format!("{at}: invalid stable ID {text:?}"));
+            // Only the bundled patterns are understood; anything else fails closed.
+            let (valid, what) = match pattern.as_str() {
+                Some(r"^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$") => (valid_id(text), "stable ID"),
+                Some(r"^[a-z][a-z0-9-]*$") => (valid_slug(text), "slug"),
+                Some(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$") => (valid_date(text), "date (YYYY-MM-DD)"),
+                Some(r"^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$") => (
+                    crate::tracker::valid_shared_ref(text),
+                    "shared feature (<app>:<entry-id>)",
+                ),
+                _ => return fail("unsupported schema pattern"),
+            };
+            if !valid {
+                errors.push(format!("{at}: invalid {what} {text:?}"));
             }
         }
     }
@@ -161,7 +235,7 @@ fn check(value: &Value, rule: &Value, root: &Value, at: &str) -> Result<()> {
                 .and_then(Value::as_f64)
                 .is_some_and(|max| number > max)
         {
-            return fail(format!("{at}: number out of range"));
+            errors.push(format!("{at}: number out of range"));
         }
     }
     Ok(())
@@ -185,7 +259,8 @@ mod tests {
             &Value::Null,
             &serde_json::json!({"futureKeyword":true}),
             &Value::Null,
-            "$"
+            "$",
+            &mut Vec::new()
         )
         .is_err());
     }

@@ -1,0 +1,7 @@
+[platforms]
+ios = "ios"
+
+[report]
+title = "Marginalia"
+baseline = "ios"
+target = "ios"

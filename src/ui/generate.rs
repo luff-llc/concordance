@@ -1,4 +1,4 @@
-use super::{reference, rgb, Motion, Tokens, UiCatalog};
+use super::{rgb, Motion, Tokens, UiCatalog};
 use crate::{JourneyResult, Language, Result};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -277,8 +277,8 @@ impl UiCatalog {
         for screen in self.screens.values() {
             for state in screen.states.keys() {
                 let stem = format!("{}.{state}.{platform}", screen.id);
-                if reference(captures, &format!("{stem}.png"))?.is_file()
-                    && reference(captures, &format!("{stem}.json"))?.is_file()
+                if super::capture_file(captures, platform, &stem, "png")?.is_file()
+                    && super::capture_file(captures, platform, &stem, "json")?.is_file()
                 {
                     continue;
                 }

@@ -1,0 +1,7 @@
+[platforms]
+ios = "ios"
+android = "android"
+
+[report]
+title = "Taupe"
+area_order = ["home", "player", "sync", "library"]

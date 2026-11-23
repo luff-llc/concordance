@@ -58,6 +58,12 @@ impl Fixture {
             .output()
             .expect("CLI")
     }
+    fn cli_bare(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_concordance"))
+            .args(args)
+            .output()
+            .expect("CLI")
+    }
     fn matching_only(&self) {
         self.edit("screens/demo.yaml", |s| {
             s["states"].as_object_mut().expect("states").remove("dark");
@@ -559,7 +565,7 @@ fn html_escapes_notes_and_ui_report_counts_all_configured_platforms() {
     ui.compare(&f.0.join("captures"), "ios", "android", Some(&out))
         .expect("compare");
     let html = fs::read_to_string(out.join("index.html")).expect("html");
-    assert!(!html.contains("<script>"));
+    assert!(!html.contains("<script>alert"));
     assert!(html.contains("&lt;script&gt;"));
     let report = ui.ui_report(&f.0.join("captures"), "ios").expect("report");
     assert!(report.contains("| ios | 2 | 2 | 0 | 0 |"));
@@ -692,4 +698,472 @@ fn report_does_not_truncate_input_when_output_assets_share_the_capture_directory
         .compare(&f.0.join("captures"), "ios", "android", Some(&f.0))
         .expect("report alongside captures");
     assert_eq!(fs::read(&path).expect("preserved PNG"), before);
+}
+
+#[test]
+fn ui_report_accepts_repeated_platform_roots_and_checks_freshness() {
+    let f = Fixture::new();
+    let ios = format!("ios={}", f.0.display());
+    let android = format!("android={}", f.0.display());
+    success(f.cli("ui-report", &["--root", &ios, "--root", &android]));
+    success(f.cli(
+        "ui-report",
+        &["--root", &ios, "--root", &android, "--check"],
+    ));
+    assert!(!f
+        .cli("ui-report", &["--root", "unknown=."])
+        .status
+        .success());
+}
+
+#[test]
+fn capture_coverage_counts_produced_skipped_and_missing_and_blocks_verification() {
+    let f = Fixture::new();
+    // Platform subdirectories are accepted alongside the flat layout.
+    let nested = f.0.join("captures/android");
+    fs::create_dir_all(&nested).expect("mkdir");
+    for name in ["demo.populated.android.png", "demo.populated.android.json"] {
+        fs::rename(f.0.join("captures").join(name), nested.join(name)).expect("move");
+    }
+    for name in ["demo.dark.android.png", "demo.dark.android.json"] {
+        fs::remove_file(f.0.join("captures").join(name)).expect("remove");
+    }
+    fs::write(
+        nested.join("demo.dark.android.skip"),
+        "\nNo dark fixture on this device\n",
+    )
+    .expect("skip marker");
+    fs::remove_file(f.0.join("captures/demo.dark.ios.json")).expect("remove");
+    let verify = |captures: Value| {
+        f.edit("catalog/demo.yaml", |v| {
+            v[0]["platforms"]["android"]["implemented_by"] = json!("sol");
+            v[0]["platforms"]["android"]["verification"] =
+                json!({"by": "agy", "at": "2026-11-20", "captures": captures});
+        });
+    };
+    verify(json!(["demo.dark"]));
+    success(f.cli("validate", &[]));
+    let ui = f.ui();
+    let coverage = ui
+        .coverage(&f.0.join("captures"), &["ios", "android"])
+        .expect("coverage");
+    assert_eq!(coverage.counts("android"), [2, 1, 1, 0]);
+    assert_eq!(coverage.counts("ios"), [2, 1, 0, 1]);
+    let markdown = coverage.markdown(&ui);
+    for expected in [
+        "| android | 2 | 1 | 1 | 0 |",
+        "| demo | android | 2 | 1 | 1 | 0 |",
+        "- `demo.dark.android`: No dark fixture on this device",
+        "- `demo.dark.ios`: PNG without JSON",
+        "capture demo.dark skipped: No dark fixture on this device",
+    ] {
+        assert!(
+            markdown.contains(expected),
+            "missing {expected}:\n{markdown}"
+        );
+    }
+    let area = ui.catalog.areas.values().next().expect("area").clone();
+    assert!(markdown.contains(&format!("| {area} | android | 2 | 1 | 1 | 0 |")));
+    // Coverage mode prints Markdown and writes no stubs.
+    let printed = success(f.cli("capture-plan", &["--platform", "ios,android", "--coverage"]));
+    assert!(printed.contains("## Capture coverage"));
+    assert!(!f.0.join("capture-tests").exists());
+    // A skipped capture withdraws verification in the UI report; a produced one supports it.
+    success(f.cli("ui-report", &[]));
+    let report = fs::read_to_string(f.0.join("parity.md")).expect("report");
+    assert!(report.contains("capture demo.dark skipped"), "{report}");
+    verify(json!(["demo.populated"]));
+    success(f.cli("ui-report", &[]));
+    let report = fs::read_to_string(f.0.join("parity.md")).expect("report");
+    assert!(
+        report.contains("0 of 1 Android implemented entries"),
+        "{report}"
+    );
+    // Unknown capture keys are validation errors.
+    verify(json!(["demo.unknown"]));
+    let output = f.cli("validate", &[]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not a declared screen.state"));
+}
+
+#[test]
+fn compare_writes_side_by_side_pairs_and_review_notes_fold_into_proposed_verification() {
+    let f = Fixture::new();
+    let out = f.0.join("review");
+    f.ui()
+        .compare(&f.0.join("captures"), "ios", "android", Some(&out))
+        .expect("compare");
+    // Equal-height side-by-side image with a label bar: 32 + 16 gap + 32 wide, 46 + 32 tall.
+    let decoder = png::Decoder::new(std::io::BufReader::new(
+        fs::File::open(out.join("pairs/demo.populated.png")).expect("pair image"),
+    ));
+    let info = decoder.read_info().expect("PNG").info().clone();
+    assert_eq!((info.width, info.height), (80, 78));
+    let html = fs::read_to_string(out.join("index.html")).expect("HTML");
+    for expected in [
+        "pairs/demo.dark.png",
+        "Differences noted",
+        "Save review.json",
+        "data-screen=\"demo\"",
+    ] {
+        assert!(html.contains(expected), "missing {expected}");
+    }
+    let template: Value =
+        serde_json::from_str(&fs::read_to_string(out.join("review.json")).expect("template"))
+            .expect("JSON");
+    assert_eq!(template["pairs"].as_array().map(Vec::len), Some(2));
+    assert_eq!(template["pairs"][0]["verdict"], "unreviewed");
+
+    // A reviewer's notes survive regeneration and pre-fill the form.
+    let write_review = |dark: &str, notes: &str| {
+        let review = json!({
+            "version": 1, "reviewer": "agy", "at": "2026-11-20", "commit": "abcdef1",
+            "baseline": "ios", "target": "android",
+            "pairs": [
+                {"screen": "demo", "state": "populated", "verdict": "same", "differences": ""},
+                {"screen": "demo", "state": "dark", "verdict": dark, "differences": notes}
+            ]
+        });
+        fs::write(out.join("review.json"), review.to_string()).expect("review");
+    };
+    write_review("differs", "Title row is taller");
+    f.ui()
+        .compare(&f.0.join("captures"), "ios", "android", Some(&out))
+        .expect("compare again");
+    assert!(fs::read_to_string(out.join("index.html"))
+        .expect("HTML")
+        .contains("Title row is taller"));
+    assert!(fs::read_to_string(out.join("review.json"))
+        .expect("review")
+        .contains("Title row is taller"));
+
+    f.edit("catalog/demo.yaml", |v| {
+        v[0]["platforms"]["android"]["implemented_by"] = json!("sol");
+    });
+    let catalog_before = fs::read(f.0.join("catalog/demo.yaml")).expect("catalog");
+    let review = out.join("review.json");
+    let review_arg = review.to_str().expect("path");
+    let patch = success(f.cli("verify", &["--review", review_arg]));
+    assert!(patch.contains("Nothing was applied"));
+    assert!(patch.contains("action: needs-work"));
+    assert!(patch.contains("demo.dark: Title row is taller"));
+    write_review("unreviewed", "");
+    let patch = success(f.cli("verify", &["--review", review_arg]));
+    assert!(patch.contains("action: verify"), "{patch}");
+    assert!(patch.contains("by: agy") && patch.contains("- demo.populated"));
+    assert!(!patch.contains("demo.dark"));
+    // An entry that must be verified with a journey gets an incomplete proposal.
+    f.edit("catalog/demo.yaml", |v| {
+        v[0]["verify_requires"] = json!(["capture", "journey"])
+    });
+    let patch = success(f.cli("verify", &["--review", review_arg]));
+    assert!(
+        patch.contains("action: incomplete") && patch.contains("add a journey (verify_requires)"),
+        "{patch}"
+    );
+    fs::write(f.0.join("catalog/demo.yaml"), &catalog_before).expect("restore");
+    let file = f.0.join("proposed.yaml");
+    let file_arg = file.to_str().expect("path");
+    success(f.cli("verify", &["--review", review_arg, "--out", file_arg]));
+    assert!(!f
+        .cli("verify", &["--review", review_arg, "--out", file_arg])
+        .status
+        .success());
+    assert_eq!(
+        fs::read(f.0.join("catalog/demo.yaml")).expect("catalog"),
+        catalog_before
+    );
+
+    // The implementer cannot verify their own work; skipped captures cannot support it.
+    f.edit("catalog/demo.yaml", |v| {
+        v[0]["platforms"]["android"]["implemented_by"] = json!("agy");
+    });
+    assert!(success(f.cli("verify", &["--review", review_arg])).contains("action: rejected"));
+    fs::remove_file(f.0.join("captures/demo.populated.android.json")).expect("remove");
+    fs::write(
+        f.0.join("captures/demo.populated.android.skip"),
+        "No fixture",
+    )
+    .expect("skip");
+    let output = f.cli("verify", &["--review", review_arg]);
+    let patch = success(output);
+    assert!(patch.contains("# Excluded pair: demo.populated: android capture skipped: No fixture"));
+    assert!(patch.contains("[]"));
+}
+
+#[test]
+fn review_set_edits_notes_and_manifests_record_skips_and_fixture_packs() {
+    let f = Fixture::new();
+    let out = f.0.join("review");
+    f.ui()
+        .compare(&f.0.join("captures"), "ios", "android", Some(&out))
+        .expect("compare");
+    let dir = out.to_str().expect("path");
+    success(f.cli_bare(&[
+        "review",
+        "set",
+        dir,
+        "demo.dark",
+        "--verdict",
+        "differs",
+        "--note",
+        "Title wraps",
+        "--reviewer",
+        "agy",
+        "--at",
+        "2026-11-20",
+    ]));
+    let review: Value =
+        serde_json::from_str(&fs::read_to_string(out.join("review.json")).expect("review"))
+            .expect("JSON");
+    assert_eq!(review["reviewer"], "agy");
+    let dark = review["pairs"]
+        .as_array()
+        .expect("pairs")
+        .iter()
+        .find(|p| p["state"] == "dark")
+        .expect("dark")
+        .clone();
+    assert_eq!(
+        (dark["verdict"].as_str(), dark["differences"].as_str()),
+        (Some("differs"), Some("Title wraps"))
+    );
+    assert!(!f
+        .cli_bare(&["review", "set", dir, "demo.none", "--verdict", "same"])
+        .status
+        .success());
+
+    // Manifests record skips with reasons, run metadata, and fixture packs.
+    let manifest = |platform: &str, pack: &str, skipped: bool| {
+        fs::create_dir_all(f.0.join("captures").join(platform)).expect("mkdir");
+        let captures = if skipped {
+            json!([{"screen": "demo", "state": "dark", "status": "skipped", "reason": "No dark fixture"}])
+        } else {
+            json!([])
+        };
+        fs::write(
+            f.0.join("captures").join(platform).join("manifest.json"),
+            json!({"platform": platform, "device": "Pixel 8", "commit": "abcdef1", "fixture_pack": pack, "captures": captures}).to_string(),
+        )
+        .expect("manifest");
+    };
+    manifest("ios", "pack-1", false);
+    manifest("android", "pack-2", true);
+    for name in ["demo.dark.android.png", "demo.dark.android.json"] {
+        fs::remove_file(f.0.join("captures").join(name)).expect("remove");
+    }
+    let ui = f.ui();
+    let coverage = ui
+        .coverage(&f.0.join("captures"), &["ios", "android"])
+        .expect("coverage");
+    assert_eq!(coverage.counts("android"), [2, 1, 1, 0]);
+    let markdown = coverage.markdown(&ui);
+    assert!(
+        markdown.contains("No dark fixture")
+            && markdown.contains("| android | Pixel 8 | abcdef1 | pack-2 |")
+    );
+    assert!(markdown.contains("fixtures differ: visual comparison is structural only"));
+    let captures = f.0.join("captures");
+    let output = f.cli(
+        "compare",
+        &["--captures", captures.to_str().expect("path"), "--out", dir],
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("WARNING: fixtures differ: visual comparison is structural only (ios: pack-1, android: pack-2)"));
+    assert!(fs::read_to_string(out.join("index.html"))
+        .expect("HTML")
+        .contains("role=\"alert\""));
+    manifest("android", "pack-1", true);
+    let comparison = f
+        .ui()
+        .compare(&captures, "ios", "android", None)
+        .expect("compare");
+    assert!(comparison.fixture_warning.is_none());
+}
+
+#[test]
+fn motion_tokens_are_checked_against_design_tokens() {
+    let f = Fixture::new();
+    f.edit("catalog/demo.yaml", |v| {
+        v[0]["details"] = json!([
+            {"id": "settle", "kind": "motion", "spec": {"text": "Settles", "motion": {"token": "settle"}}},
+            {"id": "fold", "kind": "motion", "spec": {"text": "Folds", "motion": {"token": "Motion.fold"}}}
+        ]);
+    });
+    let stdout = success(f.cli("validate", &[]));
+    assert!(
+        stdout.contains(
+            "demo.open-screen#fold  Motion.fold: motion token is not defined in tokens.yaml"
+        ),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("#settle"));
+}
+
+#[test]
+fn equivalence_tolerances_pass_geometry_within_dp_and_ratio_with_measured_deltas() {
+    let f = Fixture::new();
+    let config = fs::read_to_string(f.0.join("catalog.toml")).expect("config");
+    let geometry_failures = |c: &concordance::ui::Comparison| -> Vec<String> {
+        let dark = c.pairs.iter().find(|p| p.state == "dark").expect("dark");
+        dark.target
+            .failures
+            .iter()
+            .filter(|f| f.contains("differs from ios"))
+            .cloned()
+            .collect()
+    };
+    assert!(!geometry_failures(&f.compare()).is_empty());
+    fs::write(
+        f.0.join("catalog.toml"),
+        format!("{config}\n[ui.tolerance]\nposition_dp = 100\nsize_ratio = 5\nradius_dp = 4\n"),
+    )
+    .expect("config");
+    let c = f.compare();
+    assert!(
+        geometry_failures(&c).is_empty(),
+        "{:?}",
+        geometry_failures(&c)
+    );
+    let populated = c
+        .pairs
+        .iter()
+        .find(|p| p.state == "populated")
+        .expect("populated");
+    assert!(
+        populated
+            .target
+            .measurements
+            .iter()
+            .any(|m| m == "artwork x Δ0.0dp within 100dp"),
+        "{:?}",
+        populated.target.measurements
+    );
+    // Corner radii compare in dp when both snapshots report them.
+    for (platform, radius) in [("ios", 8.0), ("android", 11.0)] {
+        f.edit(&format!("captures/demo.populated.{platform}.json"), |v| {
+            v["nodes"][1]["corner_radius"] = json!(radius);
+        });
+    }
+    let c = f.compare();
+    let populated = c
+        .pairs
+        .iter()
+        .find(|p| p.state == "populated")
+        .expect("populated");
+    assert!(populated
+        .target
+        .measurements
+        .iter()
+        .any(|m| m == "artwork corner radius Δ3.0dp within 4dp"));
+    // A screen override wins over the catalog tolerance.
+    f.edit("screens/demo.yaml", |s| {
+        s["tolerances"]["position_dp"] = json!(0);
+        s["tolerances"]["radius_dp"] = json!(2);
+    });
+    let c = f.compare();
+    let dark = c.pairs.iter().find(|p| p.state == "dark").expect("dark");
+    assert!(
+        dark.target
+            .failures
+            .iter()
+            .any(|f| f.contains("differs from ios by") && f.contains("(tolerance 0dp)")),
+        "{:?}",
+        dark.target.failures
+    );
+    let populated = c
+        .pairs
+        .iter()
+        .find(|p| p.state == "populated")
+        .expect("populated");
+    assert!(populated
+        .target
+        .failures
+        .iter()
+        .any(|f| f.contains("corner radius differs from ios by 3.0dp")));
+    let out = f.0.join("report");
+    f.ui()
+        .compare(&f.0.join("captures"), "ios", "android", Some(&out))
+        .expect("compare");
+    assert!(fs::read_to_string(out.join("index.html"))
+        .expect("HTML")
+        .contains("Within tolerance:"));
+}
+
+#[test]
+fn platform_and_fixture_verdicts_need_notes_count_as_equivalent_or_tooling_debt() {
+    let f = Fixture::new();
+    f.edit("catalog/demo.yaml", |v| {
+        v[0]["platforms"]["android"]["implemented_by"] = json!("sol")
+    });
+    let out = f.0.join("review");
+    f.ui()
+        .compare(&f.0.join("captures"), "ios", "android", Some(&out))
+        .expect("compare");
+    let dir = out.to_str().expect("path");
+    let set = |args: &[&str]| f.cli_bare(&[&["review", "set", dir][..], args].concat());
+    assert!(!set(&[
+        "demo.populated",
+        "--verdict",
+        "platform",
+        "--note",
+        "Shorter gesture inset"
+    ])
+    .status
+    .success());
+    let output = set(&[
+        "demo.populated",
+        "--verdict",
+        "platform",
+        "--category",
+        "weather",
+        "--note",
+        "x",
+    ]);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown platform category"));
+    assert!(!set(&["demo.dark", "--verdict", "fixture"]).status.success());
+    success(set(&[
+        "demo.populated",
+        "--verdict",
+        "platform",
+        "--category",
+        "gesture-inset",
+        "--note",
+        "Bottom bar sits 10dp lower",
+        "--reviewer",
+        "agy",
+        "--at",
+        "2026-11-20",
+    ]));
+    success(set(&[
+        "demo.dark",
+        "--verdict",
+        "fixture",
+        "--note",
+        "Clock not frozen",
+    ]));
+    let review = out.join("review.json");
+    let review_arg = review.to_str().expect("path");
+    let patch = success(f.cli("verify", &["--review", review_arg]));
+    assert!(patch.contains("action: verify"), "{patch}");
+    assert!(
+        patch.contains("accepted platform difference (gesture-inset): Bottom bar sits 10dp lower")
+    );
+    assert!(patch.contains("# Tooling debt (fixture, not counted): demo.dark: Clock not frozen"));
+    assert!(patch.contains("- demo.populated") && !patch.contains("- demo.dark"));
+    success(f.cli("ui-report", &["--review", review_arg]));
+    let report = fs::read_to_string(f.0.join("parity.md")).expect("report");
+    assert!(
+        report.contains("## Capture tooling debt")
+            && report.contains("- demo.dark: Clock not frozen")
+    );
+    // Categories come from catalog.toml [ui].
+    let config = fs::read_to_string(f.0.join("catalog.toml")).expect("config");
+    fs::write(
+        f.0.join("catalog.toml"),
+        format!("{config}\n[ui]\nplatform_categories = ['status-bar']\n"),
+    )
+    .expect("config");
+    let output = f.cli("verify", &["--review", review_arg]);
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("unknown platform category \"gesture-inset\""));
 }

@@ -82,6 +82,21 @@
         "text_size": {
           "type": "number",
           "minimum": 0
+        },
+        "position_dp": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Allowed cross-platform position difference in logical points/dp."
+        },
+        "size_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Allowed relative size difference, for example 0.08 for 8%."
+        },
+        "radius_dp": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Allowed corner-radius difference in logical points/dp."
         }
       },
       "required": []

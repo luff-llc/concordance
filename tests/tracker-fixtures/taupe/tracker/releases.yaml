@@ -1,0 +1,37 @@
+- id: "1.2.0"
+  state: candidate
+  title: Sync between devices
+  why: Holiday listening; first public Android beta
+  window: { from: 2026-11-20, to: 2026-12-05 }
+  builds: { ios: "44", android: "126" }
+  carries: [sync.join-by-qr, bug.home-recovery-blank, request.reuse-identity]
+  notes: []
+- id: "1.2.1"
+  state: in-review
+  title: Crash fix
+  window: { from: 2026-11-01, to: 2026-11-15 }
+  builds: { android: "127" }
+  carries: [bug.crash-on-open, player.skip-forward]
+- id: "1.3.0"
+  state: planned
+  title: Speed controls
+  window: { from: 2027-01-10, to: 2027-02-01 }
+  carries: [player.speed]
+- id: "2.0.0"
+  state: idea
+  title: Video
+- id: "1.1.0"
+  state: released
+  title: Skip controls
+  window: { from: 2026-09-20, to: 2026-10-05 }
+  released: 2026-10-02
+  builds: { ios: "40" }
+  carries: [player.skip-forward, bug.old-thing, bug.carried-fix]
+- id: "1.0.0"
+  state: released
+  released: 2026-08-01
+- id: "0.9.0"
+  state: pulled
+  released: 2026-07-01
+  carries: [bug.pulled-fix]
+  notes: [Pulled for a crash at launch.]

@@ -1,0 +1,19 @@
+- id: library.search
+  title: Search the library
+  summary: Search the library as a person expects.
+  surfaces: [main]
+  interactions:
+    - { trigger: Tap, result: It happens. }
+  states: [ready]
+  settings: []
+  data: { reads: [], writes: [] }
+  copy: []
+  accessibility: { label: "Search the library", identifier: library.search, notes: [] }
+  design: []
+  depends_on: [home.show-library]
+  impact: low
+  platforms:
+    ios: { status: not-applicable }
+    android: { status: missing }
+  acceptance:
+    - { given: a library, when: the person acts, then: it works }

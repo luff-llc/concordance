@@ -218,12 +218,57 @@ skeletons use `@Ignore` and `TODO`. They cannot silently count as capture covera
 Add native launch/navigation, state fixtures and screenshot/snapshot export, then
 remove the skip. The tool does not run a simulator or invent a generic app harness.
 
-Every run writes these two files into one flat captures directory:
+Every run writes these two files into the captures directory, either flat or in a
+`<platform>/` subdirectory (the flat file wins when both exist):
 
 ```text
 <screen-id>.<state>.<platform>.png
 <screen-id>.<state>.<platform>.json
+<screen-id>.<state>.<platform>.skip   # optional: why this capture was not produced
 ```
+
+A harness that cannot produce a capture (no fixture, unsupported state) writes a
+`.skip` marker whose first nonblank line is the reason, so coverage separates a
+deliberate skip from a forgotten capture.
+
+A capture run can instead (or also) write a manifest, `<captures>/<platform>/manifest.json`
+or `<captures>/manifest.<platform>.json`:
+
+```json
+{
+  "platform": "android", "device": "Pixel 8 API 35", "commit": "0123abc",
+  "fixture_pack": "fixtures-2026-11-20",
+  "captures": [
+    {"screen": "detail", "state": "populated", "status": "produced"},
+    {"screen": "detail", "state": "dark", "status": "skipped", "reason": "No dark artwork fixture"}
+  ]
+}
+```
+
+Files on disk win: a PNG/JSON pair is produced regardless of the manifest. Otherwise a
+manifest `skipped` entry is skipped with its reason, a `.skip` marker is next, and a
+manifest `produced` entry whose files are absent is missing with that explanation.
+Coverage lists each platform's device, commit and fixture pack. When the baseline and
+target manifests name different `fixture_pack` IDs, `compare` prints
+`WARNING: fixtures differ: visual comparison is structural only` on stderr, at the top
+of its summary and as a banner in `index.html`; `ui-report` and coverage repeat it.
+
+### Capture coverage
+
+```sh
+concordance capture-plan spec/product --platform ios,android --coverage \
+  --captures artifacts/captures
+```
+
+`--coverage` prints Markdown instead of the plan and writes no stubs. For each listed
+platform it counts required (declared screen states), produced (PNG and JSON),
+skipped (a `.skip` marker, with its reason) and missing captures, per platform, per
+area (a screen counts toward every area of its linked `entries`; unlinked screens
+appear as `(unlinked)`) and per screen. It lists each skipped and missing capture
+and every entry whose verification relies on one. `ui-report` appends the same
+section for all configured platforms. A skipped or missing capture cannot support
+`verified`: an entry citing it as a verification capture key is reported as
+unverified with that reason.
 
 For example, this is a complete snapshot for a tiny standalone region:
 
@@ -270,12 +315,97 @@ concordance ui-report spec/product --captures artifacts/captures --check
 ```
 
 Baseline/target default to `[report]` configuration (normally ios/android).
-`compare` writes `index.html`, `comparison.json` and copies of the PNGs into its
-report directory. Keep the output directory separate from input captures. The HTML
+`compare` writes `index.html`, `comparison.json`, `review.json`, copies of the PNGs,
+and one side-by-side image per screen state, `pairs/<screen>.<state>.png`: baseline
+on the left, target on the right, scaled to the same height (the smaller of the
+two, at most 1600 px) with a label bar naming each platform and the screen state.
+A missing capture renders as a grey "NO CAPTURE" panel; a PNG without its JSON is
+still shown. Images are drawn with the existing PNG dependency and a built-in 5×7
+bitmap font; no image or font crate is added. Keep the output directory separate from input captures. The HTML
 opens directly as a static file: side-by-side images, toggleable anatomy overlays,
 failures by platform, and a short **For reviewers** prompt containing roles, token
 usage, priorities and native adaptation notes. Give that report to a vision-capable
 agent or human reviewer; judge whether it expresses the same product design.
+
+### Reviewer notes and proposed verification
+
+Each pair in `index.html` has a verdict and a **Differences noted** field:
+
+| Verdict | Meaning | For `verify` |
+| --- | --- | --- |
+| `unreviewed` | Not looked at yet. | Ignored. |
+| `same` | Equivalent. | Supports verification. |
+| `platform` | An accepted platform difference; needs a `category` and a note. | Equivalent; the note is kept in the verification record. |
+| `differs` | A product difference. | Proposes a gap. |
+| `fixture` | A capture-tooling difference (unreached state, seed data, unfrozen clock, animation phase); needs a note. | Not counted for or against the product; listed as tooling debt. |
+
+Categories come from `[ui] platform_categories` in catalog.toml (default `status-bar`,
+`gesture-inset`, `font-metrics`, `glyph`, `touch-target`, `native-affordance`); compare
+copies them into `review.json`. From a terminal, edit the same file with
+`concordance review set <compare-out-dir> <screen.state> --verdict differs --note "…"`
+(`--verdict platform --category gesture-inset --note "…"`, `--verdict fixture --note "…"`;
+optionally `--reviewer`, `--at`, `--commit`, `--baseline-commit`). It refuses a platform
+verdict without a listed category, and platform or fixture verdicts without a note.
+`ui-report --review review.json` appends a **Capture tooling debt** list of fixture pairs. The page autosaves to the browser and **Save review.json**
+downloads the notes; place the file next to the page (or edit `review.json`, which
+`compare` writes once as a template and never overwrites). Rerunning `compare` reads
+an existing `review.json` and pre-fills the form.
+
+```json
+{
+  "version": 1, "reviewer": "agy", "at": "2026-11-20",
+  "commit": "0123abc", "baseline_commit": "6c29f3e",
+  "baseline": "ios", "target": "android",
+  "pairs": [
+    {"screen": "detail", "state": "populated", "verdict": "same", "differences": ""},
+    {"screen": "detail", "state": "dark", "verdict": "differs", "differences": "Title wraps"}
+  ]
+}
+```
+
+```sh
+concordance verify spec/product --review artifacts/ui-report/review.json \
+  --captures artifacts/captures --out verification-proposal.yaml
+```
+
+`verify` maps reviewed pairs to the entries their screens link and writes a commented
+YAML patch (stdout without `--out`; an existing `--out` file is never replaced). For
+each entry and the review's target platform it proposes one action:
+
+- `verify`: every reviewed pair is `same` or `platform`; proposes a `verification` record with the
+  reviewer, date, commits, the pair keys as capture keys (merged with existing ones),
+  existing journeys, and the reviewer's notes.
+- `needs-work`: some pair `differs`; proposes a `gap` from the noted differences.
+- `not-implemented`: the target status is not implemented; differences become a gap.
+- `incomplete`: the proposal would not verify yet, because `implemented_by` is not
+  recorded or the entry's `verify_requires` asks for a journey (or capture) the
+  record lacks; the proposed record is included with what to add.
+- `rejected`: the reviewer is the entry's `implemented_by`.
+
+Unreviewed pairs are ignored; `fixture` pairs are listed as tooling debt in the patch
+header and do not count for or against the product. Pairs whose baseline or target capture is skipped or
+missing are excluded and listed in the patch header. **The catalog is never edited**:
+a person or agent reviews the proposal and applies it by hand, then `validate`.
+
+### Equivalence tolerances
+
+Parity is equivalence, not pixel identity. Cross-platform geometry can be judged in logical
+units instead of viewport fractions:
+
+```toml
+# catalog.toml
+[ui.tolerance]
+position_dp = 12     # x and y, logical points/dp
+size_ratio = 0.08    # width and height, relative to the baseline
+radius_dp = 4        # snapshot node corner_radius, logical points/dp
+```
+
+A screen's `tolerances` may set the same three keys to override the catalog. When an axis
+has a tolerance, the baseline and target frames are compared directly in logical units;
+deltas within it pass and are recorded as measurements (`artwork x Δ3.2dp within 12dp`) in
+`comparison.json` and the HTML, and larger ones fail with the measured delta. Axes without
+one keep the normalized `geometry` check. Corner radii are compared only when both
+snapshots give a node `corner_radius`.
 
 Mechanical pass/fail checks are:
 
@@ -314,6 +444,6 @@ samples make the gate useful; passing it is evidence of those checks, not proof 
 identical design. Keep the human/vision review for the remaining design intent.
 
 The Rust API is under `concordance::ui`: `Tokens::load/native/write_native`,
-`UiCatalog::load/capture_plan/capture_stubs/compare/ui_report`, and serializable
-`Comparison` results. A generic fixture is in `tests/ui-fixtures`; it contains a
+`UiCatalog::load/capture_plan/capture_stubs/coverage/compare/ui_report/verify_review`,
+`Review`, `Coverage`, and serializable `Comparison` results. A generic fixture is in `tests/ui-fixtures`; it contains a
 matching light pair and a deliberately drifting dark pair.

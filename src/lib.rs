@@ -1,7 +1,33 @@
 //! Product behavior catalogs shared by native implementations and their tests.
+mod continuous;
+mod drift;
+pub mod edit;
+mod rebase;
+pub mod strings;
+mod version;
+pub use continuous::{
+    parse_date, patch_paths, today, GateFile, GateInput, GateReport, ReleaseFinding, SyncChange,
+    SyncOptions, SyncReport,
+};
+pub use version::{VersionReport, VersionResult};
+mod set;
+mod suite;
+mod track;
+pub mod tracker;
+pub use rebase::{AnchorFate, AnchorMove, AnchorSuggestion, RebaseReport};
+pub use set::{SetOutcome, SetRequest, CLEARABLE};
+pub use suite::{Suite, SuiteView};
+pub use track::{Format as TrackFormat, TrackView};
+pub use tracker::{calendar_day, Tracker};
+mod evidence;
 mod generate;
 mod model;
 mod report;
+mod validation;
+pub use drift::*;
+pub use evidence::{split_anchor, Anchor};
+pub use report::{relative_path, CaptureState, ReportContext};
+pub use validation::*;
 pub mod schema;
 pub mod ui;
 
@@ -25,6 +51,8 @@ pub struct Catalog {
     pub areas: BTreeMap<String, String>,
     pub directory: PathBuf,
     pub area_files: BTreeMap<String, String>,
+    /// Optional releases and issues from `tracker/`; empty when absent.
+    pub tracker: Tracker,
 }
 
 impl Catalog {
@@ -32,6 +60,14 @@ impl Catalog {
     /// Enforces the bundled schema, IDs, retirement records and dependency DAG.
     /// Evidence existence is separate so inspection/generation works without source checkouts.
     pub fn load(directory: impl AsRef<Path>) -> Result<Self> {
+        let (catalog, report) = Self::load_collect(directory)?;
+        report.into_result()?;
+        Ok(catalog)
+    }
+
+    /// Load recoverable entries and collect independent structural problems.
+    pub fn load_collect(directory: impl AsRef<Path>) -> Result<(Self, ValidationReport)> {
+        let mut report = ValidationReport::default();
         let directory = directory.as_ref().to_path_buf();
         let config_path = directory.join("catalog.toml");
         let config: Config = toml::from_str(
@@ -39,13 +75,33 @@ impl Catalog {
                 .map_err(|e| format!("{}: {e}", config_path.display()))?,
         )?;
         if config.platforms.is_empty() {
-            return fail("catalog.toml: platforms must not be empty");
+            report.error(
+                "config",
+                "",
+                "",
+                "catalog.toml",
+                "platforms must not be empty",
+            );
         }
-        for (name, root) in &config.platforms {
+        for (name, platform) in &config.platforms {
+            if let Some(parent) = platform.inherits() {
+                let mut seen = BTreeSet::from([name.as_str()]);
+                let mut next = Some(parent);
+                while let Some(current) = next {
+                    if !config.platforms.contains_key(current) {
+                        report.error("config", "", name, current, "inherits an unknown platform");
+                        break;
+                    }
+                    if !seen.insert(current) {
+                        report.error("config", "", name, current, "platform inheritance cycle");
+                        break;
+                    }
+                    next = config.platforms[current].inherits();
+                }
+            }
+            let root = platform.root();
             if name.is_empty() || !safe_relative(root, true) {
-                return fail(format!(
-                    "catalog.toml: unsafe platform root {name} = {root:?}"
-                ));
+                report.error("config", "", name, root, "unsafe platform root");
             }
         }
         for (name, prefix) in &config.path_prefixes {
@@ -53,11 +109,31 @@ impl Catalog {
                 || !prefix.ends_with('/')
                 || !safe_relative(prefix, false)
             {
-                return fail(format!("catalog.toml: invalid path prefix for {name}"));
+                report.error("config", "", name, prefix, "invalid path prefix");
             }
         }
         if Path::new(&config.repo_root).is_absolute() {
-            return fail("catalog.toml: repo_root must be relative to the catalog directory");
+            report.error(
+                "config",
+                "",
+                "",
+                "repo_root",
+                "repo_root must be relative to the catalog directory",
+            );
+        }
+        for (group, names) in [
+            (
+                "external_roots",
+                config.external_roots.keys().collect::<Vec<_>>(),
+            ),
+            ("baselines", config.baselines.keys().collect()),
+            ("source_globs", config.source_globs.keys().collect()),
+        ] {
+            for name in names {
+                if !config.platforms.contains_key(name) {
+                    report.error("config", "", name, group, "unknown platform");
+                }
+            }
         }
         let nested = directory.join("catalog").is_dir();
         let data_dir = if nested {
@@ -74,7 +150,13 @@ impl Catalog {
         });
         files.sort();
         if files.is_empty() {
-            return fail(format!("no catalog YAML files in {}", data_dir.display()));
+            report.error(
+                "schema",
+                "",
+                "",
+                &data_dir.display().to_string(),
+                "no catalog YAML files",
+            );
         }
         let mut catalog = Self {
             config,
@@ -82,6 +164,7 @@ impl Catalog {
             areas: BTreeMap::new(),
             area_files: BTreeMap::new(),
             directory,
+            tracker: Tracker::default(),
         };
         for file in files {
             let area = file
@@ -90,10 +173,18 @@ impl Catalog {
                 .ok_or("non-UTF8 area name")?
                 .to_owned();
             if !safe_area(&area) {
-                return fail(format!("invalid area filename: {}", file.display()));
+                report.error(
+                    "schema",
+                    "",
+                    "",
+                    &file.display().to_string(),
+                    "invalid area filename",
+                );
+                continue;
             }
             if catalog.area_files.contains_key(&area) {
-                return fail(format!("duplicate area filename: {area}"));
+                report.error("schema", "", "", &area, "duplicate area filename");
+                continue;
             }
             let name = file
                 .file_name()
@@ -103,23 +194,87 @@ impl Catalog {
                 area.clone(),
                 format!("{}{name}", if nested { "catalog/" } else { "" }),
             );
-            // Deserialize YAML first: unlike serde_json::Value, this rejects duplicate map keys.
-            let value: serde_yaml::Value = serde_yaml::from_str(&fs::read_to_string(&file)?)
-                .map_err(|e| format!("{}: {e}", file.display()))?;
-            let value = serde_json::to_value(value)?;
-            schema::validate(&value).map_err(|e| format!("{}: {e}", file.display()))?;
-            let entries: Vec<Entry> = serde_json::from_value(value)?;
-            for entry in entries {
-                for platform in entry.platforms.keys() {
+            // Parsing failures affect this document only; other files still contribute issues.
+            let values = (|| -> Result<serde_json::Value> {
+                let value: serde_yaml::Value = serde_yaml::from_str(&fs::read_to_string(&file)?)?;
+                Ok(serde_json::to_value(value)?)
+            })();
+            let reference = file.display().to_string();
+            let value = match values {
+                Ok(value) => value,
+                Err(error) => {
+                    report.error("schema", "", "", &reference, &error.to_string());
+                    continue;
+                }
+            };
+            let Some(values) = value.as_array() else {
+                report.error("schema", "", "", &reference, "expected array");
+                continue;
+            };
+            if values.is_empty() {
+                report.error("schema", "", "", &reference, "too few items");
+            }
+            let order = inheritance_order(&catalog.config);
+            for (index, value) in values.iter().enumerate() {
+                let mut value = value.clone();
+                let copied = inherit(&mut value, &order);
+                let value = &value;
+                let id = value
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let errors = schema::validate_all(&serde_json::json!([value]));
+                for error in &errors {
+                    report.error(
+                        "schema",
+                        id,
+                        "",
+                        &reference,
+                        &error.replace("$[0]", &format!("$[{index}]")),
+                    );
+                }
+                let mut entry: Entry = match serde_json::from_value(value.clone()) {
+                    Ok(entry) => entry,
+                    Err(_) => continue,
+                };
+                for (detail, platform) in copied {
+                    let record = match detail {
+                        None => entry.platforms.get_mut(&platform),
+                        Some(i) => entry
+                            .details
+                            .get_mut(i)
+                            .and_then(|d| d.platforms.get_mut(&platform)),
+                    };
+                    if let Some(record) = record {
+                        record.inherited = true;
+                    }
+                }
+                validation::check_entry(&entry, &mut report);
+                let id = &entry.id;
+                let detail_platforms = entry.details.iter().flat_map(|d| {
+                    d.platforms
+                        .keys()
+                        .map(move |p| (format!("{id}#{}", d.id), p))
+                });
+                for (label, platform) in entry
+                    .platforms
+                    .keys()
+                    .map(|p| (entry.id.clone(), p))
+                    .chain(detail_platforms)
+                {
                     if !catalog.config.platforms.contains_key(platform) {
-                        return fail(format!(
-                            "{}: platform {platform} has no configured repo root",
-                            entry.id
-                        ));
+                        report.error(
+                            "identity",
+                            &label,
+                            platform,
+                            "",
+                            "platform has no configured repo root",
+                        );
                     }
                 }
                 if catalog.entries.contains_key(&entry.id) {
-                    return fail(format!("duplicate ID: {}", entry.id));
+                    report.error("identity", &entry.id, "", &reference, "duplicate ID");
+                    continue;
                 }
                 catalog.areas.insert(entry.id.clone(), area.clone());
                 catalog.entries.insert(entry.id.clone(), entry);
@@ -128,13 +283,37 @@ impl Catalog {
         for entry in catalog.entries.values() {
             for dependency in &entry.depends_on {
                 if !catalog.entries.contains_key(dependency) {
-                    return fail(format!("{}: unresolved depends_on {dependency}", entry.id));
+                    report.error(
+                        "dependencies",
+                        &entry.id,
+                        "",
+                        dependency,
+                        "unresolved depends_on",
+                    );
                 }
             }
         }
-        catalog.dependency_order(None)?;
-        catalog.validate_retired()?;
-        Ok(catalog)
+        // Find every node participating in a cycle without hiding independent missing dependencies.
+        for id in catalog.entries.keys() {
+            let mut pending = catalog.entries[id].depends_on.clone();
+            let mut seen = BTreeSet::new();
+            while let Some(next) = pending.pop() {
+                if &next == id {
+                    report.error("dependencies", id, "", "", "dependency cycle");
+                    break;
+                }
+                if seen.insert(next.clone()) {
+                    if let Some(entry) = catalog.entries.get(&next) {
+                        pending.extend(entry.depends_on.iter().cloned());
+                    }
+                }
+            }
+        }
+        catalog.validate_retired(&mut report)?;
+        catalog.check_work_state(&mut report);
+        catalog.load_tracker(&mut report);
+        report.sort();
+        Ok((catalog, report))
     }
 
     pub fn entry(&self, id: &str) -> Result<&Entry> {
@@ -143,7 +322,7 @@ impl Catalog {
             .ok_or_else(|| format!("unknown entry: {id}").into())
     }
 
-    fn validate_retired(&self) -> Result<()> {
+    fn validate_retired(&self, report: &mut ValidationReport) -> Result<()> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Retirement {
@@ -154,20 +333,40 @@ impl Catalog {
         if !path.exists() {
             return Ok(());
         }
-        let value: serde_yaml::Value = serde_yaml::from_str(&fs::read_to_string(path)?)?;
-        let retired: BTreeMap<String, Retirement> = serde_yaml::from_value(value)?;
-        for (id, record) in retired {
+        let retired = (|| -> Result<BTreeMap<String, serde_yaml::Value>> {
+            let value: serde_yaml::Value = serde_yaml::from_str(&fs::read_to_string(&path)?)?;
+            Ok(serde_yaml::from_value(value)?)
+        })();
+        let retired = match retired {
+            Ok(retired) => retired,
+            Err(error) => {
+                report.error("retired", "", "", "retired-ids.json", &error.to_string());
+                return Ok(());
+            }
+        };
+        for (id, value) in retired {
+            let record: Retirement = match serde_yaml::from_value(value) {
+                Ok(record) => record,
+                Err(error) => {
+                    report.error("retired", &id, "", "retired-ids.json", &error.to_string());
+                    continue;
+                }
+            };
             if !schema::valid_id(&id) || record.reason.trim().is_empty() {
-                return fail(format!("invalid retirement record: {id}"));
+                report.error("retired", &id, "", "", "invalid retirement record");
             }
             if self.entries.contains_key(&id) {
-                return fail(format!("retired ID cannot be reused: {id}"));
+                report.error("retired", &id, "", "", "retired ID cannot be reused");
             }
             for replacement in record.replaced_by {
                 if !self.entries.contains_key(&replacement) {
-                    return fail(format!(
-                        "{id}: unresolved retired-ID replacement {replacement}"
-                    ));
+                    report.error(
+                        "retired",
+                        &id,
+                        "",
+                        &replacement,
+                        "unresolved retired-ID replacement",
+                    );
                 }
             }
         }
@@ -177,61 +376,11 @@ impl Catalog {
     /// Check referenced source/test files, including unqualified test file paths.
     /// `path#Suite.method` checks the file, not language declarations or test coverage.
     pub fn validate_paths(&self, repo: Option<&Path>) -> Result<()> {
-        let repo = repo
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| self.directory.join(&self.config.repo_root))
-            .canonicalize()?;
-        let mut checked = BTreeSet::new();
-        for entry in self.entries.values() {
-            for (platform, evidence) in &entry.platforms {
-                for reference in evidence
-                    .source
-                    .iter()
-                    .chain(evidence.tests.iter().filter(|s| is_test_path(s)))
-                {
-                    if !checked.insert((platform, reference)) {
-                        continue;
-                    }
-                    let relative = reference
-                        .split_once('#')
-                        .map(|(p, _)| p)
-                        .unwrap_or(reference);
-                    let relative = if let Some(prefix) = self.config.path_prefixes.get(platform) {
-                        relative.strip_prefix(prefix).ok_or_else(|| {
-                            format!(
-                                "{}: {platform} path must start with {prefix}: {reference}",
-                                entry.id
-                            )
-                        })?
-                    } else {
-                        relative
-                    };
-                    if !safe_relative(relative, false) {
-                        return fail(format!(
-                            "{}: unsafe {platform} evidence path: {reference}",
-                            entry.id
-                        ));
-                    }
-                    let root = repo
-                        .join(&self.config.platforms[platform])
-                        .canonicalize()
-                        .map_err(|e| format!("{platform} root: {e}"))?;
-                    if !root.starts_with(&repo) {
-                        return fail(format!("{platform} root escapes repo: {}", root.display()));
-                    }
-                    let target = root.join(relative).canonicalize().map_err(|e| {
-                        format!("{}: missing {platform} evidence {reference}: {e}", entry.id)
-                    })?;
-                    if !target.starts_with(&root) || !target.is_file() {
-                        return fail(format!(
-                            "{}: evidence is not a file within {platform} root: {reference}",
-                            entry.id
-                        ));
-                    }
-                }
-            }
-        }
-        Ok(())
+        self.validate_evidence(&RootOptions {
+            repo: repo.map(Path::to_path_buf),
+            ..RootOptions::default()
+        })
+        .into_result()
     }
 
     pub(crate) fn gap_key<'a>(&'a self, entry: &'a Entry) -> (Impact, u16, usize, &'a str) {
@@ -302,6 +451,90 @@ impl Catalog {
     /// Missing/partial work in dependency order, ranked by impact among ready items.
     /// An area filter includes unfinished prerequisites from other areas.
     pub fn next(&self, platform: &str, area: Option<&str>, limit: usize) -> Result<Vec<&Entry>> {
+        self.next_with(platform, area, limit, false)
+    }
+
+    /// Details of an entry that are missing, partial or unrecorded on a platform.
+    pub fn open_details<'a>(&self, entry: &'a Entry, platform: &str) -> Vec<&'a Detail> {
+        entry
+            .details
+            .iter()
+            .filter(|d| d.platforms.get(platform).is_none_or(|p| p.status.is_gap()))
+            .collect()
+    }
+
+    /// Like `next`; with `details`, implemented entries with open details are also selected.
+    pub fn next_with(
+        &self,
+        platform: &str,
+        area: Option<&str>,
+        limit: usize,
+        details: bool,
+    ) -> Result<Vec<&Entry>> {
+        self.next_filtered(platform, area, limit, details, false)
+    }
+
+    /// Open blockers (by key) on a record.
+    pub fn open_blockers<'a>(&self, record: &'a Platform) -> Vec<&'a str> {
+        record
+            .blocked_by
+            .iter()
+            .filter(|k| self.config.blockers.get(*k).is_none_or(|b| b.blocks()))
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// Unfinished entries on a platform that are blocked, with the open blocker keys that
+    /// hold them back, directly or through an unfinished dependency.
+    pub fn blocked_entries(&self, platform: &str) -> BTreeMap<String, BTreeSet<String>> {
+        fn visit(
+            catalog: &Catalog,
+            platform: &str,
+            id: &str,
+            memo: &mut BTreeMap<String, BTreeSet<String>>,
+            stack: &mut BTreeSet<String>,
+        ) -> BTreeSet<String> {
+            if let Some(known) = memo.get(id) {
+                return known.clone();
+            }
+            let Some(entry) = catalog.entries.get(id) else {
+                return BTreeSet::new();
+            };
+            let Some(record) = entry.platforms.get(platform) else {
+                return BTreeSet::new();
+            };
+            if !record.status.is_gap() || !stack.insert(id.to_owned()) {
+                return BTreeSet::new();
+            }
+            let mut keys: BTreeSet<String> = catalog
+                .open_blockers(record)
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            for dependency in &entry.depends_on {
+                keys.extend(visit(catalog, platform, dependency, memo, stack));
+            }
+            stack.remove(id);
+            memo.insert(id.to_owned(), keys.clone());
+            keys
+        }
+        let mut memo = BTreeMap::new();
+        for id in self.entries.keys() {
+            visit(self, platform, id, &mut memo, &mut BTreeSet::new());
+        }
+        memo.retain(|_, keys| !keys.is_empty());
+        memo
+    }
+
+    /// Like `next_with`; blocked work is skipped unless `include_blocked`.
+    pub fn next_filtered(
+        &self,
+        platform: &str,
+        area: Option<&str>,
+        limit: usize,
+        details: bool,
+        include_blocked: bool,
+    ) -> Result<Vec<&Entry>> {
         if !self.config.platforms.contains_key(platform) {
             return fail(format!("unknown platform: {platform}"));
         }
@@ -314,7 +547,12 @@ impl Catalog {
             .values()
             .filter(|e| {
                 area.is_none_or(|a| self.areas[&e.id] == a)
-                    && e.platforms.get(platform).is_some_and(|p| p.status.is_gap())
+                    && e.platforms.get(platform).is_some_and(|p| {
+                        p.status.is_gap()
+                            || (details
+                                && p.status == Status::Implemented
+                                && !self.open_details(e, platform).is_empty())
+                    })
             })
             .map(|e| e.id.clone())
             .collect();
@@ -329,7 +567,25 @@ impl Catalog {
                 return fail(format!("{id}: no status for dependency on {platform}"));
             }
         }
-        selected.retain(|id| self.entries[id].platforms[platform].status.is_gap());
+        let blocked = if include_blocked {
+            BTreeMap::new()
+        } else {
+            self.blocked_entries(platform)
+        };
+        selected.retain(|id| {
+            let entry = &self.entries[id];
+            let status = entry.platforms[platform].status;
+            !blocked.contains_key(id)
+                && (status.is_gap()
+                    || (details
+                        && status == Status::Implemented
+                        && self.open_details(entry, platform).iter().any(|d| {
+                            include_blocked
+                                || d.platforms
+                                    .get(platform)
+                                    .is_none_or(|p| self.open_blockers(p).is_empty())
+                        })))
+        });
         Ok(self
             .dependency_order(Some(&selected))?
             .into_iter()
@@ -339,6 +595,11 @@ impl Catalog {
     }
 
     pub fn brief(&self, id: &str) -> Result<String> {
+        self.brief_with(id, false)
+    }
+
+    /// An implementation brief; with `details`, every detail item with its numbers and status.
+    pub fn brief_with(&self, id: &str, details: bool) -> Result<String> {
         let entry = self.entry(id)?;
         let mut lines = vec![
             format!("# {} — `{}`", entry.title, entry.id),
@@ -413,9 +674,30 @@ impl Catalog {
                 .platforms
                 .iter()
                 .map(|(p, e)| {
+                    let blockers: String = e
+                        .blocked_by
+                        .iter()
+                        .map(|k| match self.config.blockers.get(k) {
+                            Some(b) => format!(
+                                "Blocked by {k}: {}{} [{}]. ",
+                                b.title,
+                                b.link
+                                    .as_ref()
+                                    .map(|l| format!(" ({l})"))
+                                    .unwrap_or_default(),
+                                match b.status {
+                                    BlockerStatus::Open => "open",
+                                    BlockerStatus::Decided => "decided",
+                                    BlockerStatus::Resolved => "resolved",
+                                }
+                            ),
+                            None => format!("Blocked by {k}. "),
+                        })
+                        .collect();
                     format!(
-                        "{p}: {}. {} {}",
+                        "{p}: {}; {}. {blockers}{} {}",
                         e.status.as_str(),
+                        verification_line(e),
                         e.gap.as_deref().unwrap_or(""),
                         e.notes.as_deref().unwrap_or("")
                     )
@@ -442,8 +724,159 @@ impl Catalog {
         );
         section(&mut lines, "Design", &entry.design);
         section(&mut lines, "Notes", &entry.notes);
+        if details {
+            lines.extend([String::new(), "## Details".into()]);
+            if entry.details.is_empty() {
+                lines.push("None recorded.".into());
+            }
+            for detail in &entry.details {
+                lines.push(format!(
+                    "- `{}#{}` ({}): {}",
+                    entry.id,
+                    detail.id,
+                    detail.kind.as_str(),
+                    detail.spec.text
+                ));
+                let numbers = detail.spec.numbers();
+                if !numbers.is_empty() {
+                    lines.push(format!("  - Spec: {numbers}"));
+                }
+                if !detail.baseline.is_empty() {
+                    lines.push(format!(
+                        "  - Baseline ({}): {}",
+                        self.config.report.baseline,
+                        detail.baseline.join(", ")
+                    ));
+                }
+                if detail.platforms.is_empty() {
+                    lines.push("  - Status: none recorded".into());
+                }
+                for (platform, record) in &detail.platforms {
+                    lines.push(format!(
+                        "  - {platform}: {}; {}{}",
+                        record.status.as_str(),
+                        verification_line(record),
+                        record
+                            .gap
+                            .as_ref()
+                            .map(|g| format!(". Gap: {g}"))
+                            .unwrap_or_default()
+                    ));
+                    for reference in record.source.iter().chain(&record.tests) {
+                        lines.push(format!("    - {reference}"));
+                    }
+                }
+            }
+        }
         Ok(lines.join("\n") + "\n")
     }
+}
+
+/// One-line verification summary for briefs.
+pub(crate) fn verification_line(record: &Platform) -> String {
+    match (&record.verification, record.unverified_reason()) {
+        (Some(v), None) => format!(
+            "verified by {} on {}{}",
+            v.by,
+            v.at,
+            v.commit
+                .as_ref()
+                .map(|c| format!(" at {c}"))
+                .unwrap_or_default()
+        ),
+        (_, Some(reason)) => format!("unverified ({reason})"),
+        (None, None) => "unverified".into(),
+    }
+}
+
+/// Inheriting platforms ordered so parents resolve before children; cycles are skipped.
+fn inheritance_order(config: &Config) -> Vec<(String, String)> {
+    let mut pending: Vec<(String, String)> = config
+        .platforms
+        .iter()
+        .filter_map(|(name, p)| p.inherits().map(|parent| (name.clone(), parent.to_owned())))
+        .filter(|(_, parent)| config.platforms.contains_key(parent))
+        .collect();
+    let mut order = Vec::new();
+    while !pending.is_empty() {
+        let before = pending.len();
+        let children: BTreeSet<String> = pending.iter().map(|(c, _)| c.clone()).collect();
+        pending.retain(|(child, parent)| {
+            if children.contains(parent) {
+                return true; // the parent still needs resolving
+            }
+            order.push((child.clone(), parent.clone()));
+            false
+        });
+        if pending.len() == before {
+            break; // cycle; reported by configuration validation
+        }
+    }
+    order
+}
+
+/// Fill inherited platform records in a raw entry. A missing child record is copied whole
+/// from its parent; a present one is merged over the parent's (child keys win, and a key
+/// set to `null` removes the parent's value).
+/// Returns the whole copies as (detail index, platform).
+fn inherit(
+    entry: &mut serde_json::Value,
+    order: &[(String, String)],
+) -> Vec<(Option<usize>, String)> {
+    fn apply(
+        platforms: Option<&mut serde_json::Value>,
+        order: &[(String, String)],
+        copied: &mut Vec<String>,
+    ) {
+        let Some(map) = platforms.and_then(serde_json::Value::as_object_mut) else {
+            return;
+        };
+        for (child, parent) in order {
+            let Some(base) = map
+                .get(parent)
+                .and_then(serde_json::Value::as_object)
+                .cloned()
+            else {
+                continue;
+            };
+            if !map.contains_key(child) {
+                map.insert(child.clone(), serde_json::Value::Object(base));
+                copied.push(child.clone());
+            } else if let Some(own) = map
+                .get_mut(child)
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                // A different status makes the parent's verification and gap irrelevant.
+                let own_status = own.get("status").cloned();
+                let differs = own_status.is_some() && own_status.as_ref() != base.get("status");
+                for (key, value) in base {
+                    if differs && matches!(key.as_str(), "verification" | "gap" | "blocked_by") {
+                        continue;
+                    }
+                    own.entry(key).or_insert(value);
+                }
+                // An explicit null unsets a parent key.
+                own.retain(|_, value| !value.is_null());
+            }
+        }
+    }
+    let mut out = Vec::new();
+    if order.is_empty() {
+        return out;
+    }
+    let mut copied = Vec::new();
+    apply(entry.get_mut("platforms"), order, &mut copied);
+    out.extend(copied.drain(..).map(|p| (None, p)));
+    if let Some(details) = entry
+        .get_mut("details")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for (index, detail) in details.iter_mut().enumerate() {
+            apply(detail.get_mut("platforms"), order, &mut copied);
+            out.extend(copied.drain(..).map(|p| (Some(index), p)));
+        }
+    }
+    out
 }
 
 fn safe_relative(path: &str, allow_dot: bool) -> bool {
@@ -461,5 +894,8 @@ fn safe_area(area: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 fn is_test_path(reference: &str) -> bool {
-    reference.contains(['/', '\\', '#']) || Path::new(reference).extension().is_some()
+    reference.contains(['/', '\\', '#'])
+        || Path::new(evidence::split_anchor(reference).0)
+            .extension()
+            .is_some()
 }

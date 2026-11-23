@@ -1,8 +1,9 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use concordance::{
     ui::{Tokens, UiCatalog},
-    Catalog, Language, Result,
+    Catalog, Language, Result, RootOptions, Suite, TrackFormat,
 };
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -20,16 +21,53 @@ enum Command {
     /// Validate schema, IDs, dependency DAG, retirement records and evidence files.
     Validate {
         dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
         #[arg(long)]
         repo: Option<PathBuf>,
+        /// Fail on warnings (resolved blockers, implemented records with open work).
+        #[arg(long)]
+        strict: bool,
     },
     /// Generate the configured baseline-to-target parity report.
     Report {
         dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
         #[arg(long)]
         out: Option<PathBuf>,
         #[arg(long)]
         check: bool,
+    },
+    /// Releases, open bugs and requests, unverified fixes, gaps and shared features
+    /// (tracker/releases.yaml and tracker/issues.yaml beside catalog.toml; see docs/tracker.md).
+    Track {
+        dir: PathBuf,
+        /// Default: DIR/tracker.md (DIR/tracker.json with --format json).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Compare with the existing file and fail when it differs; never writes.
+        #[arg(long)]
+        check: bool,
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: TrackFormatArg,
+        /// YYYY-MM-DD; marks overdue releases and lists upcoming windows.
+        #[arg(long)]
+        today: Option<String>,
+    },
+    /// Join several app catalogs (suite.toml) into one view of releases, beats and shared features.
+    Suite {
+        suite: PathBuf,
+        /// Default: suite.md (suite.json with --format json) beside the suite file.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        check: bool,
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: TrackFormatArg,
+        /// YYYY-MM-DD; hides beats before this date.
+        #[arg(long)]
+        today: Option<String>,
     },
     /// Generate design tokens (swift, kotlin or css), preserving every existing file.
     Tokens {
@@ -51,6 +89,10 @@ enum Command {
         captures: Option<PathBuf>,
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Print per-area and per-screen capture coverage (Markdown) instead of the plan,
+        /// without writing stubs. --platform may list several platforms, comma-separated.
+        #[arg(long)]
+        coverage: bool,
     },
     /// Compare native captures and write an HTML report; similarity never gates parity.
     Compare {
@@ -66,15 +108,196 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Fold reviewer notes (review.json from compare) into proposed verification records.
+    /// Writes a patch for a person to apply; never edits the catalog.
+    Verify {
+        dir: PathBuf,
+        #[arg(long)]
+        review: PathBuf,
+        /// Capture directory used to refuse skipped or missing captures (default DIR/captures).
+        #[arg(long)]
+        captures: Option<PathBuf>,
+        /// Patch output path (default: stdout).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Set or clear a platform record's status and bookkeeping in place (never verification).
+    Set {
+        dir: PathBuf,
+        /// `entry.id`, `entry.id#detail` or `entry.id/detail`.
+        target: String,
+        #[arg(long)]
+        platform: String,
+        #[arg(long, value_enum)]
+        status: Option<StatusArg>,
+        #[arg(long, alias = "by")]
+        implemented_by: Option<String>,
+        #[arg(long)]
+        gap: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        /// Comma-separated blocker keys.
+        #[arg(long, value_delimiter = ',')]
+        blocked_by: Option<Vec<String>>,
+        /// Field to remove: gap, notes, implemented_by, blocked_by, verification, source, tests.
+        #[arg(long)]
+        clear: Vec<String>,
+        /// Record an intended difference from the baseline; a stale record returns to its
+        /// previous status.
+        #[arg(long)]
+        intended: Option<String>,
+        /// Task directory from `sync --tasks-dir`; closing a stale record appends a note there.
+        #[arg(long)]
+        tasks_dir: Option<PathBuf>,
+        /// Commit that closed a stale record (default: HEAD of the platform root).
+        #[arg(long)]
+        closing_commit: Option<String>,
+        /// Mark the record stale against the current baseline pin (triage of a review task).
+        #[arg(long)]
+        stale: bool,
+        /// Record that the record needs no change at the current baseline pin.
+        #[arg(long)]
+        reviewed_unchanged: bool,
+        /// Set a field to null on an inheriting platform, unsetting the parent's value.
+        #[arg(long)]
+        unset: Vec<String>,
+        /// Allow rewriting a file whose layout is not canonical (comments are lost).
+        #[arg(long)]
+        allow_reformat: bool,
+    },
+    /// Anchor helpers.
+    Anchors {
+        #[command(subcommand)]
+        action: AnchorsAction,
+    },
+    /// Re-locate line and symbol anchors from the baseline pin to a new commit.
+    RebaseAnchors {
+        dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
+        #[arg(long)]
+        to: String,
+        /// Starting commit (default: the platform's baseline pin).
+        #[arg(long)]
+        from: Option<String>,
+        /// Platform (default: the report baseline).
+        #[arg(long)]
+        platform: Option<String>,
+        /// Rewrite moved references in the area files.
+        #[arg(long)]
+        write: bool,
+        #[arg(long)]
+        allow_reformat: bool,
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: DriftFormat,
+    },
+    /// CI gate: user-visible changes need a covering catalog change. Exit 0 pass, 1 fail, 2 error.
+    Gate {
+        dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
+        #[arg(long)]
+        platform: String,
+        #[arg(long, requires = "head", conflicts_with = "patch")]
+        base: Option<String>,
+        #[arg(long, requires = "base")]
+        head: Option<String>,
+        /// A unified diff (for example from an integration script) instead of a range.
+        #[arg(long)]
+        patch: Option<PathBuf>,
+        /// Commit message for --patch, searched for a `Catalog: none — <reason>` trailer.
+        #[arg(long, requires = "patch")]
+        message_file: Option<PathBuf>,
+        /// Repository checkout containing the platform root.
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Also write the Markdown summary here (for example $GITHUB_STEP_SUMMARY).
+        #[arg(long)]
+        summary: Option<PathBuf>,
+    },
+    /// Mark target records stale where the source baseline changed; tasks, issues, new pin.
+    Sync {
+        dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
+        #[arg(long)]
+        platform_from: String,
+        #[arg(long)]
+        platform_to: String,
+        #[arg(long, default_value = "HEAD")]
+        to: String,
+        #[arg(long)]
+        tasks_dir: Option<PathBuf>,
+        /// Capture directory whose files are listed in tasks.
+        #[arg(long)]
+        captures: Option<PathBuf>,
+        /// Open or update issues: only `gh` is supported.
+        #[arg(long)]
+        issues: Option<String>,
+        #[arg(long, default_value = "parity")]
+        label: String,
+        /// Write records, tasks, issues and the new pin (default: dry run).
+        #[arg(long)]
+        apply: bool,
+        /// What file-level (coarse) hits do: queue a review task (default) or mark stale.
+        #[arg(long, value_enum, default_value = "review")]
+        coarse_as: CoarseAs,
+    },
+    /// Every platform ships the `[version] source` version. Exit 0 pass, 1 mismatch, 2 error.
+    VersionCheck {
+        dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
+        #[arg(long)]
+        platform: Option<String>,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+    },
+    /// Release check: stale records older than their limit fail. Exit 0 pass, 1 fail, 2 error.
+    GateRelease {
+        dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
+        /// Skip the version check that runs when catalog.toml has a [version] section.
+        #[arg(long)]
+        skip_version: bool,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long)]
+        platform: String,
+        #[arg(long)]
+        max_age_days: u32,
+        /// Per detail kind, KIND=DAYS (repeatable), for example copy=0.
+        #[arg(long = "max-age-days-for", value_parser = parse_kind_limit)]
+        max_age_days_for: Vec<(concordance::DetailKind, u32)>,
+        /// Date to measure age from (default: today, UTC).
+        #[arg(long)]
+        today: Option<String>,
+    },
+    /// String resources from an Apple string catalog.
+    Strings {
+        #[command(subcommand)]
+        action: StringsAction,
+    },
+    /// Edit reviewer notes (review.json) without the browser.
+    Review {
+        #[command(subcommand)]
+        action: ReviewAction,
+    },
     /// Generate parity.md with a fresh screen summary for every platform.
     UiReport {
         dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
         #[arg(long)]
         captures: Option<PathBuf>,
         #[arg(long)]
         baseline: Option<String>,
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Reviewer notes from compare; appends the capture tooling-debt list.
+        #[arg(long)]
+        review: Option<PathBuf>,
         /// Check report freshness without writing (same semantics as report --check).
         #[arg(long)]
         check: bool,
@@ -82,19 +305,46 @@ enum Command {
     /// Print an entry or a native implementation brief.
     Entry {
         dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
         id: String,
         #[arg(long, value_enum, default_value = "json")]
         format: Format,
+        /// Include detail items (numbers, baseline evidence, per-platform status) in briefs.
+        #[arg(long)]
+        details: bool,
     },
     /// Pull missing/partial work, prerequisites first, then highest impact.
     Next {
         dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
         #[arg(long)]
         platform: String,
         #[arg(long)]
         area: Option<String>,
         #[arg(long, default_value_t = 10)]
         limit: usize,
+        /// Also select implemented entries with open details and print one row per open detail.
+        #[arg(long)]
+        details: bool,
+        /// Include work held back by open blockers (marked in the title column).
+        #[arg(long)]
+        include_blocked: bool,
+    },
+    /// List entries with changed baseline evidence and uncatalogued source changes.
+    Drift {
+        dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
+        #[arg(long)]
+        platform: Option<String>,
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long, default_value = "HEAD")]
+        to: String,
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: DriftFormat,
     },
     /// Generate native accessibility-identifier constants.
     Ids {
@@ -114,6 +364,197 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+}
+#[derive(Subcommand)]
+enum AnchorsAction {
+    /// Propose `#Symbol` anchors for an entry's file-level evidence.
+    Suggest {
+        dir: PathBuf,
+        id: String,
+        #[command(flatten)]
+        roots: Roots,
+        #[arg(long)]
+        platform: Option<String>,
+    },
+}
+#[derive(Subcommand)]
+enum StringsAction {
+    /// Write Android `strings_<app>_shared.xml` files for keys used by copy details.
+    Export {
+        dir: PathBuf,
+        /// The `.xcstrings` file.
+        #[arg(long)]
+        from: PathBuf,
+        /// Export keys referenced by copy details (`copy.key`); required.
+        #[arg(long)]
+        keys_from_catalog: bool,
+        /// Also look up copy details without a key by their text (English-text keys).
+        #[arg(long)]
+        match_text: bool,
+        #[arg(long, default_value = "android")]
+        platform: String,
+        /// App name used in file and resource names (default: the catalog directory name).
+        #[arg(long)]
+        app: Option<String>,
+        /// Android `res` directory.
+        #[arg(long)]
+        out: PathBuf,
+        /// Fail if the files on disk differ, without writing.
+        #[arg(long)]
+        check: bool,
+    },
+}
+fn parse_kind_limit(value: &str) -> std::result::Result<(concordance::DetailKind, u32), String> {
+    let (kind, days) = value.split_once('=').ok_or("expected KIND=DAYS")?;
+    let kind: concordance::DetailKind =
+        serde_json::from_value(serde_json::Value::String(kind.into()))
+            .map_err(|_| format!("unknown detail kind {kind}"))?;
+    Ok((kind, days.parse().map_err(|_| "DAYS must be a number")?))
+}
+#[derive(Subcommand)]
+enum ReviewAction {
+    /// Set a pair's verdict and note in <dir>/review.json (the compare --out directory).
+    Set {
+        dir: PathBuf,
+        /// Pair key, `screen.state`.
+        key: String,
+        #[arg(long, value_enum)]
+        verdict: VerdictArg,
+        #[arg(long)]
+        note: Option<String>,
+        /// Category of an accepted platform difference (see [ui] platform_categories).
+        #[arg(long)]
+        category: Option<String>,
+        #[arg(long)]
+        reviewer: Option<String>,
+        /// Review date, YYYY-MM-DD.
+        #[arg(long)]
+        at: Option<String>,
+        #[arg(long)]
+        commit: Option<String>,
+        #[arg(long)]
+        baseline_commit: Option<String>,
+    },
+}
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CoarseAs {
+    Stale,
+    Review,
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum StatusArg {
+    Implemented,
+    Partial,
+    Missing,
+    NotApplicable,
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum VerdictArg {
+    Unreviewed,
+    Same,
+    Differs,
+    /// A capture-tooling difference; needs --note.
+    Fixture,
+    /// An accepted platform difference; needs --category and --note.
+    Platform,
+}
+#[derive(clap::Args)]
+struct Roots {
+    /// Evidence checkout root, PLATFORM=PATH; repeat for multiple platforms.
+    #[arg(long = "root", value_parser = parse_root)]
+    roots: Vec<(String, PathBuf)>,
+    /// Fail when a declared external checkout has not been supplied.
+    #[arg(long)]
+    require_roots: bool,
+}
+fn parse_root(value: &str) -> std::result::Result<(String, PathBuf), String> {
+    match value.split_once('=') {
+        Some((platform, path)) if !platform.is_empty() && !path.is_empty() => {
+            Ok((platform.into(), path.into()))
+        }
+        _ => Err("expected PLATFORM=PATH".into()),
+    }
+}
+impl Roots {
+    fn options(self, catalog: &Catalog) -> Result<RootOptions> {
+        let options = RootOptions {
+            repo: None,
+            roots: self.roots.into_iter().collect::<BTreeMap<_, _>>(),
+            require_roots: self.require_roots,
+        }
+        .with_env(catalog);
+        for platform in options.roots.keys() {
+            if !catalog.config.platforms.contains_key(platform) {
+                return Err(format!("unknown platform: {platform}").into());
+            }
+        }
+        if options.require_roots {
+            for platform in catalog.config.external_roots.keys() {
+                if !options.roots.contains_key(platform) {
+                    return Err(format!(
+                        "{platform}: root not supplied; use --root {platform}=<path>"
+                    )
+                    .into());
+                }
+            }
+        }
+        Ok(options)
+    }
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum DriftFormat {
+    Markdown,
+    Json,
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum TrackFormatArg {
+    Markdown,
+    Json,
+}
+impl TrackFormatArg {
+    fn format(self) -> TrackFormat {
+        match self {
+            Self::Markdown => TrackFormat::Markdown,
+            Self::Json => TrackFormat::Json,
+        }
+    }
+    /// The `--format` argument to repeat in a regenerate hint.
+    fn flag(self) -> &'static str {
+        match self {
+            Self::Markdown => "",
+            Self::Json => " --format json",
+        }
+    }
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Markdown => "md",
+            Self::Json => "json",
+        }
+    }
+}
+/// Write generated output, or with `check` compare it exactly and fail when stale.
+/// `regenerate` is the runnable command that rewrites `out`.
+fn write_or_check(
+    out: &std::path::Path,
+    content: &str,
+    check: bool,
+    command: &str,
+    regenerate: &str,
+) -> Result<()> {
+    if check {
+        if fs::read_to_string(out).ok().as_deref() != Some(content) {
+            return Err(format!(
+                "stale {command} output: {}; regenerate with: {regenerate}",
+                out.display()
+            )
+            .into());
+        }
+        println!("Current: {}", out.display());
+    } else {
+        fs::write(out, content)?;
+        println!("Wrote {}", out.display());
+    }
+    Ok(())
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum Format {
@@ -142,22 +583,78 @@ impl From<Native> for Language {
 }
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Validate { dir, repo } => {
-            let catalog = Catalog::load(&dir)?;
-            if dir.join("tokens.yaml").exists() || dir.join("screens").exists() {
-                UiCatalog::load(&dir)?;
+        Command::Validate {
+            dir,
+            repo,
+            roots,
+            strict,
+        } => {
+            let (catalog, mut report) = Catalog::load_collect(&dir)?;
+            // Validation accumulates missing roots per reference, rather than failing in option parsing.
+            let options = RootOptions {
+                repo,
+                roots: roots.roots.into_iter().collect(),
+                require_roots: roots.require_roots,
             }
-            catalog.validate_paths(repo.as_deref())?;
+            .with_env(&catalog);
+            let evidence = catalog.validate_evidence(&options);
+            report.errors.extend(evidence.errors);
+            report.unchecked.extend(evidence.unchecked);
+            if dir.join("tokens.yaml").exists() || dir.join("screens").exists() {
+                match UiCatalog::load(&dir) {
+                    Ok(ui) => {
+                        report.errors.extend(ui.verification_issues());
+                        report.warnings.extend(ui.motion_token_warnings());
+                    }
+                    Err(error) => report.errors.push(concordance::Issue {
+                        group: "ui".into(),
+                        entry: String::new(),
+                        platform: String::new(),
+                        reference: String::new(),
+                        message: error.to_string(),
+                    }),
+                }
+            }
+            report.sort();
+            if strict {
+                report = report.strict();
+            }
+            let failed = !report.errors.is_empty();
+            if failed {
+                return Err(Box::new(report));
+            }
+            println!("{report}");
             println!(
                 "Valid: {} entries in {} areas.",
                 catalog.entries.len(),
                 catalog.area_files.len()
             );
         }
-        Command::Report { dir, out, check } => {
+        Command::Drift {
+            dir,
+            roots,
+            platform,
+            since,
+            to,
+            format,
+        } => {
+            let catalog = Catalog::load(&dir)?;
+            let options = roots.options(&catalog)?;
+            let drift = catalog.drift(&options, platform.as_deref(), since.as_deref(), &to)?;
+            match format {
+                DriftFormat::Markdown => print!("{}", drift.markdown()),
+                DriftFormat::Json => println!("{}", serde_json::to_string_pretty(&drift)?),
+            }
+        }
+        Command::Report {
+            dir,
+            out,
+            check,
+            roots,
+        } => {
             let catalog = Catalog::load(&dir)?;
             let out = out.unwrap_or_else(|| dir.join("parity.md"));
-            let report = catalog.report()?;
+            let report = catalog.report_with_roots_at(&roots.options(&catalog)?, Some(&out))?;
             if check {
                 if fs::read_to_string(&out).ok().as_deref() != Some(&report) {
                     return Err(format!(
@@ -172,6 +669,54 @@ fn run(cli: Cli) -> Result<()> {
                 fs::write(&out, report)?;
                 println!("Wrote {}", out.display());
             }
+        }
+        Command::Track {
+            dir,
+            out,
+            check,
+            format,
+            today,
+        } => {
+            let catalog = Catalog::load(&dir)?;
+            let content = catalog.track(today.as_deref())?.render(format.format())?;
+            let out = out.unwrap_or_else(|| dir.join(format!("tracker.{}", format.extension())));
+            let regenerate = format!(
+                "concordance track {}{}{} --out {}",
+                shell_word(&dir.display().to_string()),
+                format.flag(),
+                today
+                    .as_deref()
+                    .map(|t| format!(" --today {}", shell_word(t)))
+                    .unwrap_or_default(),
+                shell_word(&out.display().to_string())
+            );
+            write_or_check(&out, &content, check, "track", &regenerate)?;
+        }
+        Command::Suite {
+            suite,
+            out,
+            check,
+            format,
+            today,
+        } => {
+            let loaded = Suite::load(&suite)?;
+            let content = loaded.view(today.as_deref())?.render(format.format())?;
+            let out = out.unwrap_or_else(|| {
+                loaded
+                    .directory
+                    .join(format!("suite.{}", format.extension()))
+            });
+            let regenerate = format!(
+                "concordance suite {}{}{} --out {}",
+                shell_word(&suite.display().to_string()),
+                format.flag(),
+                today
+                    .as_deref()
+                    .map(|t| format!(" --today {}", shell_word(t)))
+                    .unwrap_or_default(),
+                shell_word(&out.display().to_string())
+            );
+            write_or_check(&out, &content, check, "suite", &regenerate)?;
         }
         Command::Tokens { dir, platform, out } => {
             Catalog::load(&dir)?;
@@ -189,8 +734,15 @@ fn run(cli: Cli) -> Result<()> {
             language,
             captures,
             out,
+            coverage,
         } => {
             let ui = UiCatalog::load(&dir)?;
+            if coverage {
+                let captures = captures.unwrap_or_else(|| dir.join("captures"));
+                let platforms: Vec<&str> = platform.split(',').map(str::trim).collect();
+                print!("{}", ui.coverage(&captures, &platforms)?.markdown(&ui));
+                return Ok(());
+            }
             let language = match language {
                 Some(language) => language,
                 None => match platform.as_str() {
@@ -230,6 +782,9 @@ fn run(cli: Cli) -> Result<()> {
                 .as_deref()
                 .unwrap_or(&ui.catalog.config.report.target);
             let comparison = ui.compare(&captures, baseline, target, Some(&out))?;
+            if let Some(warning) = &comparison.fixture_warning {
+                eprintln!("WARNING: {warning}");
+            }
             print!("{}", comparison.summary());
             println!("Report: {}", out.join("index.html").display());
             if check && comparison.failed() {
@@ -238,20 +793,458 @@ fn run(cli: Cli) -> Result<()> {
                 );
             }
         }
+        Command::Anchors {
+            action:
+                AnchorsAction::Suggest {
+                    dir,
+                    id,
+                    roots,
+                    platform,
+                },
+        } => {
+            let catalog = Catalog::load(&dir)?;
+            let options = roots.options(&catalog)?;
+            let suggestions = catalog.suggest_anchors(&options, &id, platform.as_deref())?;
+            println!("## Anchor suggestions for `{id}`\n");
+            if suggestions.is_empty() {
+                println!(
+                    "No file-level evidence to anchor (or the platform roots were not supplied)."
+                );
+            }
+            for s in suggestions {
+                match &s.suggestion {
+                    Some(anchor) => println!(
+                        "- {} `{}` → `{anchor}` ({})",
+                        s.platform,
+                        s.reference,
+                        s.evidence.join(", ")
+                    ),
+                    None => println!(
+                        "- {} `{}`: {}",
+                        s.platform,
+                        s.reference,
+                        s.evidence.join(", ")
+                    ),
+                }
+            }
+        }
+        Command::Gate {
+            dir,
+            roots,
+            platform,
+            base,
+            head,
+            patch,
+            message_file,
+            repo,
+            summary,
+        } => {
+            let outcome = (|| -> Result<concordance::GateReport> {
+                let catalog = Catalog::load(&dir)?;
+                let mut options = roots.options(&catalog)?;
+                options.repo = repo;
+                let input = match (base, head, patch) {
+                    (Some(base), Some(head), None) => concordance::GateInput::Range { base, head },
+                    (None, None, Some(patch)) => concordance::GateInput::Patch {
+                        patch: fs::read_to_string(patch)?,
+                        message: match message_file {
+                            Some(path) => fs::read_to_string(path)?,
+                            None => String::new(),
+                        },
+                    },
+                    _ => return Err("pass --base and --head, or --patch".into()),
+                };
+                catalog.gate_input(&options, &platform, &input)
+            })();
+            match outcome {
+                Ok(report) => {
+                    let markdown = report.markdown();
+                    print!("{markdown}");
+                    if let Some(path) = summary {
+                        let previous = fs::read_to_string(&path).unwrap_or_default();
+                        fs::write(&path, previous + &markdown)?;
+                    }
+                    if !report.passed {
+                        std::process::exit(1);
+                    }
+                }
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        Command::Sync {
+            dir,
+            roots,
+            platform_from,
+            platform_to,
+            to,
+            tasks_dir,
+            captures,
+            issues,
+            label,
+            apply,
+            coarse_as,
+        } => {
+            let catalog = Catalog::load(&dir)?;
+            let options = roots.options(&catalog)?;
+            if issues.as_deref().is_some_and(|i| i != "gh") {
+                return Err("--issues supports only gh".into());
+            }
+            let report = catalog.sync(
+                &options,
+                &concordance::SyncOptions {
+                    from: platform_from,
+                    to_platform: platform_to,
+                    to,
+                    tasks_dir,
+                    captures,
+                    issues: issues.is_some(),
+                    label,
+                    apply,
+                    coarse_as_stale: coarse_as == CoarseAs::Stale,
+                },
+            )?;
+            print!("{}", report.markdown());
+        }
+        Command::VersionCheck {
+            dir,
+            roots,
+            platform,
+            repo,
+        } => {
+            let outcome = (|| -> Result<concordance::VersionReport> {
+                let catalog = Catalog::load(&dir)?;
+                let mut options = roots.options(&catalog)?;
+                options.repo = repo;
+                catalog.version_check(&options, platform.as_deref())
+            })();
+            match outcome {
+                Ok(report) => {
+                    print!("{}", report.markdown());
+                    if !report.passed() {
+                        std::process::exit(1);
+                    }
+                }
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        Command::GateRelease {
+            dir,
+            roots,
+            skip_version,
+            repo,
+            platform,
+            max_age_days,
+            max_age_days_for,
+            today,
+        } => {
+            type Outcome = (
+                Vec<concordance::ReleaseFinding>,
+                Option<concordance::VersionReport>,
+            );
+            let outcome = (|| -> Result<Outcome> {
+                let catalog = Catalog::load(&dir)?;
+                let today = today.unwrap_or_else(concordance::today);
+                let findings = catalog.gate_release(
+                    &platform,
+                    max_age_days,
+                    &max_age_days_for.into_iter().collect(),
+                    &today,
+                )?;
+                let version = if skip_version || catalog.config.version.is_none() {
+                    None
+                } else {
+                    let mut options = roots.options(&catalog)?;
+                    options.repo = repo;
+                    Some(catalog.version_check(&options, Some(&platform))?)
+                };
+                Ok((findings, version))
+            })();
+            let (findings, version) = match outcome {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    std::process::exit(2);
+                }
+            };
+            let version_failed = version.as_ref().is_some_and(|v| !v.passed());
+            if findings.is_empty() {
+                println!(
+                    "## Release gate: {platform}\n\nPassed: no stale records beyond their limit."
+                );
+            } else {
+                println!("## Release gate: {platform}\n\nFailed: {} stale record(s) beyond their limit without an intended difference.\n\n| Record | Stale since | Age (days) | Limit (days) |\n| --- | --- | ---: | ---: |", findings.len());
+                for f in &findings {
+                    println!(
+                        "| `{}` | {} | {} | {} |",
+                        f.label,
+                        f.since_date.as_deref().unwrap_or("unknown"),
+                        f.age_days
+                            .map(|a| a.to_string())
+                            .unwrap_or_else(|| "?".into()),
+                        f.limit_days
+                    );
+                }
+            }
+            if let Some(version) = &version {
+                print!("\n{}", version.markdown());
+            }
+            if !findings.is_empty() || version_failed {
+                std::process::exit(1);
+            }
+        }
+        Command::Strings {
+            action:
+                StringsAction::Export {
+                    dir,
+                    from,
+                    keys_from_catalog,
+                    match_text,
+                    platform,
+                    app,
+                    out,
+                    check,
+                },
+        } => {
+            if !keys_from_catalog {
+                return Err("pass --keys-from-catalog (the only supported key source)".into());
+            }
+            if platform != "android" {
+                return Err("strings export supports --platform android only".into());
+            }
+            let catalog = Catalog::load(&dir)?;
+            let app = app.unwrap_or_else(|| {
+                catalog
+                    .directory
+                    .canonicalize()
+                    .ok()
+                    .and_then(|d| d.file_name().map(|f| f.to_string_lossy().into_owned()))
+                    .unwrap_or_else(|| "app".into())
+            });
+            let result = catalog.export_strings(&from, &app, &out, match_text)?;
+            let mut stale = Vec::new();
+            for (path, contents) in &result.files {
+                if check {
+                    if fs::read_to_string(path).ok().as_deref() != Some(contents.as_str()) {
+                        stale.push(path.display().to_string());
+                    }
+                } else {
+                    if let Some(parent) = path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::write(path, contents)?;
+                }
+            }
+            println!(
+                "{} keys in {} file(s); {} missing from the string catalog; {} with unsupported variations.",
+                result.keys,
+                result.files.len(),
+                result.missing.len(),
+                result.unsupported.len()
+            );
+            for key in &result.missing {
+                eprintln!("missing: {key:?}");
+            }
+            for key in &result.unsupported {
+                eprintln!("unsupported variations (not exported): {key:?}");
+            }
+            if !stale.is_empty() {
+                return Err(format!("stale string resources: {}", stale.join(", ")).into());
+            }
+        }
+        Command::RebaseAnchors {
+            dir,
+            roots,
+            to,
+            from,
+            platform,
+            write,
+            allow_reformat,
+            format,
+        } => {
+            let catalog = Catalog::load(&dir)?;
+            let options = roots.options(&catalog)?;
+            let platform = platform.unwrap_or_else(|| catalog.config.report.baseline.clone());
+            let report = catalog.rebase_anchors(
+                &options,
+                &platform,
+                from.as_deref(),
+                &to,
+                write,
+                allow_reformat,
+            )?;
+            match format {
+                DriftFormat::Markdown => print!("{}", report.markdown()),
+                DriftFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+            }
+        }
+        Command::Set {
+            dir,
+            target,
+            platform,
+            status,
+            implemented_by,
+            gap,
+            notes,
+            blocked_by,
+            clear,
+            intended,
+            stale,
+            reviewed_unchanged,
+            tasks_dir,
+            closing_commit,
+            unset,
+            allow_reformat,
+        } => {
+            use concordance::Status;
+            let request = concordance::SetRequest {
+                target: target.clone(),
+                platform,
+                status: status.map(|s| match s {
+                    StatusArg::Implemented => Status::Implemented,
+                    StatusArg::Partial => Status::Partial,
+                    StatusArg::Missing => Status::Missing,
+                    StatusArg::NotApplicable => Status::NotApplicable,
+                }),
+                implemented_by,
+                gap,
+                notes,
+                blocked_by,
+                clear,
+                intended,
+                stale,
+                reviewed_unchanged,
+                tasks_dir,
+                closing_commit,
+                unset,
+                allow_reformat,
+            };
+            let outcome = Catalog::set_record(&dir, &request)?;
+            println!(
+                "{} {}",
+                if outcome.changed {
+                    "Updated"
+                } else {
+                    "Unchanged:"
+                },
+                outcome.file.display()
+            );
+            if let Some(note) = &outcome.closed {
+                println!("{note}");
+            }
+            for warning in outcome.warnings {
+                eprintln!(
+                    "warning: {} {} {}: {}",
+                    warning.entry, warning.platform, warning.reference, warning.message
+                );
+            }
+        }
+        Command::Review {
+            action:
+                ReviewAction::Set {
+                    dir,
+                    key,
+                    verdict,
+                    note,
+                    category,
+                    reviewer,
+                    at,
+                    commit,
+                    baseline_commit,
+                },
+        } => {
+            use concordance::ui::{Review, Verdict};
+            let path = dir.join("review.json");
+            let mut review = Review::load(&path)?;
+            review.set(
+                &key,
+                match verdict {
+                    VerdictArg::Unreviewed => Verdict::Unreviewed,
+                    VerdictArg::Same => Verdict::Same,
+                    VerdictArg::Differs => Verdict::Differs,
+                    VerdictArg::Fixture => Verdict::Fixture,
+                    VerdictArg::Platform => Verdict::Platform,
+                },
+                note.as_deref(),
+                category.as_deref(),
+            )?;
+            if let Some(reviewer) = reviewer {
+                review.reviewer = reviewer;
+            }
+            if let Some(at) = at {
+                if !concordance::schema::valid_date(&at) {
+                    return Err("--at must be YYYY-MM-DD".into());
+                }
+                review.at = at;
+            }
+            for (field, value) in [
+                (&mut review.commit, commit),
+                (&mut review.baseline_commit, baseline_commit),
+            ] {
+                if let Some(value) = value {
+                    if !concordance::schema::valid_commit(&value) {
+                        return Err(format!("invalid commit {value:?}").into());
+                    }
+                    *field = Some(value);
+                }
+            }
+            review.save(&path)?;
+            println!("Updated {} in {}", key, path.display());
+        }
+        Command::Verify {
+            dir,
+            review,
+            captures,
+            out,
+        } => {
+            let ui = UiCatalog::load(&dir)?;
+            let review = concordance::ui::Review::load(&review)?;
+            let captures = captures.unwrap_or_else(|| dir.join("captures"));
+            let outcome = ui.verify_review(&review, &captures)?;
+            let patch = outcome.patch()?;
+            match out {
+                Some(out) => {
+                    if out.exists() {
+                        return Err(
+                            format!("{} exists; choose a new patch path", out.display()).into()
+                        );
+                    }
+                    fs::write(&out, patch)?;
+                    eprintln!("Wrote proposed patch {}", out.display());
+                }
+                None => print!("{patch}"),
+            }
+            eprintln!("{}", outcome.summary());
+        }
         Command::UiReport {
             dir,
+            roots,
             captures,
             baseline,
             out,
+            review,
             check,
         } => {
             let ui = UiCatalog::load(&dir)?;
+            let debt = match review {
+                Some(path) => concordance::ui::Review::load(&path)?.tooling_debt_markdown(),
+                None => String::new(),
+            };
             let captures = captures.unwrap_or_else(|| dir.join("captures"));
             let baseline = baseline
                 .as_deref()
                 .unwrap_or(&ui.catalog.config.report.baseline);
-            let report = ui.ui_report(&captures, baseline)?;
+            let options = roots.options(&ui.catalog)?;
             let out = out.unwrap_or_else(|| dir.join("parity.md"));
+            let report = ui.ui_report_at(&captures, baseline, Some(&out))?
+                + &ui.catalog.evidence_roots_section(&options)?
+                + &ui.catalog.baseline_drift_section(&options)?
+                + &debt;
             if check {
                 if fs::read_to_string(&out).ok().as_deref() != Some(&report) {
                     return Err(format!("stale UI report: {}", out.display()).into());
@@ -265,29 +1258,96 @@ fn run(cli: Cli) -> Result<()> {
                 out.display()
             );
         }
-        Command::Entry { dir, id, format } => {
+        Command::Entry {
+            dir,
+            id,
+            format,
+            roots,
+            details,
+        } => {
             let catalog = Catalog::load(dir)?;
+            roots.options(&catalog)?;
             match format {
                 Format::Yaml => print!("{}", serde_yaml::to_string(catalog.entry(&id)?)?),
                 Format::Json => println!("{}", serde_json::to_string_pretty(catalog.entry(&id)?)?),
-                Format::Brief => print!("{}", catalog.brief(&id)?),
+                Format::Brief => print!("{}", catalog.brief_with(&id, details)?),
             }
         }
         Command::Next {
             dir,
+            roots,
             platform,
             area,
             limit,
+            details,
+            include_blocked,
         } => {
             let catalog = Catalog::load(dir)?;
-            for entry in catalog.next(&platform, area.as_deref(), limit)? {
+            roots.options(&catalog)?;
+            let blocked = catalog.blocked_entries(&platform);
+            let mark = |keys: Option<&std::collections::BTreeSet<String>>| -> String {
+                keys.filter(|k| !k.is_empty())
+                    .map(|k| {
+                        format!(
+                            " [blocked: {}]",
+                            k.iter().cloned().collect::<Vec<_>>().join(", ")
+                        )
+                    })
+                    .unwrap_or_default()
+            };
+            for entry in catalog.next_filtered(
+                &platform,
+                area.as_deref(),
+                limit,
+                details,
+                include_blocked,
+            )? {
                 println!(
-                    "{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}{}",
                     entry.id,
                     entry.impact.as_str(),
                     entry.platforms[&platform].status.as_str(),
-                    entry.title
+                    entry.title,
+                    mark(blocked.get(&entry.id))
                 );
+                if details {
+                    // Same four columns: entry#detail, detail:kind, status, spec with numbers.
+                    for detail in catalog.open_details(entry, &platform) {
+                        let keys: std::collections::BTreeSet<String> = detail
+                            .platforms
+                            .get(&platform)
+                            .map(|p| {
+                                catalog
+                                    .open_blockers(p)
+                                    .into_iter()
+                                    .map(str::to_owned)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if !include_blocked && !keys.is_empty() {
+                            continue;
+                        }
+                        let numbers = detail.spec.numbers();
+                        println!(
+                            "{}#{}\tdetail:{}\t{}\t{}{}{}",
+                            entry.id,
+                            detail.id,
+                            detail.kind.as_str(),
+                            detail
+                                .platforms
+                                .get(&platform)
+                                .map(|p| p.status.as_str())
+                                .unwrap_or("unrecorded"),
+                            detail.spec.text,
+                            if numbers.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" [{numbers}]")
+                            },
+                            mark(Some(&keys))
+                        );
+                    }
+                }
             }
         }
         Command::Ids {
@@ -332,6 +1392,18 @@ fn print_generation(result: concordance::JourneyResult) {
     );
     for path in result.preserved {
         eprintln!("Preserved: {}", path.display());
+    }
+}
+/// Quote a path for a copy-pasteable shell command when it needs quoting.
+fn shell_word(text: &str) -> String {
+    if !text.is_empty()
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-+=:,@".contains(&b))
+    {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
     }
 }
 fn main() {

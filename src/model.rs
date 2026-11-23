@@ -4,21 +4,27 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Status {
-    Shipped,
+    /// Implemented; verification is recorded separately. `shipped` is a deprecated read alias.
+    #[serde(alias = "shipped")]
+    Implemented,
     Partial,
     Missing,
     NotApplicable,
+    /// The baseline changed after this was implemented; see `previous_status` and `since_*`.
+    Stale,
 }
 impl Status {
+    /// Work remains: missing, partial, or stale after a baseline change.
     pub fn is_gap(self) -> bool {
-        matches!(self, Self::Missing | Self::Partial)
+        matches!(self, Self::Missing | Self::Partial | Self::Stale)
     }
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Shipped => "shipped",
+            Self::Implemented => "implemented",
             Self::Partial => "partial",
             Self::Missing => "missing",
             Self::NotApplicable => "not-applicable",
+            Self::Stale => "stale",
         }
     }
 }
@@ -80,6 +86,87 @@ pub struct Platform {
     pub gap: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    /// Who implemented this platform's behavior (agent or person ID).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implemented_by: Option<String>,
+    /// Independent review evidence. `verified` is derived from it, never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<Verification>,
+    /// Keys of `[blockers]` entries holding this work back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<String>,
+    /// For `stale` records: the status before the baseline changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_status: Option<Status>,
+    /// For `stale` records: the baseline commit whose change made this stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_commit: Option<String>,
+    /// For `stale` records: YYYY-MM-DD of that commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_date: Option<String>,
+    /// Baseline commit at which a reviewer confirmed this record needs no change after a
+    /// file-level evidence change (set with `set --reviewed-unchanged`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewed_commit: Option<String>,
+    /// A recorded, intended difference from the baseline (set with `set --intended`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intended_difference: Option<String>,
+    /// True when the record was copied whole from an inherited platform.
+    #[serde(skip)]
+    pub inherited: bool,
+}
+
+/// A reviewer's record that an implementation was checked against the baseline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Verification {
+    pub by: String,
+    /// ISO date, YYYY-MM-DD.
+    pub at: String,
+    /// Target commit that was reviewed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// Baseline commit the target was compared against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_commit: Option<String>,
+    /// Capture keys (`screen.state`) or capture file paths relative to the repository root.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub captures: Vec<String>,
+    /// Test references that exercised the journey, in the same form as platform tests.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub journeys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+/// A capture key names a declared `screen.state`; anything path-like is a file.
+pub fn is_capture_key(capture: &str) -> bool {
+    !capture.contains('/') && !capture.ends_with(".png") && !capture.ends_with(".json")
+}
+
+impl Platform {
+    /// Why this record does not count as verified, or `None` when it does.
+    /// Capture availability is checked separately when capture coverage is known.
+    pub fn unverified_reason(&self) -> Option<&'static str> {
+        if self.status != Status::Implemented {
+            return Some("not implemented");
+        }
+        let Some(v) = &self.verification else {
+            return Some("no verification record");
+        };
+        if v.captures.is_empty() && v.journeys.is_empty() {
+            return Some("verification has no captures or journeys");
+        }
+        match self.implemented_by.as_deref() {
+            None => return Some("implemented_by not recorded"),
+            Some(by) if by == v.by => return Some("verifier is the implementer"),
+            Some(_) => {}
+        }
+        None
+    }
+    pub fn verified(&self) -> bool {
+        self.unverified_reason().is_none()
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,6 +190,277 @@ pub struct Entry {
     pub acceptance: Vec<Acceptance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// Evidence a verification must include. Default: a capture, plus a journey when the
+    /// entry changes state (non-empty `data.writes`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_requires: Option<Vec<VerifyEvidence>>,
+    /// Measurable details (motion, haptics, geometry, copy...) tracked per platform.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<Detail>,
+    /// The same feature in other apps, as `<app>:<entry-id>`; resolved by `suite`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_with: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VerifyEvidence {
+    Capture,
+    Journey,
+}
+impl Entry {
+    /// Explicit `verify_requires`, or the inferred default: purely visual entries need a
+    /// capture; entries whose interactions write state need a capture and a journey.
+    pub fn verification_requirements(&self) -> Vec<VerifyEvidence> {
+        match &self.verify_requires {
+            Some(explicit) => explicit.clone(),
+            None if self.data.writes.is_empty() => vec![VerifyEvidence::Capture],
+            None => vec![VerifyEvidence::Capture, VerifyEvidence::Journey],
+        }
+    }
+    /// Which required kinds of evidence a verification record lacks.
+    pub fn missing_verification_evidence(&self, v: &Verification) -> Vec<&'static str> {
+        self.verification_requirements()
+            .into_iter()
+            .filter_map(|r| match r {
+                VerifyEvidence::Capture if v.captures.is_empty() => Some("capture"),
+                VerifyEvidence::Journey if v.journeys.is_empty() => Some("journey"),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DetailKind {
+    Motion,
+    Haptic,
+    Gesture,
+    Geometry,
+    Copy,
+    State,
+    Accessibility,
+    Layout,
+    Other,
+}
+impl DetailKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Motion => "motion",
+            Self::Haptic => "haptic",
+            Self::Gesture => "gesture",
+            Self::Geometry => "geometry",
+            Self::Copy => "copy",
+            Self::State => "state",
+            Self::Accessibility => "accessibility",
+            Self::Layout => "layout",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// One measurable detail of an entry, with baseline evidence and per-platform status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Detail {
+    /// Entry-scoped slug; referenced as `entry.id#detail-id`.
+    pub id: String,
+    pub kind: DetailKind,
+    pub spec: DetailSpec,
+    /// Evidence on the report baseline platform, usually `path:line` or `path#Symbol`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub baseline: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub platforms: BTreeMap<String, Platform>,
+    /// Evidence a verification must include. Default: a journey for motion, haptic and
+    /// gesture details (a still capture cannot prove them); a capture or journey otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_requires: Option<Vec<VerifyEvidence>>,
+}
+impl Detail {
+    pub fn verification_requirements(&self) -> Vec<VerifyEvidence> {
+        match (&self.verify_requires, self.kind) {
+            (Some(explicit), _) => explicit.clone(),
+            (None, DetailKind::Motion | DetailKind::Haptic | DetailKind::Gesture) => {
+                vec![VerifyEvidence::Journey]
+            }
+            (None, _) => vec![],
+        }
+    }
+    /// Why this detail's platform record is not verified, if it is not.
+    pub fn unverified_reason(&self, record: &Platform) -> Option<String> {
+        if let Some(reason) = record.unverified_reason() {
+            return Some(reason.into());
+        }
+        let v = record.verification.as_ref()?;
+        let lacking: Vec<&str> = self
+            .verification_requirements()
+            .into_iter()
+            .filter_map(|r| match r {
+                VerifyEvidence::Capture if v.captures.is_empty() => Some("capture"),
+                VerifyEvidence::Journey if v.journeys.is_empty() => Some("journey"),
+                _ => None,
+            })
+            .collect();
+        (!lacking.is_empty()).then(|| {
+            format!(
+                "verification lacks a required {} (verify_requires)",
+                lacking.join(" and a ")
+            )
+        })
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DetailSpec {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion: Option<MotionSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub haptic: Option<HapticSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gesture: Option<GestureSpec>,
+    /// One measurement or several (for example width, height and corner radius).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry: Option<Geometry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy: Option<CopySpec>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Curve {
+    Spring,
+    Ease,
+    Linear,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Geometry {
+    One(GeometrySpec),
+    Many(Vec<GeometrySpec>),
+}
+impl Geometry {
+    pub fn items(&self) -> &[GeometrySpec] {
+        match self {
+            Self::One(one) => std::slice::from_ref(one),
+            Self::Many(many) => many,
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MotionSpec {
+    /// A named design-token motion (for example `Motion.fold`), with or without numbers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curve: Option<Curve>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub damping: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounce: Option<f64>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HapticSpec {
+    pub kind: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GestureSpec {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeometrySpec {
+    pub property: String,
+    pub value: f64,
+    pub unit: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CopySpec {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    /// String-catalog key (for example an `.xcstrings` key) for `strings export`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+fn number(value: f64) -> String {
+    format!("{value}")
+}
+impl DetailSpec {
+    /// The structured numbers as one compact line, for briefs and work queues.
+    pub fn numbers(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(m) = &self.motion {
+            let mut p = vec!["motion".to_owned()];
+            if let Some(token) = &m.token {
+                p.push(format!("token {token}"));
+            }
+            if let Some(curve) = m.curve {
+                p.push(
+                    match curve {
+                        Curve::Spring => "spring",
+                        Curve::Ease => "ease",
+                        Curve::Linear => "linear",
+                    }
+                    .into(),
+                );
+            }
+            for (name, value) in [
+                ("response", m.response),
+                ("damping", m.damping),
+                ("duration", m.duration),
+                ("bounce", m.bounce),
+            ] {
+                if let Some(v) = value {
+                    p.push(format!("{name} {}", number(v)));
+                }
+            }
+            parts.push(p.join(" "));
+        }
+        if let Some(h) = &self.haptic {
+            parts.push(format!("haptic {}", h.kind));
+        }
+        if let Some(g) = &self.gesture {
+            let mut text = format!("gesture {}", g.kind);
+            if let Some(t) = g.threshold {
+                text.push_str(&format!(
+                    " threshold {}{}",
+                    number(t),
+                    g.unit.as_deref().unwrap_or("")
+                ));
+            }
+            parts.push(text);
+        }
+        if let Some(g) = &self.geometry {
+            for g in g.items() {
+                parts.push(format!("{} = {}{}", g.property, number(g.value), g.unit));
+            }
+        }
+        if let Some(c) = &self.copy {
+            parts.push(format!(
+                "copy {:?}{}",
+                c.text,
+                c.locale
+                    .as_ref()
+                    .map(|l| format!(" ({l})"))
+                    .unwrap_or_default()
+            ));
+        }
+        parts.join("; ")
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -111,12 +469,203 @@ pub struct Config {
     /// Relative to the directory containing catalog.toml; --repo overrides this.
     #[serde(default = "dot")]
     pub repo_root: String,
-    pub platforms: BTreeMap<String, String>,
+    pub platforms: BTreeMap<String, PlatformConfig>,
     /// Optional legacy prefix to strip before resolving a platform's evidence.
     #[serde(default)]
     pub path_prefixes: BTreeMap<String, String>,
     #[serde(default)]
     pub report: ReportConfig,
+    #[serde(default)]
+    pub external_roots: BTreeMap<String, ExternalRoot>,
+    #[serde(default)]
+    pub baseline: Option<Baseline>,
+    #[serde(default)]
+    pub baselines: BTreeMap<String, Baseline>,
+    /// Root-relative glob patterns used to discover uncatalogued changes.
+    #[serde(default)]
+    pub source_globs: BTreeMap<String, SourceGlobs>,
+    /// Registry of decisions and dependencies that block work, referenced by `blocked_by`.
+    #[serde(default)]
+    pub blockers: BTreeMap<String, Blocker>,
+    #[serde(default)]
+    pub ui: UiConfig,
+    /// One shared marketing version that every platform must ship.
+    #[serde(default)]
+    pub version: Option<VersionConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VersionConfig {
+    /// Repository-relative file holding the version string.
+    pub source: String,
+    #[serde(default)]
+    pub platforms: BTreeMap<String, VersionChecks>,
+}
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum VersionChecks {
+    One(VersionCheck),
+    Many(Vec<VersionCheck>),
+}
+impl VersionChecks {
+    pub fn checks(&self) -> &[VersionCheck] {
+        match self {
+            Self::One(one) => std::slice::from_ref(one),
+            Self::Many(many) => many,
+        }
+    }
+}
+/// How to read one platform's version: a file (optionally with a regex whose first capture
+/// group is the version), or a command that prints it. `reads_source` instead asserts the
+/// file refers to the source file.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VersionCheck {
+    /// Relative to the platform root.
+    pub file: Option<String>,
+    pub pattern: Option<String>,
+    /// Run with `sh -c` from the platform root; the last non-empty stdout line is the version.
+    pub command: Option<String>,
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+    #[serde(default)]
+    pub reads_source: bool,
+}
+
+/// Catalog-wide UI comparison settings.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UiConfig {
+    pub tolerance: UiTolerance,
+    /// Categories a reviewer may give an accepted `platform` difference.
+    pub platform_categories: Vec<String>,
+}
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            tolerance: UiTolerance::default(),
+            platform_categories: DEFAULT_PLATFORM_CATEGORIES
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
+        }
+    }
+}
+pub const DEFAULT_PLATFORM_CATEGORIES: &[&str] = &[
+    "status-bar",
+    "gesture-inset",
+    "font-metrics",
+    "glyph",
+    "touch-target",
+    "native-affordance",
+];
+/// Equivalence tolerances for cross-platform geometry, in logical points/dp.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UiTolerance {
+    pub position_dp: Option<f64>,
+    pub size_ratio: Option<f64>,
+    pub radius_dp: Option<f64>,
+}
+
+/// Root-relative globs for a platform: a plain list (every source file), or a table that
+/// also names user-visible files and string catalogs for `gate`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum SourceGlobs {
+    All(Vec<String>),
+    Table {
+        #[serde(default)]
+        all: Vec<String>,
+        #[serde(default)]
+        user_visible: Vec<String>,
+        #[serde(default)]
+        strings: Vec<String>,
+    },
+}
+impl SourceGlobs {
+    pub fn all(&self) -> &[String] {
+        match self {
+            Self::All(all) | Self::Table { all, .. } => all,
+        }
+    }
+    pub fn user_visible(&self) -> &[String] {
+        match self {
+            Self::All(_) => &[],
+            Self::Table { user_visible, .. } => user_visible,
+        }
+    }
+    pub fn strings(&self) -> &[String] {
+        match self {
+            Self::All(_) => &[],
+            Self::Table { strings, .. } => strings,
+        }
+    }
+}
+
+/// A platform's root directory, optionally inheriting records from another platform.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum PlatformConfig {
+    Root(String),
+    Table {
+        #[serde(default = "dot")]
+        root: String,
+        inherits: Option<String>,
+    },
+}
+impl PlatformConfig {
+    pub fn root(&self) -> &str {
+        match self {
+            Self::Root(root) | Self::Table { root, .. } => root,
+        }
+    }
+    pub fn inherits(&self) -> Option<&str> {
+        match self {
+            Self::Root(_) => None,
+            Self::Table { inherits, .. } => inherits.as_deref(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BlockerStatus {
+    #[default]
+    Open,
+    Decided,
+    Resolved,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BlockerKind {
+    Decision,
+    Dependency,
+    Sdk,
+    Platform,
+    Hardware,
+}
+/// Something outside the implementer's control that blocks work.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Blocker {
+    pub title: String,
+    #[serde(default)]
+    pub kind: Option<BlockerKind>,
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// Where the decision is tracked.
+    #[serde(default, alias = "decision")]
+    pub link: Option<String>,
+    #[serde(default)]
+    pub status: BlockerStatus,
+}
+impl Blocker {
+    /// Only open blockers hold work back; decided and resolved ones do not.
+    pub fn blocks(&self) -> bool {
+        self.status == BlockerStatus::Open
+    }
 }
 fn dot() -> String {
     ".".into()
@@ -157,4 +706,42 @@ impl ReportConfig {
             .map(String::as_str)
             .unwrap_or(platform)
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum ExternalRoot {
+    Hint(String),
+    Details {
+        #[serde(alias = "hint")]
+        description: String,
+        git: Option<String>,
+        commit: Option<String>,
+    },
+}
+impl ExternalRoot {
+    pub fn hint(&self) -> String {
+        match self {
+            Self::Hint(hint) => hint.clone(),
+            Self::Details {
+                description,
+                git,
+                commit,
+            } => format!(
+                "{description}{}{}",
+                git.as_ref()
+                    .map(|s| format!("; git {s}"))
+                    .unwrap_or_default(),
+                commit
+                    .as_ref()
+                    .map(|s| format!("; commit {s}"))
+                    .unwrap_or_default()
+            ),
+        }
+    }
+}
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Baseline {
+    pub commit: String,
 }
