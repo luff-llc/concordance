@@ -1158,7 +1158,7 @@ fn scan_git_since_is_resolved_and_checked() {
     let err = failure(repo.run(&["log", "scan-git", "--since=--output=/tmp/x"]));
     assert!(err.contains("is not a git ref"), "{err}");
     let err = failure(repo.run(&["log", "scan-git", "--since", "no-such-ref"]));
-    assert!(err.contains("does not name a commit"), "{err}");
+    assert!(err.contains("does not name exactly one commit"), "{err}");
     let out = success(repo.run(&["log", "scan-git", "--since", "HEAD"]));
     assert_eq!(out, "scan-git: 0 recorded, 0 already recorded\n");
 }
@@ -1558,4 +1558,226 @@ fn large_logs_load_quickly() {
     );
     let out = repo.log(&["report", "bug", "Generated 3999"]);
     assert!(out.starts_with("already recorded"), "{out}");
+}
+
+// ---------------------------------------------------------------------------------------
+// Third review: bytes, legacy richness, bound fixes, rescans, ambiguity, index safety.
+
+fn append_line(repo: &Repo, line: &str) {
+    let mut text = fs::read_to_string(repo.0.join(LOG)).unwrap_or_default();
+    text.push_str(line);
+    text.push('\n');
+    fs::create_dir_all(repo.catalog().join("tracker")).expect("mkdir");
+    fs::write(repo.0.join(LOG), text).expect("write");
+}
+
+#[test]
+fn torn_line_inside_a_multibyte_character() {
+    let repo = Repo::new();
+    repo.log(&["--at", "2026-11-20", "report", "bug", "Kept"]);
+    let mut bytes = fs::read(repo.0.join(LOG)).expect("log");
+    // "{"title":"é" cut after the first byte of é.
+    bytes.extend_from_slice(b"{\"title\":\"\xc3");
+    fs::write(repo.0.join(LOG), &bytes).expect("torn");
+    let view = repo.track_json();
+    assert!(strings(&view["warnings"])
+        .iter()
+        .any(|w| w.starts_with("tracker/log.jsonl:2: unterminated last line")));
+    repo.log(&["report", "bug", "Next"]);
+    let text = fs::read_to_string(repo.0.join(LOG)).expect("valid UTF-8 again");
+    assert_eq!(text.lines().count(), 2, "{text}");
+    // Invalid UTF-8 on an earlier line is an error naming that line.
+    let mut bad = b"\xff\xfe\n".to_vec();
+    bad.extend_from_slice(text.as_bytes());
+    fs::write(repo.0.join(LOG), bad).expect("write");
+    let (_, report) = Catalog::load_collect(repo.catalog()).expect("loadable");
+    assert!(report
+        .errors
+        .iter()
+        .any(|e| e.reference == "tracker/log.jsonl:1" && e.message.contains("UTF-8")));
+}
+
+#[test]
+fn legacy_lines_do_not_hide_richer_facts() {
+    let repo = Repo::new();
+    let commit = repo.commit("Rel", "2026-11-10T00:00:00Z", "Release");
+    // A legacy released line without a commit.
+    let mut legacy = concordance::log::Event::new(
+        concordance::log::EventKind::Released,
+        "1.1.0",
+        "2026-11-11T00:00:00Z",
+        "rel",
+    );
+    legacy.date = Some("2026-11-11".into());
+    legacy.id = legacy.legacy_id();
+    append_line(&repo, &legacy.line().expect("line"));
+    // The same release with a commit adds something: appended.
+    let out = repo.log(&[
+        "--at",
+        "2026-11-11T00:00:00Z",
+        "released",
+        "1.1.0",
+        "--commit",
+        &commit,
+    ]);
+    assert!(out.starts_with("recorded"), "{out}");
+    // Without a commit it adds nothing: already recorded.
+    let out = repo.log(&["--at", "2026-11-11T00:00:00Z", "released", "1.1.0"]);
+    assert!(out.starts_with("already recorded"), "{out}");
+    // A legacy verification without a bound fix; the same check bound to a fix is new.
+    repo.log(&[
+        "--by",
+        "alice",
+        "fixed",
+        "bug.home-blank",
+        "--commit",
+        "f1f1f1f1",
+    ]);
+    let mut check = concordance::log::Event::new(
+        concordance::log::EventKind::Verified,
+        "bug.home-blank",
+        "2026-11-12T00:00:00Z",
+        "bob",
+    );
+    check.evidence = vec!["ok".into()];
+    check.id = check.legacy_id();
+    append_line(&repo, &check.line().expect("line"));
+    let out = repo.log(&[
+        "--by",
+        "bob",
+        "verified",
+        "bug.home-blank",
+        "--evidence",
+        "ok",
+    ]);
+    assert!(out.starts_with("recorded"), "{out}");
+    assert_eq!(repo.lines().len(), 5);
+}
+
+#[test]
+fn a_check_bound_to_an_earlier_fix_does_not_verify_a_newer_one() {
+    let repo = Repo::new();
+    repo.log(&[
+        "--by",
+        "alice",
+        "fixed",
+        "bug.home-blank",
+        "--commit",
+        "aaaa0001",
+    ]);
+    // Bob's check is bound to the first fix, then a second fix lands.
+    let mut check = concordance::log::Event::new(
+        concordance::log::EventKind::Verified,
+        "bug.home-blank",
+        "2026-11-12T00:00:00Z",
+        "bob",
+    );
+    check.evidence = vec!["ok".into()];
+    check.fix = Some("aaaa0001".into());
+    repo.log(&[
+        "--by",
+        "alice",
+        "fixed",
+        "bug.home-blank",
+        "--commit",
+        "bbbb0002",
+    ]);
+    // Appended after the second fix in the file, but bound to the first.
+    append_line(&repo, &check.with_id().line().expect("line"));
+    let view = repo.track_json();
+    assert_eq!(
+        unverified_reasons(&view, "bug.home-blank"),
+        vec!["checked an earlier fix by bob"]
+    );
+    // `log verified` binds under the lock to the current (second) fix.
+    repo.log(&[
+        "--by",
+        "carol",
+        "verified",
+        "bug.home-blank",
+        "--evidence",
+        "ok",
+    ]);
+    assert_eq!(repo.lines().last().expect("line")["fix"], "bbbb0002");
+    let view = repo.track_json();
+    assert!(issue(&view, "bugs", "bug.home-blank").is_none());
+}
+
+#[test]
+fn rescan_binds_the_same_fix() {
+    let repo = Repo::new();
+    repo.commit(
+        "Alice",
+        "2026-11-10T00:00:00Z",
+        "Fix A\n\nFixes: bug.home-blank\n",
+    );
+    repo.commit(
+        "Bob",
+        "2026-11-11T00:00:00Z",
+        "Check A\n\nVerifies: bug.home-blank (ok)\n",
+    );
+    repo.commit(
+        "Alice",
+        "2026-11-12T00:00:00Z",
+        "Fix B\n\nFixes: bug.home-blank\n",
+    );
+    let first = success(repo.run(&["log", "scan-git"]));
+    assert!(
+        first.ends_with("scan-git: 3 recorded, 0 already recorded\n"),
+        "{first}"
+    );
+    let lines = repo.lines();
+    assert_eq!(lines[1]["fix"], lines[0]["commit"]);
+    let second = success(repo.run(&["log", "scan-git"]));
+    assert_eq!(second, "scan-git: 0 recorded, 3 already recorded\n");
+    assert_eq!(repo.lines().len(), 3);
+}
+
+#[test]
+fn ambiguous_names_are_unknown() {
+    let repo = Repo::new();
+    let first = repo.commit("Alice", "2026-11-10T00:00:00Z", "First");
+    repo.git(&["tag", "dup"], "Alice", "2026-11-10T00:00:00Z");
+    let second = repo.commit("Alice", "2026-11-11T00:00:00Z", "Second");
+    repo.git(&["branch", "dup"], "Alice", "2026-11-11T00:00:00Z");
+    assert_ne!(first, second);
+    // `dup` names a tag and a branch: never resolved, always unknown.
+    let output = repo.run(&["log", "fixed", "bug.home-blank", "--commit", "dup"]);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    success(output);
+    assert!(
+        stderr.contains("does not resolve to exactly one commit"),
+        "{stderr}"
+    );
+    assert_eq!(repo.lines()[0]["commit"], "dup");
+    let err = failure(repo.run(&["log", "scan-git", "--since", "dup"]));
+    assert!(err.contains("does not name exactly one commit"), "{err}");
+    // Full ref names and hashes are fine.
+    let out = success(repo.run(&["log", "scan-git", "--since", "refs/tags/dup"]));
+    assert!(out.starts_with("scan-git:"), "{out}");
+    repo.log(&["released", "1.1.0", "--commit", "refs/tags/dup"]);
+    assert_eq!(repo.lines()[1]["commit"], first.as_str());
+    // The ambiguous fix commit makes shipping unknown, with a warning.
+    let view = repo.track_json();
+    assert!(strings(&view["warnings"])
+        .iter()
+        .any(|w| w.contains("commit dup is not known to git (or is ambiguous)")));
+}
+
+#[test]
+fn issue_index_never_returns_the_wrong_issue() {
+    let repo = Repo::new();
+    let mut catalog = Catalog::load(repo.catalog()).expect("valid");
+    let id = catalog.tracker.issues[0].id.clone();
+    // Reorder the public vector behind the index's back.
+    catalog.tracker.issues.reverse();
+    let found = catalog.tracker.issue(&id).expect("still found");
+    assert_eq!(found.id, id);
+    let last = catalog.tracker.issues[0].id.clone();
+    assert_eq!(
+        catalog.tracker.issue(&last).map(|i| i.id.clone()),
+        Some(last)
+    );
+    catalog.tracker.issues.clear();
+    assert!(catalog.tracker.issue(&id).is_none());
 }

@@ -382,6 +382,10 @@ impl Catalog {
                     stale.join(", ")
                 ));
             }
+            let earlier = list(|d| &d.earlier_fix_by);
+            if !earlier.is_empty() {
+                reasons.push(format!("checked an earlier fix by {}", earlier.join(", ")));
+            }
             if !unconfirmed.is_empty() {
                 reasons.push(format!(
                     "check by {} unconfirmed: git cannot place its commit after the fix",

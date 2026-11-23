@@ -119,8 +119,10 @@ absence) for `released`; `reason` for `pulled`. Appending an event whose id is a
 the log does nothing and prints `already recorded`.
 
 Ids from the previous release (`released` without the commit part; `verified` without
-`fix`) are still accepted, and an event matching one counts as already recorded. New
-lines are always written in the current form.
+`fix`) are still accepted. A new event matching a legacy line counts as already recorded
+only when it adds nothing that line lacks: a `released` with a commit the legacy line
+does not have, or a verification bound to a fix it does not name, is appended. New lines
+are always written in the current form.
 
 Parsing is strict: unknown fields, missing or forbidden fields for the kind, malformed
 times and dates, an `id` that does not match the content, and references to unknown
@@ -128,9 +130,11 @@ issues, entries or platforms are errors that name the line (`tracker/log.jsonl:7
 `log` commands refuse to append while the log has errors. Blank lines are ignored and
 never written. A repeated id keeps its first line: an identical repeat is silent, and a
 repeat whose content differs is a warning (never an error), so writers racing to record
-the same fact cannot make the log unloadable. A last line without a newline that does
-not parse is a torn write: it is ignored with a warning, and the next writer cuts it off
-before appending. A malformed line anywhere else stays an error.
+the same fact cannot make the log unloadable. The log is read as bytes and each line
+decoded on its own. A last line without a newline that is not valid UTF-8 or does not
+parse is a torn write (a writer stopped mid-line, possibly mid-character): it is ignored
+with a warning, and the next writer cuts it off before appending. Invalid UTF-8 or a
+malformed line anywhere else stays an error naming the line.
 
 Writers queue their events, then take an OS advisory lock on `tracker/log.jsonl.lock`
 (`File::lock`, so Concordance needs Rust 1.89 or later to build), polling for up to 10
@@ -164,9 +168,12 @@ it), `--by WHO` (default: `$CONCORDANCE_ACTOR`, then `git config user.name` in t
 repository, then `unknown`; `verified` requires it) and `--at` (UTC time or date; default
 now). Commits given to `fixed`, `verified`, `uploaded` and `released` are expanded to full
 hashes when git knows them. `released` without `--date` uses the day of `--at`.
-`verified` records the issue's current fix commit (the latest since the last reopen) as
-`fix`, alongside any explicit `--commit`, so the same evidence after a new fix is a new
-fact while rerunning it for the same fix is a no-op. `report` allocates its id under the
+`verified` records the issue's current fix commit (the latest since the last reopen, as
+the log reads under the lock) as `fix`, alongside any explicit `--commit`, so the same
+evidence after a new fix is a new fact while rerunning it for the same fix is a no-op.
+A ref that names more than one of `refs/heads/X`, `refs/tags/X` and `refs/remotes/X` is
+ambiguous: it is recorded as given with a warning and never treated as a known commit.
+Full ref names (`refs/tags/X`) and full or unique hashes are fine. `report` allocates its id under the
 lock, so two different titles with the same slug reported at once become two issues.
 
 `report` prints the issue id: `bug.` or `request.` plus a slug of the title (lowercase
@@ -191,8 +198,11 @@ Reports: request.reuse-identity
 
 Trailer values list IDs separated by commas, each optionally followed by evidence in
 parentheses. `Fixes:` records `fixed` with the commit; `Verifies:` records `verified` with
-the evidence (or `commit <hash>` when none is given) and the commit; `Reports:` records a
-`reported` event for an issue that already exists. IDs that are not known issues are
+the evidence (or `commit <hash>` when none is given), the commit, and the fix it is bound
+to, taken from history rather than the log's state at scan time: among the recorded
+fixes and the scan's latest earlier `Fixes:` for that issue, those the verifying commit
+contains, the one containing the others. An unchanged rescan therefore records nothing.
+`Reports:` records a `reported` event for an issue that already exists. IDs that are not known issues are
 skipped with a warning on stderr.
 
 Tags matching a pattern in catalog.toml record `released` events for the version, with the
@@ -219,8 +229,10 @@ whether one fact follows another:
   day of the report). An issue is **open** until a fix is recorded, **fixed** with a fix
   commit, and **verified** when someone other than every fixer records a verification of
   the latest fix; the verifying evidence joins the issue's evidence. A verification
-  without a `commit` is of the latest fix when it comes after that fix in the log. One
-  with a `commit` counts only when git confirms that commit is the fix commit or contains
+  without a `commit` but bound to a fix (`fix`) counts only for that fix; one bound to an earlier fix is listed
+  as `checked an earlier fix by WHO`. A legacy verification without `fix` or `commit` is
+  of the latest fix when it comes after that fix in the log. One with a `commit` counts
+  only when git confirms that commit is the fix commit or contains
   it; when git cannot say, it is listed as `check by WHO unconfirmed`. Commits are
   compared only after both are resolved to full hashes with `git rev-parse --verify
   --end-of-options REF^{commit}`; an unresolvable or ambiguous ref is unknown, never

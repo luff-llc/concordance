@@ -22,6 +22,8 @@ pub struct Derivation {
     pub stale_verified_by: Vec<String>,
     /// Others whose checks name a commit git cannot confirm contains the latest fix.
     pub unconfirmed_by: Vec<String>,
+    /// Others whose checks are bound to an earlier fix than the latest one.
+    pub earlier_fix_by: Vec<String>,
     /// Released releases git says do not contain the latest fix.
     pub not_in: Vec<String>,
     /// Released releases whose containment of the latest fix git could not answer.
@@ -57,6 +59,17 @@ impl GitAsk {
                 None
             }
         }
+    }
+
+    /// Whether two refs name the same commit: equal text, else both resolved to full
+    /// hashes. `None` when git cannot resolve one.
+    fn same(&mut self, a: &str, b: &str, context: &str) -> Option<bool> {
+        if a == b {
+            return Some(true);
+        }
+        let a = self.resolve(a, context)?;
+        let b = self.resolve(b, context)?;
+        Some(a == b)
     }
 
     /// `Some(answer)`, or `None` when git cannot say (a warning names why).
@@ -198,14 +211,15 @@ impl Catalog {
         if !path.exists() {
             return;
         }
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
+        // Bytes, decoded line by line: a torn last line may end mid-character.
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
             Err(error) => {
                 report.error("log", "", "", LOG_FILE, &error.to_string());
                 return;
             }
         };
-        let parsed = crate::log::parse(&text);
+        let parsed = crate::log::parse_bytes(&bytes);
         let events = parsed.events;
         self.tracker.warnings.extend(
             parsed
@@ -285,6 +299,7 @@ impl Catalog {
             evidence: Vec<String>,
             position: usize,
             commit: Option<String>,
+            fix: Option<String>,
         }
         #[derive(Default)]
         struct IssueRun {
@@ -325,6 +340,7 @@ impl Catalog {
                             evidence: event.evidence.clone(),
                             position,
                             commit: event.commit.clone(),
+                            fix: event.fix.clone(),
                         });
                     }
                     _ => {
@@ -434,11 +450,7 @@ impl Catalog {
             warnings: vec![],
         };
         for (id, run) in issues {
-            let position = if tracker.issue_index.len() == tracker.issues.len() {
-                tracker.issue_index.get(&id).copied()
-            } else {
-                tracker.issues.iter().position(|i| i.id == id)
-            };
+            let position = tracker.issue_position(&id);
             let Some(issue) = position.and_then(|i| tracker.issues.get_mut(i)) else {
                 continue;
             };
@@ -458,6 +470,7 @@ impl Catalog {
             let mut selves: BTreeSet<String> = BTreeSet::new();
             let mut stale: BTreeSet<String> = BTreeSet::new();
             let mut unconfirmed: BTreeSet<String> = BTreeSet::new();
+            let mut earlier: BTreeSet<String> = BTreeSet::new();
             if let Some(fix) = latest {
                 for check in &run.verifications {
                     let own = fixers.contains(check.by.as_str());
@@ -467,7 +480,23 @@ impl Catalog {
                             commit,
                             &format!("issue `{id}`: verification by {}", check.by),
                         ),
-                        None => Some(check.position > fix.position),
+                        // Bound to a fix: counts only for that fix.
+                        None => match &check.fix {
+                            Some(bound) => {
+                                let same = git.same(
+                                    bound,
+                                    &fix.commit,
+                                    &format!("issue `{id}`: verification by {}", check.by),
+                                );
+                                if same != Some(true) && !own {
+                                    earlier.insert(check.by.clone());
+                                    continue;
+                                }
+                                same
+                            }
+                            // Legacy checks without a bound fix: file order.
+                            None => Some(check.position > fix.position),
+                        },
                     };
                     match (covers, own) {
                         (Some(true), false) => counted.push(check),
@@ -530,6 +559,7 @@ impl Catalog {
                 derivation.self_verified_by = selves.into_iter().collect();
                 derivation.stale_verified_by = stale.into_iter().collect();
                 derivation.unconfirmed_by = unconfirmed.into_iter().collect();
+                derivation.earlier_fix_by = earlier.into_iter().collect();
             }
             if let (Some(fix), false) = (latest, derived == IssueState::Open || terminal) {
                 for (release, commits) in &release_commits {

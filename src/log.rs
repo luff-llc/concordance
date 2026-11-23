@@ -5,7 +5,7 @@
 use crate::tracker::{calendar_day, valid_issue_id, IssueKind};
 use crate::{Catalog, Impact, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -428,16 +428,42 @@ pub struct ParsedLog {
 /// content differs, it is a warning, never an error, so two writers racing to record the
 /// same fact cannot make the log unloadable.
 pub fn parse(text: &str) -> ParsedLog {
+    parse_bytes(text.as_bytes())
+}
+
+/// `parse` over raw bytes, decoding each line on its own: a torn last line cut inside a
+/// multibyte character is a torn write, and invalid UTF-8 elsewhere names its line.
+pub fn parse_bytes(bytes: &[u8]) -> ParsedLog {
     let mut parsed = ParsedLog::default();
     let mut seen: std::collections::BTreeMap<String, (usize, Event)> =
         std::collections::BTreeMap::new();
-    let lines: Vec<&str> = text.split('\n').collect();
+    let lines: Vec<&[u8]> = bytes.split(|b| *b == b'\n').collect();
     let last = lines.len() - 1;
     let mut offset = 0;
-    for (index, line) in lines.iter().enumerate() {
+    for (index, raw) in lines.iter().enumerate() {
         let number = index + 1;
         let start = offset;
-        offset += line.len() + 1;
+        offset += raw.len() + 1;
+        let torn = |parsed: &mut ParsedLog| {
+            parsed.warnings.push((
+                number,
+                "unterminated last line does not parse (a torn write); ignored".into(),
+            ));
+            parsed.torn_at = Some(start);
+        };
+        let line = match std::str::from_utf8(raw) {
+            Ok(line) => line,
+            Err(_) if index == last => {
+                torn(&mut parsed);
+                continue;
+            }
+            Err(error) => {
+                parsed
+                    .errors
+                    .push((number, format!("line is not valid UTF-8: {error}")));
+                continue;
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -445,11 +471,7 @@ pub fn parse(text: &str) -> ParsedLog {
             Ok(event) => event,
             // Unterminated and unparseable: a writer died mid-line.
             Err(_) if index == last => {
-                parsed.warnings.push((
-                    number,
-                    "unterminated last line does not parse (a torn write); ignored".into(),
-                ));
-                parsed.torn_at = Some(start);
+                torn(&mut parsed);
                 continue;
             }
             Err(error) => {
@@ -656,7 +678,47 @@ pub const LOCK_FILE: &str = "tracker/log.jsonl.lock";
 /// lock.
 enum Pending {
     Event(Event),
-    Report { kind: IssueKind, event: Event },
+    Report {
+        kind: IssueKind,
+        event: Event,
+    },
+    /// A verification whose `fix` is bound under the lock to the issue's current fix.
+    Verify(Event),
+}
+
+/// Whether `event` is already in `recorded` (id -> event): under its current id, or under
+/// its legacy id when it adds nothing the legacy line lacks (a released commit, or a
+/// verification's bound fix, that the legacy line does not carry).
+fn already_recorded(recorded: &BTreeMap<String, Event>, event: &Event) -> bool {
+    if recorded.contains_key(&event.id) {
+        return true;
+    }
+    let legacy = event.legacy_id();
+    if legacy == event.id {
+        return false;
+    }
+    recorded.get(&legacy).is_some_and(|old| {
+        let richer = |new: &Option<String>, old: &Option<String>| new.is_some() && new != old;
+        let adds = match event.kind {
+            EventKind::Released => richer(&event.commit, &old.commit),
+            EventKind::Verified => richer(&event.fix, &old.fix),
+            _ => false,
+        };
+        !adds
+    })
+}
+
+/// The latest fix commit for `issue` since its last reopen, replaying `events` in order.
+fn current_fix_in<'a>(events: impl Iterator<Item = &'a Event>, issue: &str) -> Option<String> {
+    let mut fix = None;
+    for event in events.filter(|e| e.subject == issue) {
+        match event.kind {
+            EventKind::Fixed => fix = event.commit.clone(),
+            EventKind::Reopened => fix = None,
+            _ => {}
+        }
+    }
+    fix
 }
 
 /// A loaded catalog plus its log. Events are validated and queued with `append` (or
@@ -664,7 +726,8 @@ enum Pending {
 pub struct LogWriter {
     pub catalog: Catalog,
     path: PathBuf,
-    ids: BTreeSet<String>,
+    /// Recorded and queued events by id.
+    ids: BTreeMap<String, Event>,
     pending: Vec<Pending>,
 }
 
@@ -742,7 +805,12 @@ impl LogWriter {
             )
             .into());
         }
-        let ids = catalog.tracker.log.iter().map(|e| e.id.clone()).collect();
+        let ids = catalog
+            .tracker
+            .log
+            .iter()
+            .map(|e| (e.id.clone(), e.clone()))
+            .collect();
         Ok(Self {
             path: catalog.directory.join(LOG_FILE),
             catalog,
@@ -785,13 +853,21 @@ impl LogWriter {
     /// legacy id) is already recorded or queued. Nothing is written until `flush`.
     pub fn append(&mut self, event: &Event) -> Result<bool> {
         self.check(event)?;
-        if event.ids().iter().any(|id| self.ids.contains(id)) {
+        if already_recorded(&self.ids, event) {
             return Ok(false);
         }
-        self.ids.insert(event.id.clone());
+        self.ids.insert(event.id.clone(), event.clone());
         self.pending.push(Pending::Event(event.clone()));
         self.catalog.tracker.record(event);
         Ok(true)
+    }
+
+    /// Queue a verification; its `fix` is bound in `flush`, under the lock, to the
+    /// issue's current fix as the re-read log has it.
+    pub fn verify(&mut self, event: Event) -> Result<()> {
+        self.check(&event.clone().with_id())?;
+        self.pending.push(Pending::Verify(event));
+        Ok(())
     }
 
     /// Queue a report. Its subject is ignored: the issue id is allocated in `flush`,
@@ -862,12 +938,12 @@ impl LogWriter {
         fs::create_dir_all(directory.join("tracker"))?;
         check_write_paths(&directory)?;
         let _lock = lock_log(&directory.join(LOCK_FILE))?;
-        let mut current = match fs::read_to_string(&self.path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        let mut current = match fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => vec![],
             Err(error) => return Err(format!("{}: {error}", self.path.display()).into()),
         };
-        let parsed = parse(&current);
+        let parsed = parse_bytes(&current);
         if let Some((line, message)) = parsed.errors.first() {
             return Err(format!("{LOG_FILE}:{line}: {message}; not appending").into());
         }
@@ -883,14 +959,15 @@ impl LogWriter {
             current.truncate(at);
         }
         let mut recent: Vec<Event> = parsed.events.into_iter().map(|(_, e)| e).collect();
-        let mut recorded: BTreeSet<String> = recent.iter().map(|e| e.id.clone()).collect();
+        let mut recorded: BTreeMap<String, Event> =
+            recent.iter().map(|e| (e.id.clone(), e.clone())).collect();
         let mut subjects: BTreeSet<String> = recent
             .iter()
             .chain(self.catalog.tracker.log.iter())
             .map(|e| e.subject.clone())
             .collect();
         let mut text = String::new();
-        if current.as_bytes().last().is_some_and(|c| *c != b'\n') {
+        if current.last().is_some_and(|c| *c != b'\n') {
             text.push('\n');
         }
         let mut results = Vec::new();
@@ -902,16 +979,26 @@ impl LogWriter {
                     event.subject = self.allocate_report_id(kind, &title, &recent, &subjects);
                     let event = event.with_id();
                     self.check(&event)?;
-                    if !self.ids.contains(&event.id) {
-                        self.ids.insert(event.id.clone());
+                    if !self.ids.contains_key(&event.id) {
+                        self.ids.insert(event.id.clone(), event.clone());
+                        self.catalog.tracker.record(&event);
+                    }
+                    event
+                }
+                Pending::Verify(mut event) => {
+                    event.fix = current_fix_in(recent.iter(), &event.subject);
+                    let event = event.with_id();
+                    self.check(&event)?;
+                    if !self.ids.contains_key(&event.id) {
+                        self.ids.insert(event.id.clone(), event.clone());
                         self.catalog.tracker.record(&event);
                     }
                     event
                 }
             };
-            let added = !event.ids().iter().any(|id| recorded.contains(id));
+            let added = !already_recorded(&recorded, &event);
             if added {
-                recorded.insert(event.id.clone());
+                recorded.insert(event.id.clone(), event.clone());
                 subjects.insert(event.subject.clone());
                 text.push_str(&event.line()?);
                 text.push('\n');
@@ -947,20 +1034,19 @@ pub fn announce(event: &Event, added: bool) {
 }
 
 /// Resolve a commit to its full hash when git knows it; otherwise keep it as given.
+/// Ambiguous names (a branch and a tag of the same name, say) are kept as given, with a
+/// warning; the fold then treats them as unknown.
 fn resolve_commit(repo: &Path, commit: &str) -> String {
-    crate::scan_git::git(
-        repo,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{commit}^{{commit}}"),
-        ],
-    )
-    .ok()
-    .map(|s| s.trim().to_owned())
-    .filter(|s| !s.is_empty())
-    .unwrap_or_else(|| commit.to_owned())
+    match crate::scan_git::Ancestry::new(repo).resolve(commit) {
+        Ok(Some(full)) => full,
+        Ok(None) => {
+            eprintln!(
+                "warning: {commit} does not resolve to exactly one commit; recorded as given"
+            );
+            commit.to_owned()
+        }
+        Err(_) => commit.to_owned(),
+    }
 }
 
 pub fn run(args: LogArgs) -> Result<()> {
@@ -1026,10 +1112,14 @@ pub fn run(args: LogArgs) -> Result<()> {
             let mut event = Event::new(EventKind::Verified, &issue, &at, &by);
             event.evidence = evidence;
             event.commit = commit.map(|c| resolve_commit(&repo, &c));
-            // Bound to the issue's current fix: the same evidence after a new fix is a new
-            // fact; rerunning it for the same fix is not.
-            event.fix = writer.current_fix(&issue);
-            event
+            // Bound under the lock to the issue's current fix: the same evidence after a
+            // new fix is a new fact; rerunning it for the same fix is not.
+            writer.verify(event)?;
+            let results = writer.flush()?;
+            for (event, added) in &results {
+                announce(event, *added);
+            }
+            return Ok(());
         }
         LogAction::Reopened { issue, reason } => {
             let mut event = Event::new(EventKind::Reopened, &issue, &at, &by);

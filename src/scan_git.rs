@@ -69,6 +69,10 @@ impl Ancestry {
         if let Some(answer) = self.resolved.get(reference) {
             return Ok(answer.clone());
         }
+        if self.ambiguous(reference)? {
+            self.resolved.insert(reference.to_owned(), None);
+            return Ok(None);
+        }
         let output = Command::new("git")
             .arg("-C")
             .arg(&self.repo)
@@ -80,6 +84,39 @@ impl Ancestry {
         let answer = (output.status.success() && !full.is_empty()).then_some(full);
         self.resolved.insert(reference.to_owned(), answer.clone());
         Ok(answer)
+    }
+    /// A short name (not a full `refs/...` name, not hex) that more than one of
+    /// refs/heads/X, refs/tags/X and refs/remotes/X names. Git would pick one silently.
+    fn ambiguous(&self, reference: &str) -> Result<bool> {
+        let base = reference
+            .split(['~', '^', '@', ':'])
+            .next()
+            .unwrap_or(reference);
+        if base.is_empty()
+            || base == "HEAD"
+            || base.starts_with("refs/")
+            || base.bytes().all(|c| c.is_ascii_hexdigit())
+        {
+            return Ok(false);
+        }
+        let candidates = [
+            format!("refs/heads/{base}"),
+            format!("refs/tags/{base}"),
+            format!("refs/remotes/{base}"),
+        ];
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&self.repo)
+            .args(["for-each-ref", "--format=%(refname)"])
+            .args(&candidates)
+            .output()
+            .map_err(|e| format!("git unavailable: {e}"))?;
+        let listed = String::from_utf8_lossy(&output.stdout).into_owned();
+        let found = listed
+            .lines()
+            .filter(|line| candidates.iter().any(|c| c == line))
+            .count();
+        Ok(found > 1)
     }
     pub(crate) fn is_shallow(&mut self) -> bool {
         if self.shallow.is_none() {
@@ -111,17 +148,9 @@ fn resolve_since(repo: &Path, since: &str) -> Result<String> {
     if since.starts_with('-') || since.trim().is_empty() {
         return Err(format!("--since {since:?} is not a git ref").into());
     }
-    let sha = git(
-        repo,
-        &[
-            "rev-parse",
-            "--verify",
-            "--end-of-options",
-            &format!("{since}^{{commit}}"),
-        ],
-    )
-    .map_err(|e| format!("--since {since:?} does not name a commit: {e}"))?;
-    Ok(sha.trim().to_owned())
+    Ancestry::new(repo).resolve(since)?.ok_or_else(|| {
+        format!("--since {since:?} does not name exactly one commit (unknown or ambiguous)").into()
+    })
 }
 
 /// A tag glob with one `{version}` placeholder as a regex; `*` matches within one path
@@ -218,6 +247,8 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
         args.push(range);
     }
     let text = git(repo, &args)?;
+    // The latest `Fixes:` per issue in the walk so far (oldest commit first).
+    let mut walked_fix: BTreeMap<String, String> = BTreeMap::new();
     for record in text.split('\u{1e}') {
         let record = record.trim_start_matches('\n');
         if record.trim().is_empty() {
@@ -249,13 +280,14 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
                     "fixes" => {
                         let mut e = Event::new(EventKind::Fixed, &id, &at, author);
                         e.commit = Some(sha.to_owned());
+                        walked_fix.insert(id.clone(), sha.to_owned());
                         e
                     }
                     "verifies" => {
                         let mut e = Event::new(EventKind::Verified, &id, &at, author);
                         e.evidence = vec![evidence.unwrap_or_else(|| format!("commit {short}"))];
                         e.commit = Some(sha.to_owned());
-                        e.fix = writer.current_fix(&id);
+                        e.fix = fix_for_check(writer, &mut ancestry, &id, sha, walked_fix.get(&id));
                         e
                     }
                     _ => {
@@ -357,6 +389,40 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
         tally.seen - recorded
     );
     Ok(())
+}
+
+/// The fix a `Verifies:` at commit `check` is bound to, from history rather than from the
+/// log's state at scan time (so a rescan binds the same fix): among the recorded fixes
+/// (since the last reopen) and the walk's latest `Fixes:`, those contained in `check`,
+/// the one containing all the others.
+fn fix_for_check(
+    writer: &LogWriter,
+    ancestry: &mut Ancestry,
+    issue: &str,
+    check: &str,
+    walked: Option<&String>,
+) -> Option<String> {
+    let recorded = writer
+        .catalog
+        .tracker
+        .derived
+        .get(issue)
+        .map(|d| d.fixes.clone())
+        .unwrap_or_default();
+    let mut candidates: Vec<String> = Vec::new();
+    for fix in recorded.into_iter().chain(walked.cloned()) {
+        if !candidates.contains(&fix) && ancestry.contains(&fix, check).ok().flatten() == Some(true)
+        {
+            candidates.push(fix);
+        }
+    }
+    let mut best = candidates.first().cloned().or_else(|| walked.cloned())?;
+    for candidate in candidates.iter().skip(1) {
+        if ancestry.contains(&best, candidate).ok().flatten() == Some(true) {
+            best = candidate.clone();
+        }
+    }
+    Some(best)
 }
 
 fn key_label(key: &str) -> &'static str {
