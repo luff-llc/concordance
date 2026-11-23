@@ -806,16 +806,13 @@ fn parent_components_are_refused() {
     assert!(!audit.status.success());
     assert!(String::from_utf8_lossy(&audit.stderr).contains("must not contain `..`"));
     assert!(!temp.0.join("spec/fixture/tasks").exists());
-    // The default output directory is fine even when DIR itself has `..` in it.
-    let fine = run_in(
+    // The catalog argument follows the log's rule: no `..` either.
+    let parent = run_in(
         &temp.0,
         &["plan-audit", "repo/../spec/fixture", "--area", "home"],
     );
-    assert!(stdout(&fine).starts_with("1 created;"));
-    assert!(temp
-        .0
-        .join("spec/fixture/tasks/audit-ios-home.md")
-        .is_file());
+    assert!(!parent.status.success());
+    assert!(!temp.0.join("spec/fixture/tasks").exists());
 }
 
 /// A Cargo virtual workspace: no root `src/`, members under `crates/*`.
@@ -953,4 +950,87 @@ fn plan_audit_refuses_a_sibling_checkout_under_a_shared_repo_root() {
     );
     assert!(stdout(&allowed).starts_with("1 created;"));
     assert!(own.join("audit-ios-home.md").is_file());
+}
+
+#[test]
+fn single_platform_catalogs_target_that_platform() {
+    let temp = Temp::new();
+    let cli = temp.0.join("cli");
+    fs::create_dir_all(cli.join("src")).expect("mkdir");
+    fs::write(cli.join("Cargo.toml"), "[package]\nname = \"tool\"\n").expect("write");
+    fs::write(cli.join("src/main.rs"), "fn main() {}\n").expect("write");
+    let plan = stdout(&run_in(&cli, &["init", "--app", "tool"]));
+    assert!(
+        plan.contains("Report: baseline cli, target cli (the only platform)."),
+        "{plan}"
+    );
+    let catalog = cli.join("spec/tool");
+    let toml = fs::read_to_string(catalog.join("catalog.toml")).expect("catalog");
+    assert!(toml.contains("target = \"cli\""), "{toml}");
+    fs::write(
+        catalog.join("catalog/run.yaml"),
+        r#"- id: run.start-tool
+  title: Start the tool
+  summary: Running the tool prints its help.
+  surfaces: [terminal]
+  interactions:
+    - trigger: Run tool
+      result: Help is printed.
+  states: [ready]
+  settings: []
+  data: {reads: [], writes: []}
+  copy: [Usage]
+  accessibility: {label: "", identifier: "", notes: []}
+  design: []
+  depends_on: []
+  impact: high
+  platforms:
+    cli: {status: implemented, source: [src/main.rs]}
+  acceptance:
+    - given: The tool is installed
+      when: It runs without arguments
+      then: Help is printed.
+"#,
+    )
+    .expect("write");
+    fs::write(
+        catalog.join("tracker/releases.yaml"),
+        "- id: \"1.0.0\"\n  state: planned\n  carries: [run.start-tool]\n",
+    )
+    .expect("write");
+    let json = stdout(&run_in(
+        &cli,
+        &[
+            "track",
+            "spec/tool",
+            "--format",
+            "json",
+            "--out",
+            "track.json",
+        ],
+    ));
+    assert!(json.contains("track.json"), "{json}");
+    let value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(cli.join("track.json")).expect("read"))
+            .expect("json");
+    let text = value.to_string();
+    assert!(text.contains("\"ready\":true"), "{text}");
+    assert!(!text.contains("\"ready\":false"), "{text}");
+}
+
+#[cfg(unix)]
+#[test]
+fn plan_audit_refuses_a_catalog_reached_through_a_link() {
+    use std::os::unix::fs::symlink;
+    let temp = Temp::new();
+    // `spec` in this checkout links to another checkout's spec directory.
+    let other = temp.0.join("other");
+    fs::create_dir_all(&other).expect("mkdir");
+    fs::rename(temp.0.join("spec"), other.join("spec")).expect("move");
+    symlink(other.join("spec"), temp.0.join("spec")).expect("symlink");
+    let refused = run_in(&temp.0, &["plan-audit", "spec/fixture"]);
+    assert!(!refused.status.success());
+    let message = String::from_utf8_lossy(&refused.stderr);
+    assert!(message.contains("symlink"), "{message}");
+    assert!(!other.join("spec/fixture/tasks").exists());
 }

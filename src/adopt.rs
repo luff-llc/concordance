@@ -1217,7 +1217,16 @@ fn catalog_toml(
     }
     match target {
         Some(t) => out.push(format!("target = {}", toml_string(&t.name))),
-        None => out.push("# target = \"<second platform>\"".into()),
+        // One platform: target it too, so readiness never falls back to the model's
+        // default target.
+        None => {
+            if let Some(b) = baseline {
+                out.push(format!(
+                    "target = {}  # the only platform",
+                    toml_string(&b.name)
+                ));
+            }
+        }
     }
     out.extend([String::new(), "[report.labels]".into()]);
     for p in platforms {
@@ -1650,7 +1659,7 @@ impl InitPlan {
                 b.name,
                 target
                     .map(|t| format!(", target {}", t.name))
-                    .unwrap_or_default()
+                    .unwrap_or_else(|| format!(", target {} (the only platform)", b.name))
             ));
         }
         out.push(match &self.tag_pattern {
