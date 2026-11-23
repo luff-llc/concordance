@@ -314,6 +314,15 @@
           "items": {
             "$ref": "#/$defs/detail"
           }
+        },
+        "shared_with": {
+          "type": "array",
+          "uniqueItems": true,
+          "description": "The same feature in other apps of a suite, as <app>:<entry-id>. A single catalog checks only the syntax; `concordance suite` resolves them.",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*\\.[a-z][a-z0-9-]*$"
+          }
         }
       }
     },

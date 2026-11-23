@@ -197,6 +197,9 @@ pub struct Entry {
     /// Measurable details (motion, haptics, geometry, copy...) tracked per platform.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub details: Vec<Detail>,
+    /// The same feature in other apps, as `<app>:<entry-id>`; resolved by `suite`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shared_with: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

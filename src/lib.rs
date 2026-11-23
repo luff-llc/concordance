@@ -11,8 +11,10 @@ pub use continuous::{
 };
 pub use version::{VersionReport, VersionResult};
 mod set;
+pub mod tracker;
 pub use rebase::{AnchorFate, AnchorMove, AnchorSuggestion, RebaseReport};
 pub use set::{SetOutcome, SetRequest, CLEARABLE};
+pub use tracker::{calendar_day, Tracker};
 mod evidence;
 mod generate;
 mod model;
@@ -45,6 +47,8 @@ pub struct Catalog {
     pub areas: BTreeMap<String, String>,
     pub directory: PathBuf,
     pub area_files: BTreeMap<String, String>,
+    /// Optional releases and issues from `tracker/`; empty when absent.
+    pub tracker: Tracker,
 }
 
 impl Catalog {
@@ -156,6 +160,7 @@ impl Catalog {
             areas: BTreeMap::new(),
             area_files: BTreeMap::new(),
             directory,
+            tracker: Tracker::default(),
         };
         for file in files {
             let area = file
@@ -302,6 +307,7 @@ impl Catalog {
         }
         catalog.validate_retired(&mut report)?;
         catalog.check_work_state(&mut report);
+        catalog.load_tracker(&mut report);
         report.sort();
         Ok((catalog, report))
     }

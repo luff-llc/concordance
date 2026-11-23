@@ -214,6 +214,10 @@ fn check(
                 Some(r"^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$") => (valid_id(text), "stable ID"),
                 Some(r"^[a-z][a-z0-9-]*$") => (valid_slug(text), "slug"),
                 Some(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$") => (valid_date(text), "date (YYYY-MM-DD)"),
+                Some(r"^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$") => (
+                    crate::tracker::valid_shared_ref(text),
+                    "shared feature (<app>:<entry-id>)",
+                ),
                 _ => return fail("unsupported schema pattern"),
             };
             if !valid {
