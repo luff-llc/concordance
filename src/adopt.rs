@@ -1,6 +1,6 @@
 //! `concordance init` and `concordance guide`: bring Concordance into a repository and print
 //! the agent kit. See docs/adopt.md.
-use crate::inventory::{is_test_file, slug, walk_with};
+use crate::inventory::{is_test_file, slug, walk, WalkExtras};
 use crate::{fail, Catalog, Config, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -9,13 +9,30 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 /// What `init` scans and where it writes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct InitOptions {
     pub repo: PathBuf,
     /// Default: the repository directory's name.
     pub app: Option<String>,
     /// Catalog directory, relative to the repository. Default: `spec/<app>`.
     pub out: Option<PathBuf>,
+    /// Subtrees (relative to the repository) to search for markers and sources; empty means
+    /// the whole repository. Marker files in their parent directories still count.
+    pub scopes: Vec<PathBuf>,
+}
+
+/// One app found in the repository: an Apple application target or an Android
+/// application module. Several of them suggest scoping `init`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AppCandidate {
+    /// Grouping key: the slugged name without platform suffixes (`TaupeWatch` → `taupe`).
+    pub key: String,
+    pub kind: &'static str,
+    pub name: String,
+    /// The project file or build file that declares it.
+    pub declared_in: String,
+    /// Source directories to pass as `--scope` (may be empty when none is found by name).
+    pub scopes: Vec<String>,
 }
 
 /// Globs written to `[source_globs.<platform>]`, relative to the platform root.
@@ -62,6 +79,11 @@ pub struct InitPlan {
     /// `catalog.toml` already exists: nothing is written; `notes` say what would be added.
     pub adopted: bool,
     pub notes: Vec<String>,
+    /// The `--scope` subtrees, relative to the repository.
+    pub scopes: Vec<String>,
+    /// Apps found when no scope was given (listed when there is more than one).
+    pub candidates: Vec<AppCandidate>,
+    repo: PathBuf,
 }
 
 const WEB_EXTENSIONS: &[&str] = &["tsx", "jsx", "vue", "svelte", "ts", "js"];
@@ -223,11 +245,29 @@ fn detect_apple(
         .filter(|f| inside(&root, f))
         .map(|f| under(&root, f))
         .collect();
-    if rel.iter().any(|f| f.ends_with(".xcstrings")) {
-        globs.strings.push("**/*.xcstrings".into());
-    }
-    if rel.iter().any(|f| file_name(f) == "Localizable.strings") {
-        globs.strings.push("**/Localizable.strings".into());
+    // String catalogs, scoped to the top-level folders that hold them.
+    for (matches, tail) in [
+        (
+            &(|f: &str| f.ends_with(".xcstrings")) as &dyn Fn(&str) -> bool,
+            "*.xcstrings",
+        ),
+        (
+            &|f: &str| file_name(f) == "Localizable.strings",
+            "Localizable.strings",
+        ),
+    ] {
+        let tops: BTreeSet<&str> = rel
+            .iter()
+            .filter(|f| matches(f))
+            .map(|f| f.split_once('/').map(|(d, _)| d).unwrap_or(""))
+            .collect();
+        for top in tops {
+            globs.strings.push(if top.is_empty() {
+                tail.to_owned()
+            } else {
+                format!("{top}/**/{tail}")
+            });
+        }
     }
     Some(DetectedPlatform {
         name: name.into(),
@@ -512,19 +552,293 @@ fn detect_cli(files: &BTreeSet<String>) -> Vec<DetectedPlatform> {
     out
 }
 
-/// Platforms found in a repository, in name order.
-pub fn detect(repo: &Path) -> Result<Vec<DetectedPlatform>> {
+/// Marker files looked for in the parent directories of a scope.
+const MARKERS: &[&str] = &[
+    "Package.swift",
+    "project.yml",
+    "settings.gradle",
+    "settings.gradle.kts",
+    "build.gradle",
+    "build.gradle.kts",
+    "package.json",
+    "Cargo.toml",
+    "go.mod",
+    "pyproject.toml",
+];
+
+/// Files (and Xcode bundles) of the repository, or of the scopes plus the marker files in
+/// each scope's parent directories.
+fn scan(repo: &Path, scopes: &[String]) -> Result<(BTreeSet<String>, WalkExtras)> {
     let mut files = BTreeSet::new();
-    let mut bundles = BTreeSet::new();
-    walk_with(repo, "", &mut files, &mut bundles)?;
-    let mut platforms: Vec<DetectedPlatform> = detect_apple(repo, &files, &bundles)
+    let mut extras = WalkExtras::default();
+    if scopes.is_empty() {
+        walk(repo, "", &mut files, &mut extras)?;
+        return Ok((files, extras));
+    }
+    for scope in scopes {
+        walk(repo, scope, &mut files, &mut extras)?;
+        let mut dir = parent(scope).to_owned();
+        loop {
+            let path = if dir.is_empty() {
+                repo.to_path_buf()
+            } else {
+                repo.join(&dir)
+            };
+            if let Ok(entries) = fs::read_dir(&path) {
+                for entry in entries.flatten() {
+                    let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                        continue;
+                    };
+                    let Ok(kind) = entry.file_type() else {
+                        continue;
+                    };
+                    if kind.is_file() && MARKERS.contains(&name.as_str()) {
+                        files.insert(join(&dir, &name));
+                    } else if kind.is_dir() && name.ends_with(".xcodeproj") {
+                        extras.bundles.insert(join(&dir, &name));
+                    }
+                }
+            }
+            if dir.is_empty() {
+                break;
+            }
+            dir = parent(&dir).to_owned();
+        }
+    }
+    Ok((files, extras))
+}
+
+/// Platforms found in a repository (or in its scopes), in name order.
+pub fn detect(repo: &Path, scopes: &[String]) -> Result<Vec<DetectedPlatform>> {
+    let (files, extras) = scan(repo, scopes)?;
+    Ok(detect_in(repo, &files, &extras.bundles))
+}
+
+fn detect_in(
+    repo: &Path,
+    files: &BTreeSet<String>,
+    bundles: &BTreeSet<String>,
+) -> Vec<DetectedPlatform> {
+    let mut platforms: Vec<DetectedPlatform> = detect_apple(repo, files, bundles)
         .into_iter()
-        .chain(detect_android(repo, &files))
-        .chain(detect_web(&files))
-        .chain(detect_cli(&files))
+        .chain(detect_android(repo, files))
+        .chain(detect_web(files))
+        .chain(detect_cli(files))
         .collect();
     platforms.sort_by(|a, b| a.name.cmp(&b.name));
-    Ok(platforms)
+    platforms
+}
+
+fn candidate_key(name: &str) -> String {
+    let mut key = slug(name);
+    loop {
+        let before = key.clone();
+        for suffix in [
+            "-app", "-android", "-ios", "-macos", "-mac", "-watch", "-vision", "-tv",
+        ] {
+            if let Some(stripped) = key.strip_suffix(suffix) {
+                if !stripped.is_empty() {
+                    key = stripped.to_owned();
+                }
+            }
+        }
+        if key == before {
+            return key;
+        }
+    }
+}
+
+/// `(name, productType)` of every native target in a `project.pbxproj` (quoted or not).
+pub fn pbxproj_targets(text: &str) -> Vec<(String, String)> {
+    let isa = regex::Regex::new(r#""?isa"?\s*=\s*"?PBXNativeTarget"?\s*;"#).ok();
+    let next_isa = regex::Regex::new(r#""?isa"?\s*=\s*"?[A-Za-z]+"?\s*;"#).ok();
+    let name = regex::Regex::new(r#"(?m)^\s*"?name"?\s*=\s*"?([^";]+)"?\s*;"#).ok();
+    let product = regex::Regex::new(r#""?productType"?\s*=\s*"([^"]+)""#).ok();
+    let (Some(isa), Some(next_isa), Some(name), Some(product)) = (isa, next_isa, name, product)
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for m in isa.find_iter(text) {
+        let rest = &text[m.end()..];
+        let block = match next_isa.find(rest) {
+            Some(next) => &rest[..next.start()],
+            None => rest,
+        };
+        if let (Some(n), Some(p)) = (name.captures(block), product.captures(block)) {
+            if let (Some(n), Some(p)) = (n.get(1), p.get(1)) {
+                out.push((n.as_str().trim().to_owned(), p.as_str().to_owned()));
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Application targets in a `project.yml` (XcodeGen): top-level target keys whose block
+/// has `type: application`.
+fn project_yml_apps(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut in_targets = false;
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        if !line.starts_with(' ') && !line.trim().is_empty() {
+            in_targets = line.trim_end() == "targets:";
+            current = None;
+            continue;
+        }
+        if !in_targets {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        let trimmed = line.trim();
+        if indent == 2 && trimmed.ends_with(':') {
+            current = Some(trimmed.trim_end_matches(':').trim_matches('"').to_owned());
+        } else if trimmed == "type: application" {
+            if let Some(name) = current.take() {
+                out.push(name);
+            }
+        }
+    }
+    out
+}
+
+/// `rootProject.name = "…"` in a Gradle settings file.
+fn root_project_name(text: &str) -> Option<String> {
+    let re = regex::Regex::new(r#"rootProject\.name\s*=\s*["']([^"']+)["']"#).ok()?;
+    re.captures(text)?.get(1).map(|m| m.as_str().to_owned())
+}
+
+/// Apple application targets and Android application modules.
+fn app_candidates(
+    repo: &Path,
+    files: &BTreeSet<String>,
+    bundles: &BTreeSet<String>,
+) -> Vec<AppCandidate> {
+    // Directories that hold Swift sources, by their last component.
+    let mut source_dirs: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for file in files.iter().filter(|f| extension(f) == "swift") {
+        let mut dir = parent(file);
+        while !dir.is_empty() {
+            source_dirs
+                .entry(file_name(dir))
+                .or_default()
+                .push(dir.to_owned());
+            dir = parent(dir);
+        }
+    }
+    let dir_named = |name: &str| -> Option<String> {
+        source_dirs
+            .get(name)
+            .and_then(|dirs| dirs.iter().min_by_key(|d| (d.len(), d.as_str())).cloned())
+    };
+    let mut out = Vec::new();
+    for bundle in bundles {
+        let first = out.len();
+        let text =
+            fs::read_to_string(repo.join(bundle).join("project.pbxproj")).unwrap_or_default();
+        let targets = pbxproj_targets(&text);
+        for (name, product) in &targets {
+            if !product.starts_with("com.apple.product-type.application") {
+                continue;
+            }
+            let mut scopes: Vec<String> = dir_named(name).into_iter().collect();
+            for (other, kind) in &targets {
+                if other != name && other.starts_with(name.as_str()) && kind.contains("extension") {
+                    scopes.extend(dir_named(other));
+                }
+            }
+            scopes.sort();
+            scopes.dedup();
+            out.push(AppCandidate {
+                key: candidate_key(name),
+                kind: "apple",
+                name: name.clone(),
+                declared_in: bundle.clone(),
+                scopes,
+            });
+        }
+        // A project holding one app: its folder is the scope for targets without a folder
+        // of their own name.
+        let keys: BTreeSet<&str> = out[first..].iter().map(|c| c.key.as_str()).collect();
+        if keys.len() == 1 && !parent(bundle).is_empty() {
+            let folder = parent(bundle).to_owned();
+            for c in &mut out[first..] {
+                if c.scopes.is_empty() {
+                    c.scopes.push(folder.clone());
+                }
+            }
+        }
+    }
+    for yml in files.iter().filter(|f| file_name(f) == "project.yml") {
+        for name in project_yml_apps(&fs::read_to_string(repo.join(yml)).unwrap_or_default()) {
+            out.push(AppCandidate {
+                key: candidate_key(&name),
+                kind: "apple",
+                scopes: dir_named(&name).into_iter().collect(),
+                name,
+                declared_in: yml.clone(),
+            });
+        }
+    }
+    for gradle in files
+        .iter()
+        .filter(|f| matches!(file_name(f), "build.gradle" | "build.gradle.kts"))
+    {
+        let text = fs::read_to_string(repo.join(gradle)).unwrap_or_default();
+        if !(text.contains("com.android.application") || text.contains("android.application")) {
+            continue;
+        }
+        let module = parent(gradle);
+        let name = if module.is_empty() {
+            "app"
+        } else {
+            file_name(module)
+        };
+        // The conventional `app` module takes its app's name from the Gradle root project.
+        let mut key = candidate_key(name);
+        if key == "app" {
+            let mut dir = module.to_owned();
+            loop {
+                let named = ["settings.gradle.kts", "settings.gradle"]
+                    .iter()
+                    .find_map(|f| {
+                        let path = join(&dir, f);
+                        files
+                            .contains(&path)
+                            .then(|| {
+                                root_project_name(
+                                    &fs::read_to_string(repo.join(&path)).unwrap_or_default(),
+                                )
+                            })
+                            .flatten()
+                    });
+                if let Some(named) = named {
+                    key = candidate_key(&named);
+                    break;
+                }
+                if dir.is_empty() {
+                    break;
+                }
+                dir = parent(&dir).to_owned();
+            }
+        }
+        out.push(AppCandidate {
+            key,
+            kind: "android",
+            name: name.to_owned(),
+            declared_in: gradle.clone(),
+            scopes: vec![if module.is_empty() {
+                ".".to_owned()
+            } else {
+                module.to_owned()
+            }],
+        });
+    }
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// A release-tag glob (`<prefix>{version}`, as `log scan-git` reads it) from existing tags:
@@ -543,10 +857,7 @@ pub fn guess_tag_pattern(tags: &[String]) -> Option<(String, usize)> {
             .then_with(|| b.0.len().cmp(&a.0.len()))
             .then_with(|| b.0.cmp(&a.0))
     })?;
-    Some((
-        format!("{prefix}{{version}}"),
-        total,
-    ))
+    Some((format!("{prefix}{{version}}"), total))
 }
 
 fn git_tags(repo: &Path) -> Vec<String> {
@@ -740,6 +1051,102 @@ fn relative_inside(repo: &Path, path: &Path) -> Result<String> {
     Ok(parts.join("/"))
 }
 
+/// Refuse a path under the canonical `repo` when an existing component is a symbolic link,
+/// or when its nearest existing ancestor resolves outside the repository.
+fn check_no_symlinks(repo: &Path, relative: &str) -> Result<()> {
+    let mut current = repo.to_path_buf();
+    for part in relative.split('/').filter(|p| !p.is_empty()) {
+        current.push(part);
+        match fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return fail(format!(
+                    "refusing to write through the symbolic link {}",
+                    current.display()
+                ))
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    let mut probe = repo.join(relative);
+    while fs::symlink_metadata(&probe).is_err() {
+        if !probe.pop() {
+            break;
+        }
+    }
+    if !probe.canonicalize()?.starts_with(repo) {
+        return fail(format!(
+            "{} resolves outside the repository {}",
+            repo.join(relative).display(),
+            repo.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Create `relative` (a directory under the canonical `repo`) one component at a time,
+/// refusing symbolic links and non-directories on the way.
+fn create_dirs(repo: &Path, relative: &str) -> Result<()> {
+    let mut current = repo.to_path_buf();
+    for part in relative.split('/').filter(|p| !p.is_empty()) {
+        current.push(part);
+        match fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return fail(format!(
+                    "refusing to write through the symbolic link {}",
+                    current.display()
+                ))
+            }
+            Ok(meta) if meta.is_dir() => {}
+            Ok(_) => return fail(format!("{} is not a directory", current.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if let Err(e) = fs::create_dir(&current) {
+                    if e.kind() != std::io::ErrorKind::AlreadyExists {
+                        return Err(e.into());
+                    }
+                    let meta = fs::symlink_metadata(&current)?;
+                    if meta.file_type().is_symlink() || !meta.is_dir() {
+                        return fail(format!("{} changed while creating it", current.display()));
+                    }
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
+/// A repository-relative directory from a `--scope` argument.
+fn scope_path(repo: &Path, scope: &Path) -> Result<String> {
+    let joined = if scope.is_absolute() {
+        scope.to_path_buf()
+    } else {
+        repo.join(scope)
+    };
+    let mut normal = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::ParentDir => {
+                normal.pop();
+            }
+            Component::CurDir => {}
+            other => normal.push(other),
+        }
+    }
+    let relative = relative_inside(repo, &normal)?;
+    let canonical = normal
+        .canonicalize()
+        .map_err(|e| format!("--scope {}: {e}", scope.display()))?;
+    if !canonical.starts_with(repo) || !canonical.is_dir() {
+        return fail(format!(
+            "--scope {} must be a directory inside the repository",
+            scope.display()
+        ));
+    }
+    Ok(relative)
+}
+
 /// Scan the repository and plan the catalog directory, without writing.
 pub fn plan_init(options: &InitOptions) -> Result<InitPlan> {
     let repo = options
@@ -770,13 +1177,28 @@ pub fn plan_init(options: &InitOptions) -> Result<InitPlan> {
         }
     }
     let out = relative_inside(&repo, &normal)?;
+    check_no_symlinks(&repo, &out)?;
+    let mut scopes = Vec::new();
+    for scope in &options.scopes {
+        let scope = scope_path(&repo, scope)?;
+        if !scopes.contains(&scope) {
+            scopes.push(scope);
+        }
+    }
+    scopes.sort();
     let depth = out.split('/').filter(|p| !p.is_empty()).count();
     let repo_root = if depth == 0 {
         ".".to_owned()
     } else {
         vec![".."; depth].join("/")
     };
-    let platforms = detect(&repo)?;
+    let (scanned, extras) = scan(&repo, &scopes)?;
+    let platforms = detect_in(&repo, &scanned, &extras.bundles);
+    let candidates = if scopes.is_empty() {
+        app_candidates(&repo, &scanned, &extras.bundles)
+    } else {
+        Vec::new()
+    };
     let tags = git_tags(&repo);
     let guessed = guess_tag_pattern(&tags);
     let (tag_pattern, version_tags) = match guessed {
@@ -806,9 +1228,10 @@ pub fn plan_init(options: &InitOptions) -> Result<InitPlan> {
         ("AGENTS.md", Some(kit)),
     ] {
         let absolute = normal.join(name);
+        check_no_symlinks(&repo, &join(&out, name))?;
         files.push(PlannedFile {
             path: display(name),
-            exists: absolute.exists(),
+            exists: fs::symlink_metadata(&absolute).is_ok(),
             absolute,
             content,
         });
@@ -831,9 +1254,14 @@ pub fn plan_init(options: &InitOptions) -> Result<InitPlan> {
                             p.name
                         )),
                         Some(c) if !existing.source_globs.contains_key(&p.name) => notes.push(format!(
-                            "[source_globs.{}] for `{}`: all = {}, user_visible = {}, strings = {}, tests = {}",
+                            "[source_globs.{}] (relative to the detected root `{}`{}): all = {}, user_visible = {}, strings = {}, tests = {}",
                             p.name,
-                            c.root(),
+                            p.root,
+                            if c.root() == p.root {
+                                String::new()
+                            } else {
+                                format!("; configured root is `{}`", c.root())
+                            },
                             toml_list(&p.globs.all),
                             toml_list(&p.globs.user_visible),
                             toml_list(&p.globs.strings),
@@ -871,6 +1299,9 @@ pub fn plan_init(options: &InitOptions) -> Result<InitPlan> {
         files,
         adopted,
         notes,
+        scopes,
+        candidates,
+        repo,
     })
 }
 
@@ -885,8 +1316,12 @@ impl InitPlan {
                 toml_string(&self.repo_root)
             ),
             String::new(),
-            "Platforms:".into(),
         ];
+        if !self.scopes.is_empty() {
+            out.push(format!("Scopes: {}", self.scopes.join(", ")));
+            out.push(String::new());
+        }
+        out.push("Platforms:".into());
         if self.platforms.is_empty() {
             out.push("- none detected (add [platforms] by hand)".into());
         }
@@ -925,6 +1360,52 @@ impl InitPlan {
                     .into()
             }
         });
+        let mut groups: BTreeMap<&str, Vec<&AppCandidate>> = BTreeMap::new();
+        for c in &self.candidates {
+            groups.entry(c.key.as_str()).or_default().push(c);
+        }
+        if groups.len() > 1 {
+            out.extend([
+                String::new(),
+                format!(
+                    "Several apps found ({}); this catalog covers all of them. To catalog one app, rerun with --scope (paths relative to the repository):",
+                    groups.len()
+                ),
+            ]);
+            for (key, members) in &groups {
+                let described: Vec<String> = members
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            "{} ({} in {}{})",
+                            c.name,
+                            if c.kind == "apple" {
+                                "Apple target"
+                            } else {
+                                "Android module"
+                            },
+                            c.declared_in,
+                            if c.scopes.is_empty() {
+                                "; no source folder found by name".to_owned()
+                            } else {
+                                format!("; {}", c.scopes.join(", "))
+                            }
+                        )
+                    })
+                    .collect();
+                out.push(format!("- {key}: {}", described.join("; ")));
+                let scopes: BTreeSet<&String> = members.iter().flat_map(|c| &c.scopes).collect();
+                if !scopes.is_empty() {
+                    out.push(format!(
+                        "    concordance init --app {key}{}",
+                        scopes
+                            .iter()
+                            .map(|s| format!(" --scope {s}"))
+                            .collect::<String>()
+                    ));
+                }
+            }
+        }
         out.extend([String::new(), "Files:".into()]);
         if self.adopted {
             out.push(format!(
@@ -985,17 +1466,17 @@ impl InitPlan {
             return Ok(created);
         }
         for f in &self.files {
+            check_no_symlinks(&self.repo, &f.path)?;
             match &f.content {
                 None => {
-                    if !f.absolute.exists() {
-                        fs::create_dir_all(&f.absolute)?;
+                    if fs::symlink_metadata(&f.absolute).is_err() {
+                        create_dirs(&self.repo, &f.path)?;
                         created.push(f.path.clone());
                     }
                 }
                 Some(content) => {
-                    if let Some(parent) = f.absolute.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
+                    create_dirs(&self.repo, parent(&f.path))?;
+                    // create_new never follows a symbolic link at the final component.
                     match fs::OpenOptions::new()
                         .write(true)
                         .create_new(true)

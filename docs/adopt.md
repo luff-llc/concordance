@@ -161,10 +161,30 @@ Choices where the proposal left room:
   names test files for `inventory`; files matching `all` that look like tests by path
   convention count as tests too.
 - **Releases.** Tags are read only when `--repo` is the top level of its Git repository. The
-  pattern is the most common text before the version, escaped, followed by a version capture
-  (`^ios/v(\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.]+)?)$`). Without version tags, `[tracker]` is a
+  pattern is the most common text before the version followed by `{version}` (for example
+  `ios/v{version}`), the glob form `log scan-git` reads. Without version tags, `[tracker]` is a
   commented example. `init` does not append `released` facts itself; `log scan-git` does that
   from the saved pattern.
+- **Monorepos and `--scope`.** `init --scope PATH` (repeatable, relative to `--repo`, a
+  directory inside it) searches only those subtrees for sources, plus the marker files and
+  `*.xcodeproj` bundles in each scope's parent directories, so a shared project or Gradle
+  settings file above the scope still names the platform and its root. String-catalog globs
+  are limited to the top-level folders that hold them. Without `--scope`, `init` lists the apps
+  it finds when there is more than one: Apple application targets (from `project.pbxproj`,
+  quoted or not, and XcodeGen `project.yml`) and Android modules applying
+  `com.android.application`. Apps are grouped by name without platform suffixes (`TaupeWatch`
+  joins `Taupe`; an Android module called `app` takes the Gradle `rootProject.name`). Each
+  target's scope is the source folder named after it, plus extension targets whose names start
+  with it (`TaupeWidgets`); a project holding one app falls back to its own folder. `init` then
+  prints one `concordance init --app <name> --scope …` line per app and still writes the
+  whole-repository catalog.
+- **Symbolic links.** `init` refuses (before writing, and again while writing) when any
+  existing component of the catalog path or of a file it writes is a symbolic link, or when
+  the nearest existing ancestor resolves outside the repository. Directories are created one
+  component at a time and files with exclusive create, so nothing is written through a link.
+  Scans follow a symbolic link only when it is a file inside the root; directory links,
+  dangling links, links leaving the root, and fixed glob prefixes that resolve outside it are
+  skipped, and `inventory` lists them as skipped symbolic links.
 - **Rerunning.** When `catalog.toml` exists, `init` writes nothing, not even missing kit files;
   it lists what it would add (missing files, newly detected platforms, missing
   `[source_globs]`, a tag pattern). In a fresh catalog directory, files that already exist are
@@ -181,7 +201,9 @@ Choices where the proposal left room:
   from the source language only (`.xcstrings` minus stale keys, `en`/`Base` `.strings`,
   `res/values/strings.xml`, `en` or unlocalized i18n JSON); a string's areas are the areas
   whose source uses its key, matching `%@`/`%lld` placeholders to interpolations, or
-  `R.string.<name>`. Identifiers with interpolation or `+` concatenation are shown with `*`
+  `R.string.<name>`. Strings are keyed by file and key, so two modules' `title` strings stay
+  separate; a string's areas come from uses in its own module (the path before `src/`), or
+  from anywhere when its module has none. Identifiers with interpolation or `+` concatenation are shown with `*`
   and match entry identifiers as a glob. Citations: files by entry evidence on that platform
   (after `[path_prefixes]`), identifiers by `accessibility.identifier`, strings by `copy` or
   a copy detail's text or key. External platforms without `--root` are listed as unchecked.

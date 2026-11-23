@@ -51,6 +51,8 @@ To adopt Concordance in a repository, run `concordance init` (it detects platfor
 writes `spec/<app>/` with `catalog.toml`, an empty `catalog/`, `tracker/` and an agent kit),
 then `concordance inventory spec/<app> --uncatalogued` and `concordance plan-audit
 spec/<app>` for per-area audit briefs; `concordance guide spec/<app>` prints the agent kit.
+In a repository holding several apps, `init` lists them and suggests `--scope` runs (for
+example `concordance init --app taupe --scope apps/suite/Taupe --scope android/taupe-app`).
 See [Adopting](docs/adopt.md).
 
 Validation collects schema, identity, dependency, retirement, and evidence problems in
