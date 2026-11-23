@@ -871,3 +871,86 @@ fn cargo_virtual_workspaces_get_member_globs() {
     let value: serde_json::Value = serde_json::from_str(&json).expect("json");
     assert_eq!(value["platforms"][0]["summary"]["files"], 1, "{json}");
 }
+
+#[test]
+fn cargo_member_patterns_are_normalized() {
+    let temp = Temp::new();
+    let ws = temp.0.join("ws");
+    cargo_workspace(&ws);
+    fs::write(
+        ws.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"./crates/*/\", \"crates//tool\"]\n",
+    )
+    .expect("write");
+    let plan = stdout(&run_in(&ws, &["init", "--app", "ws", "--dry-run"]));
+    assert!(
+        plan.contains("    all = [\"crates/core/src/**/*.rs\", \"crates/tool/src/**/*.rs\"]"),
+        "{plan}"
+    );
+}
+
+#[test]
+fn plan_audit_refuses_a_sibling_checkout_under_a_shared_repo_root() {
+    let temp = Temp::new();
+    let parent = temp.0.join("parent");
+    let (a, b) = (parent.join("a"), parent.join("b"));
+    for checkout in [&a, &b] {
+        fs::create_dir_all(checkout).expect("mkdir");
+        let init = Command::new("git")
+            .arg("-C")
+            .arg(checkout)
+            .args(["init", "-q"])
+            .output()
+            .expect("git init");
+        assert!(init.status.success());
+    }
+    // Checkout `a` holds the app and its catalog; repo_root is the shared parent.
+    fs::rename(temp.repo().join("apple"), a.join("apple")).expect("move");
+    fs::rename(temp.repo().join("android"), a.join("android")).expect("move");
+    let catalog = a.join("spec/fixture");
+    fs::create_dir_all(catalog.join("catalog")).expect("mkdir");
+    fs::copy(
+        temp.0.join("spec/fixture/catalog/home.yaml"),
+        catalog.join("catalog/home.yaml"),
+    )
+    .expect("copy");
+    let text = fs::read_to_string(temp.0.join("spec/fixture/catalog.toml"))
+        .expect("read")
+        .replace("repo_root = \"../../repo\"", "repo_root = \"../../..\"")
+        .replace("android = \"android\"", "android = \"a/android\"")
+        .replace("ios = \"apple\"", "ios = \"a/apple\"");
+    fs::write(catalog.join("catalog.toml"), text).expect("write");
+
+    let sibling = b.join("tasks");
+    let refused = run_in(
+        &parent,
+        &[
+            "plan-audit",
+            "a/spec/fixture",
+            "--out",
+            sibling.to_str().expect("utf8"),
+        ],
+    );
+    assert!(!refused.status.success());
+    let message = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        message.contains("must be inside the catalog's Git checkout"),
+        "{message}"
+    );
+    assert!(!sibling.exists());
+
+    let own = a.join("briefs");
+    let allowed = run_in(
+        &parent,
+        &[
+            "plan-audit",
+            "a/spec/fixture",
+            "--area",
+            "home",
+            "--out",
+            own.to_str().expect("utf8"),
+        ],
+    );
+    assert!(stdout(&allowed).starts_with("1 created;"));
+    assert!(own.join("audit-ios-home.md").is_file());
+}

@@ -464,6 +464,16 @@ fn detect_web(files: &BTreeSet<String>) -> Option<DetectedPlatform> {
     })
 }
 
+/// A Cargo member pattern as a `/`-separated relative glob: no leading `./`, no trailing
+/// `/`, no empty or `.` components (`./crates//*/` → `crates/*`).
+fn normalize_member(pattern: &str) -> String {
+    pattern
+        .split('/')
+        .filter(|c| !c.is_empty() && *c != ".")
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Member directories of a Cargo workspace manifest (relative to its directory), matched
 /// against the crates found; `None` when the manifest has no `[workspace] members`.
 fn cargo_members(repo: &Path, root: &str, files: &BTreeSet<String>) -> Option<Vec<String>> {
@@ -477,7 +487,7 @@ fn cargo_members(repo: &Path, root: &str, files: &BTreeSet<String>) -> Option<Ve
             .map(|a| {
                 a.iter()
                     .filter_map(|v| v.as_str())
-                    .map(|m| m.trim_end_matches('/').to_owned())
+                    .map(normalize_member)
                     .collect()
             })
             .unwrap_or_default()
@@ -1298,7 +1308,21 @@ impl SafeDir {
         } else {
             std::env::current_dir()?.canonicalize()?.join(dir)
         };
-        let relative = relative_inside(&base, &absolute)?;
+        // The part of `dir` that names `base` may go through links above the base (such as
+        // `/var` → `/private/var`); take the shallowest ancestor that resolves to `base`, and
+        // check every component below it.
+        let anchor = absolute
+            .ancestors()
+            .filter(|a| a.canonicalize().is_ok_and(|c| c == base))
+            .last()
+            .ok_or_else(|| {
+                format!(
+                    "{} is not inside the repository {}",
+                    absolute.display(),
+                    base.display()
+                )
+            })?;
+        let relative = relative_inside(anchor, &absolute)?;
         check_no_symlinks(&base, &relative)?;
         Ok(Self { base, relative })
     }
