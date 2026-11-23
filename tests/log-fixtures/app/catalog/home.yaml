@@ -1,0 +1,19 @@
+- id: home.show-library
+  title: Show the library
+  summary: Show the library as a person expects.
+  surfaces: [main]
+  interactions:
+    - { trigger: Tap, result: It happens. }
+  states: [ready]
+  settings: []
+  data: { reads: [], writes: [] }
+  copy: []
+  accessibility: { label: "Show the library", identifier: home.show-library, notes: [] }
+  design: []
+  depends_on: []
+  impact: critical
+  platforms:
+    ios: { status: implemented }
+    android: { status: stale, previous_status: implemented, since_commit: abcdef1 }
+  acceptance:
+    - { given: a library, when: the person acts, then: it works }

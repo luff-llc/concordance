@@ -55,6 +55,9 @@ enum Command {
         #[arg(long)]
         today: Option<String>,
     },
+    /// Append facts to tracker/log.jsonl (reported, fixed, verified, reopened, uploaded,
+    /// released, pulled) or scan git for them; see docs/tracker.md ("Log").
+    Log(concordance::log::LogArgs),
     /// Join several app catalogs (suite.toml) into one view of releases, beats and shared features.
     Suite {
         suite: PathBuf,
@@ -692,6 +695,7 @@ fn run(cli: Cli) -> Result<()> {
             );
             write_or_check(&out, &content, check, "track", &regenerate)?;
         }
+        Command::Log(args) => concordance::log::run(args)?,
         Command::Suite {
             suite,
             out,

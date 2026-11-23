@@ -166,10 +166,20 @@ pub struct TrackerIssue {
 }
 
 /// Releases and issues in file order. Both are empty when no tracker files exist.
+/// With `tracker/log.jsonl`, issues and releases defined only by the log follow those from
+/// the files, and states are derived from the log (see `log_fold`).
 #[derive(Debug, Clone, Default)]
 pub struct Tracker {
     pub releases: Vec<Release>,
     pub issues: Vec<TrackerIssue>,
+    /// Valid log events in file order.
+    pub log: Vec<crate::log::Event>,
+    /// Issue ID -> what the log says beyond its state.
+    pub derived: BTreeMap<String, crate::log_fold::Derivation>,
+    /// Declared and derived states that disagree, and facts that could not be checked.
+    pub warnings: Vec<String>,
+    pub(crate) log_only_issues: BTreeSet<String>,
+    pub(crate) log_only_releases: BTreeSet<String>,
 }
 impl Tracker {
     pub fn release(&self, id: &str) -> Option<&Release> {
@@ -211,7 +221,7 @@ pub fn calendar_day(text: &str) -> Option<i64> {
 }
 
 /// `bug.` or `request.` matching the kind, then lowercase letters, numbers and hyphens.
-fn valid_issue_id(id: &str, kind: IssueKind) -> bool {
+pub(crate) fn valid_issue_id(id: &str, kind: IssueKind) -> bool {
     id.strip_prefix(kind.as_str())
         .and_then(|rest| rest.strip_prefix('.'))
         .is_some_and(|rest| {
@@ -324,6 +334,14 @@ impl Catalog {
                 report,
             );
         }
+        if let Some(config) = &self.config.tracker {
+            for pattern in config.tag_pattern.patterns() {
+                if let Err(error) = crate::scan_git::tag_regex(pattern) {
+                    report.error("config", "", "", "catalog.toml", &error.to_string());
+                }
+            }
+        }
+        self.load_log(report);
         self.check_tracker(report);
     }
 
@@ -347,7 +365,11 @@ impl Catalog {
         let issue_ids: BTreeSet<&str> = tracker.issues.iter().map(|i| i.id.as_str()).collect();
 
         let mut seen = BTreeSet::new();
+        // Log-only items were checked line by line when the log was loaded.
         for release in &tracker.releases {
+            if tracker.log_only_releases.contains(&release.id) {
+                continue;
+            }
             let id = release.id.as_str();
             let file = RELEASES_FILE;
             if id.trim().is_empty() {
@@ -414,6 +436,9 @@ impl Catalog {
 
         let mut seen = BTreeSet::new();
         for issue in &tracker.issues {
+            if tracker.log_only_issues.contains(&issue.id) {
+                continue;
+            }
             let id = issue.id.as_str();
             let file = ISSUES_FILE;
             if !valid_issue_id(id, issue.kind) {

@@ -1,0 +1,9 @@
+- id: "1.0.0"
+  state: released
+  released: 2026-10-01
+- id: "1.1.0"
+  state: candidate
+  title: Fixes
+  window: { from: 2026-11-01, to: 2026-11-30 }
+  builds: { ios: "40" }
+  carries: [bug.home-blank]

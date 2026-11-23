@@ -1,0 +1,12 @@
+# The catalog lives at spec/app inside the test repository.
+repo_root = "../.."
+
+[platforms]
+ios = "ios"
+android = "android"
+
+[report]
+title = "Logged"
+
+[tracker]
+tag_pattern = ["ios/v{version}", "app-{version}"]

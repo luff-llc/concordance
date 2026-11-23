@@ -492,6 +492,9 @@ pub struct Config {
     /// One shared marketing version that every platform must ship.
     #[serde(default)]
     pub version: Option<VersionConfig>,
+    /// `[tracker]`: release tag patterns for `log scan-git`.
+    #[serde(default)]
+    pub tracker: Option<crate::log::TrackerConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -10,6 +10,10 @@ pub use continuous::{
     SyncOptions, SyncReport,
 };
 pub use version::{VersionReport, VersionResult};
+pub mod log;
+mod log_fold;
+pub use log_fold::Derivation;
+mod scan_git;
 mod set;
 mod suite;
 mod track;
