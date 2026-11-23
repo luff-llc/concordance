@@ -630,7 +630,7 @@ fn scan(repo: &Path, scopes: &[String]) -> Result<(BTreeSet<String>, WalkExtras)
 /// Platforms found in a repository (or in its scopes), in name order.
 pub fn detect(repo: &Path, scopes: &[String]) -> Result<Vec<DetectedPlatform>> {
     let (files, extras) = scan(repo, scopes)?;
-    Ok(detect_in(repo, &files, &extras.bundles, scopes))
+    detect_in(repo, &files, &extras.bundles, scopes)
 }
 
 fn detect_in(
@@ -638,7 +638,7 @@ fn detect_in(
     files: &BTreeSet<String>,
     bundles: &BTreeSet<String>,
     scopes: &[String],
-) -> Vec<DetectedPlatform> {
+) -> Result<Vec<DetectedPlatform>> {
     let mut platforms: Vec<DetectedPlatform> = detect_apple(repo, files, bundles)
         .into_iter()
         .chain(detect_android(repo, files))
@@ -647,11 +647,13 @@ fn detect_in(
         .collect();
     for platform in &mut platforms {
         narrow_to_scopes(platform, scopes, files);
-        platform.user_visible_files = inventory_count(platform, files);
     }
     platforms.retain(|p| !p.globs.all.is_empty() || !p.globs.user_visible.is_empty());
+    for platform in &mut platforms {
+        platform.user_visible_files = inventory_count(repo, platform)?;
+    }
     platforms.sort_by(|a, b| a.name.cmp(&b.name));
-    platforms
+    Ok(platforms)
 }
 
 fn platform_dir(platform: &DetectedPlatform) -> &str {
@@ -705,10 +707,21 @@ fn narrow_to_scopes(platform: &mut DetectedPlatform, scopes: &[String], files: &
                         pattern.clone()
                     } else if inside(&prefix, scope) {
                         let tail = under(&prefix, pattern);
-                        match tail.strip_prefix("**/") {
-                            Some(rest) => format!("{scope}/**/{rest}"),
-                            None => format!("{scope}/**/{}", file_name(pattern)),
+                        let mut candidates = match tail.strip_prefix("**/") {
+                            Some(rest) => {
+                                let mut c = vec![format!("{scope}/**/{rest}")];
+                                c.extend(anchored(scope, rest));
+                                c
+                            }
+                            None => vec![format!("{scope}/**/{}", file_name(pattern))],
+                        };
+                        candidates.retain(|c| any_match(c));
+                        for c in candidates {
+                            if !narrowed.contains(&c) {
+                                narrowed.push(c);
+                            }
                         }
+                        continue;
                     } else {
                         continue;
                     };
@@ -721,27 +734,43 @@ fn narrow_to_scopes(platform: &mut DetectedPlatform, scopes: &[String], files: &
     }
 }
 
+/// For a `**/<literals>/<remainder>` glob, anchor at a scope that already contains the
+/// literal segments: scope `src/i18n` with `i18n/**/*.json` gives `src/i18n/**/*.json`.
+/// When the literals end before the scope does, the remainder must start with `**/`.
+fn anchored(scope: &str, rest: &str) -> Option<String> {
+    let parts: Vec<&str> = rest.split('/').collect();
+    let literals: Vec<&str> = parts
+        .iter()
+        .take(parts.len().saturating_sub(1))
+        .take_while(|p| !p.contains(['*', '?']))
+        .copied()
+        .collect();
+    if literals.is_empty() {
+        return None;
+    }
+    let remainder = parts[literals.len()..].join("/");
+    let components: Vec<&str> = scope.split('/').collect();
+    let end = (literals.len()..=components.len())
+        .rev()
+        .find(|&end| components[end - literals.len()..end] == literals[..])?;
+    if end == components.len() || remainder.starts_with("**/") {
+        Some(format!("{scope}/{remainder}"))
+    } else {
+        None
+    }
+}
+
 /// User-visible source files exactly as `inventory` counts them: matching `user_visible`
 /// (else `all`), not a string catalog, not a test.
-fn inventory_count(platform: &DetectedPlatform, files: &BTreeSet<String>) -> usize {
-    let root = platform_dir(platform);
+fn inventory_count(repo: &Path, platform: &DetectedPlatform) -> Result<usize> {
     let g = &platform.globs;
-    let sources = if g.user_visible.is_empty() {
-        &g.all
-    } else {
-        &g.user_visible
-    };
-    let hit = |globs: &[String], f: &str| {
-        globs
-            .iter()
-            .any(|p| crate::drift::glob(p.as_bytes(), f.as_bytes()))
-    };
-    files
-        .iter()
-        .filter(|f| inside(root, f))
-        .map(|f| under(root, f))
-        .filter(|f| hit(sources, f) && !hit(&g.strings, f) && !hit(&g.tests, f) && !is_test_file(f))
-        .count()
+    crate::inventory::count_sources(
+        &repo.join(platform_dir(platform)),
+        &g.all,
+        &g.user_visible,
+        &g.strings,
+        &g.tests,
+    )
 }
 
 fn candidate_key(name: &str) -> String {
@@ -897,6 +926,7 @@ fn app_candidates(
             });
         }
     }
+    let apply_false = regex::Regex::new(r"\bapply\s+false\b").ok();
     for gradle in files
         .iter()
         .filter(|f| matches!(file_name(f), "build.gradle" | "build.gradle.kts"))
@@ -909,7 +939,7 @@ fn app_candidates(
             !line.starts_with("//")
                 && (line.contains("com.android.application")
                     || line.contains("android.application"))
-                && !line.contains("apply false")
+                && !apply_false.as_ref().is_some_and(|re| re.is_match(line))
         });
         if !applies {
             continue;
@@ -1317,7 +1347,7 @@ pub fn plan_init(options: &InitOptions) -> Result<InitPlan> {
         vec![".."; depth].join("/")
     };
     let (scanned, extras) = scan(&repo, &scopes)?;
-    let platforms = detect_in(&repo, &scanned, &extras.bundles, &scopes);
+    let platforms = detect_in(&repo, &scanned, &extras.bundles, &scopes)?;
     let candidates = if scopes.is_empty() {
         app_candidates(&repo, &scanned, &extras.bundles)
     } else {

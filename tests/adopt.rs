@@ -476,7 +476,7 @@ fn init_lists_several_apps_with_scope_suggestions() {
     // A root build file that declares the Android plugin without applying it is no app.
     fs::write(
         repo.join("android/build.gradle.kts"),
-        "plugins {\n    id(\"com.android.application\") version \"8.7.0\" apply false\n}\n",
+        "plugins {\n    id(\"com.android.application\") version \"8.7.0\" apply  false\n}\n",
     )
     .expect("write");
     let out = stdout(&run_in(&repo, &["init", "--app", "all", "--dry-run"]));
@@ -625,4 +625,96 @@ fn whole_repository_counts_match_inventory() {
         })
         .collect();
     assert_eq!(counted, planned_counts(&plan));
+}
+
+#[test]
+fn narrow_web_scopes_keep_string_catalogs_anchored() {
+    let temp = Temp::new();
+    let repo = temp.repo();
+    let web = repo.join("web");
+    fs::create_dir_all(web.join("src/components")).expect("mkdir");
+    fs::create_dir_all(web.join("src/i18n")).expect("mkdir");
+    fs::create_dir_all(web.join("src/pages")).expect("mkdir");
+    fs::write(web.join("package.json"), "{\"name\": \"web\"}\n").expect("write");
+    fs::write(
+        web.join("src/components/Button.tsx"),
+        "export const Button = () => <button data-testid=\"web.button\">{t('button.save')}</button>;\n",
+    )
+    .expect("write");
+    fs::write(
+        web.join("src/pages/Home.tsx"),
+        "export const Home = () => null;\n",
+    )
+    .expect("write");
+    fs::write(
+        web.join("src/i18n/en.json"),
+        "{\"button\": {\"save\": \"Save\"}}\n",
+    )
+    .expect("write");
+    let plan = stdout(&run_in(
+        &repo,
+        &[
+            "init",
+            "--app",
+            "web",
+            "--scope",
+            "web/src/components",
+            "--scope",
+            "web/src/i18n",
+        ],
+    ));
+    let toml = fs::read_to_string(repo.join("spec/web/catalog.toml")).expect("catalog");
+    assert!(
+        toml.contains("all = [\"src/components/**/*.tsx\"]"),
+        "{toml}"
+    );
+    assert!(
+        toml.contains("strings = [\"src/i18n/**/*.json\"]"),
+        "{toml}"
+    );
+    let json = stdout(&run_in(
+        &repo,
+        &["inventory", "spec/web", "--format", "json"],
+    ));
+    let value: serde_json::Value = serde_json::from_str(&json).expect("json");
+    let web = &value["platforms"][0];
+    assert_eq!(web["platform"], "web");
+    assert_eq!(web["summary"]["strings"], 1, "{json}");
+    assert_eq!(web["summary"]["identifiers"], 1, "{json}");
+    assert_eq!(planned_counts(&plan), vec![("web".to_owned(), 1)], "{plan}");
+    assert_eq!(web["summary"]["files"], 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn init_counts_skip_file_links_that_leave_the_platform_root() {
+    use std::os::unix::fs::symlink;
+    let temp = Temp::new();
+    let repo = temp.repo();
+    // Inside the repository, outside the `apple` platform root.
+    fs::create_dir_all(repo.join("shared")).expect("mkdir");
+    fs::write(repo.join("shared/Linked.swift"), "import SwiftUI\n").expect("write");
+    symlink(
+        repo.join("shared/Linked.swift"),
+        repo.join("apple/Fixture/Home/Linked.swift"),
+    )
+    .expect("symlink");
+    let plan = stdout(&run_in(&repo, &["init", "--app", "fixture"]));
+    let planned = planned_counts(&plan);
+    assert!(planned.contains(&("ios".to_owned(), 4)), "{plan}");
+    let json = stdout(&run_in(
+        &repo,
+        &["inventory", "spec/fixture", "--format", "json"],
+    ));
+    let value: serde_json::Value = serde_json::from_str(&json).expect("json");
+    let ios = value["platforms"]
+        .as_array()
+        .expect("platforms")
+        .iter()
+        .find(|p| p["platform"] == "ios")
+        .expect("ios")
+        .clone();
+    assert_eq!(ios["summary"]["files"], 4);
+    let skipped = ios["skipped_symlinks"].to_string();
+    assert!(skipped.contains("Fixture/Home/Linked.swift"), "{skipped}");
 }

@@ -537,10 +537,22 @@ struct Globs {
 impl Globs {
     fn of(catalog: &Catalog, platform: &str) -> Self {
         let configured = catalog.config.source_globs.get(platform);
-        let all: Vec<String> = configured.map(|g| g.all().to_vec()).unwrap_or_default();
-        let user_visible: Vec<String> = configured
-            .map(|g| g.user_visible().to_vec())
-            .unwrap_or_default();
+        Self::from_lists(
+            configured.map(|g| g.all().to_vec()).unwrap_or_default(),
+            configured
+                .map(|g| g.user_visible().to_vec())
+                .unwrap_or_default(),
+            configured.map(|g| g.strings().to_vec()).unwrap_or_default(),
+            configured.map(|g| g.tests().to_vec()).unwrap_or_default(),
+        )
+    }
+    /// The globs in effect for these `[source_globs]` lists, with inventory's defaults.
+    fn from_lists(
+        all: Vec<String>,
+        user_visible: Vec<String>,
+        strings: Vec<String>,
+        tests: Vec<String>,
+    ) -> Self {
         let all = if all.is_empty() && user_visible.is_empty() {
             SOURCE_EXTENSIONS
                 .iter()
@@ -549,8 +561,8 @@ impl Globs {
         } else {
             all
         };
-        let strings = match configured.map(|g| g.strings().to_vec()) {
-            Some(s) if !s.is_empty() => s,
+        let strings = match strings {
+            s if !s.is_empty() => s,
             _ => vec![
                 "**/*.xcstrings".into(),
                 "**/Localizable.strings".into(),
@@ -565,7 +577,7 @@ impl Globs {
             },
             all,
             strings,
-            tests: configured.map(|g| g.tests().to_vec()).unwrap_or_default(),
+            tests,
         }
     }
     fn prefixes(&self) -> Vec<String> {
@@ -692,6 +704,90 @@ fn group_key(prefix: &str, path: &str) -> String {
     }
 }
 
+/// A platform's files, sorted into inventory's kinds.
+struct Classified {
+    /// User-visible source path -> group key.
+    sources: BTreeMap<String, String>,
+    /// Test path -> group key.
+    tests: BTreeMap<String, String>,
+    string_files: Vec<String>,
+    /// Every non-test source-like file (read for string usages).
+    scanned: Vec<String>,
+    extras: WalkExtras,
+}
+
+/// Walk a platform root and classify its files: string catalogs, then tests, then sources.
+/// `init` counts with this too, so its numbers are inventory's.
+fn classify(root: &Path, globs: &Globs) -> Result<Classified> {
+    let mut paths = BTreeSet::new();
+    let mut extras = WalkExtras::default();
+    for prefix in globs.prefixes() {
+        walk(root, &prefix, &mut paths, &mut extras)?;
+    }
+    // Classify: string catalogs, tests, then user-visible sources.
+    let mut sources: BTreeMap<String, String> = BTreeMap::new();
+    let mut tests: BTreeMap<String, String> = BTreeMap::new();
+    let mut string_files = Vec::new();
+    let mut scanned = Vec::new(); // every source-like file read for string usages
+    for path in &paths {
+        if matches(&globs.strings, path).is_some() {
+            string_files.push(path.clone());
+            continue;
+        }
+        if let Some(index) = matches(&globs.tests, path) {
+            tests.insert(
+                path.clone(),
+                group_key(&static_prefix(&globs.tests[index]), path),
+            );
+            continue;
+        }
+        let in_sources = matches(&globs.sources, path);
+        let in_all = matches(&globs.all, path);
+        if in_sources.is_none() && in_all.is_none() {
+            continue;
+        }
+        if is_test_file(path) {
+            let pattern = in_all
+                .map(|i| &globs.all[i])
+                .or_else(|| in_sources.map(|i| &globs.sources[i]));
+            let prefix = pattern.map(|g| static_prefix(g)).unwrap_or_default();
+            tests.insert(path.clone(), group_key(&prefix, path));
+            continue;
+        }
+        scanned.push(path.clone());
+        if let Some(index) = in_sources {
+            sources.insert(
+                path.clone(),
+                group_key(&static_prefix(&globs.sources[index]), path),
+            );
+        }
+    }
+    Ok(Classified {
+        sources,
+        tests,
+        string_files,
+        scanned,
+        extras,
+    })
+}
+
+/// The number of user-visible source files `inventory` would list for these globs.
+pub(crate) fn count_sources(
+    root: &Path,
+    all: &[String],
+    user_visible: &[String],
+    strings: &[String],
+    tests: &[String],
+) -> Result<usize> {
+    let globs = Globs::from_lists(
+        all.to_vec(),
+        user_visible.to_vec(),
+        strings.to_vec(),
+        tests.to_vec(),
+    );
+    Ok(classify(root, &globs)?.sources.len())
+}
+
 impl Catalog {
     /// Inventory one platform (or every configured platform).
     pub fn inventory(&self, options: &RootOptions, platform: Option<&str>) -> Result<Inventory> {
@@ -747,49 +843,13 @@ impl Catalog {
         root: &Path,
     ) -> Result<PlatformInventory> {
         let globs = Globs::of(self, name);
-        let mut paths = BTreeSet::new();
-        let mut extras = WalkExtras::default();
-        for prefix in globs.prefixes() {
-            walk(root, &prefix, &mut paths, &mut extras)?;
-        }
-        // Classify: string catalogs, tests, then user-visible sources.
-        let mut sources: BTreeMap<String, String> = BTreeMap::new();
-        let mut tests: BTreeMap<String, String> = BTreeMap::new();
-        let mut string_files = Vec::new();
-        let mut scanned = Vec::new(); // every source-like file read for string usages
-        for path in &paths {
-            if matches(&globs.strings, path).is_some() {
-                string_files.push(path.clone());
-                continue;
-            }
-            if let Some(index) = matches(&globs.tests, path) {
-                tests.insert(
-                    path.clone(),
-                    group_key(&static_prefix(&globs.tests[index]), path),
-                );
-                continue;
-            }
-            let in_sources = matches(&globs.sources, path);
-            let in_all = matches(&globs.all, path);
-            if in_sources.is_none() && in_all.is_none() {
-                continue;
-            }
-            if is_test_file(path) {
-                let pattern = in_all
-                    .map(|i| &globs.all[i])
-                    .or_else(|| in_sources.map(|i| &globs.sources[i]));
-                let prefix = pattern.map(|g| static_prefix(g)).unwrap_or_default();
-                tests.insert(path.clone(), group_key(&prefix, path));
-                continue;
-            }
-            scanned.push(path.clone());
-            if let Some(index) = in_sources {
-                sources.insert(
-                    path.clone(),
-                    group_key(&static_prefix(&globs.sources[index]), path),
-                );
-            }
-        }
+        let Classified {
+            sources,
+            tests,
+            string_files,
+            scanned,
+            extras,
+        } = classify(root, &globs)?;
         let source_areas = areas_for(&sources);
         let mut test_areas = areas_for(&tests);
         // A test named after a source area (`HomeUITests.swift`) belongs to that area.
