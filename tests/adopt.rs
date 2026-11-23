@@ -718,3 +718,58 @@ fn init_counts_skip_file_links_that_leave_the_platform_root() {
     let skipped = ios["skipped_symlinks"].to_string();
     assert!(skipped.contains("Fixture/Home/Linked.swift"), "{skipped}");
 }
+
+#[cfg(unix)]
+#[test]
+fn plan_audit_refuses_symbolic_links_and_outside_paths() {
+    use std::os::unix::fs::symlink;
+    let temp = Temp::new();
+    let outside = temp.0.join("outside");
+    fs::create_dir(&outside).expect("mkdir");
+    symlink(&outside, temp.0.join("spec/fixture/tasks")).expect("symlink");
+    let refused = run_in(&temp.0, &["plan-audit", "spec/fixture"]);
+    assert!(!refused.status.success());
+    let message = String::from_utf8_lossy(&refused.stderr);
+    assert!(message.contains("symbolic link"), "{message}");
+    assert_eq!(fs::read_dir(&outside).expect("read").count(), 0);
+    // An output directory outside the catalog's repository is refused too.
+    let elsewhere = run_in(
+        &temp.0,
+        &["plan-audit", "spec/fixture", "--out", "outside/briefs"],
+    );
+    assert!(!elsewhere.status.success());
+    assert!(!outside.join("briefs").exists());
+}
+
+#[test]
+fn explicit_empty_strings_mean_none() {
+    let temp = Temp::new();
+    let repo = temp.repo();
+    let plan = stdout(&run_in(
+        &repo,
+        &[
+            "init",
+            "--app",
+            "kotlin",
+            "--scope",
+            "android/app/src/main/kotlin",
+        ],
+    ));
+    let toml = fs::read_to_string(repo.join("spec/kotlin/catalog.toml")).expect("catalog");
+    assert!(toml.contains("strings = []"), "{toml}");
+    let json = stdout(&run_in(
+        &repo,
+        &["inventory", "spec/kotlin", "--format", "json"],
+    ));
+    let value: serde_json::Value = serde_json::from_str(&json).expect("json");
+    let android = &value["platforms"][0];
+    assert_eq!(android["platform"], "android");
+    assert_eq!(android["summary"]["strings"], 0, "{json}");
+    assert_eq!(
+        planned_counts(&plan),
+        vec![(
+            "android".to_owned(),
+            android["summary"]["files"].as_u64().unwrap_or_default() as usize
+        )]
+    );
+}
