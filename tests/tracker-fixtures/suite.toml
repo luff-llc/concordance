@@ -1,0 +1,17 @@
+title = "LUFF suite"
+
+[apps.taupe]
+catalog = "taupe"
+label = "Taupe"
+
+[apps.marginalia]
+catalog = "marginalia"
+
+[[beats]]
+date = 2026-09-01
+title = "Past beat"
+
+[[beats]]
+date = 2027-06-07
+title = "WWDC 2027"
+why = "New OS features announced; plan adoption for September."

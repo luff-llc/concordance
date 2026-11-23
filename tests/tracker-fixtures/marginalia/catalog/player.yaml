@@ -1,0 +1,19 @@
+- id: player.skip-forward
+  title: Skip forward
+  summary: Skip forward as a person expects.
+  surfaces: [main]
+  interactions:
+    - { trigger: Tap, result: It happens. }
+  states: [ready]
+  settings: []
+  data: { reads: [], writes: [] }
+  copy: []
+  accessibility: { label: "Skip forward", identifier: player.skip-forward, notes: [] }
+  design: []
+  depends_on: []
+  impact: high
+  platforms:
+    ios: { status: implemented }
+  acceptance:
+    - { given: a library, when: the person acts, then: it works }
+  shared_with: ["taupe:player.skip-forward"]

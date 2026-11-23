@@ -1,0 +1,57 @@
+- id: bug.home-recovery-blank
+  kind: bug
+  title: Home stays blank after recovery
+  summary: After restoring a library, Home shows nothing until relaunch.
+  state: fixed
+  impact: high
+  reported: 2026-11-21
+  source: [device]
+  platforms: [ios]
+  entries: [home.show-library]
+  release: "1.2.0"
+  evidence: []
+  duplicate_of: null
+  notes: []
+- id: bug.crash-on-open
+  kind: bug
+  title: Crash when opening an episode
+  state: in-progress
+  impact: critical
+  reported: 2026-11-10
+  platforms: [android]
+  release: "1.2.1"
+- id: bug.old-thing
+  kind: bug
+  title: Old layout glitch
+  state: fixed
+  impact: medium
+  reported: 2026-09-01
+  release: "1.1.0"
+  evidence: ["test-layout 3/3"]
+- id: bug.verified-one
+  kind: bug
+  title: Verified fix
+  state: verified
+  impact: low
+  release: "1.1.0"
+  evidence: ["journey-7"]
+- id: bug.dupe
+  kind: bug
+  title: Crash on open (again)
+  state: duplicate
+  duplicate_of: bug.crash-on-open
+- id: bug.small-glitch
+  kind: bug
+  title: Small glitch
+  impact: high
+  reported: 2026-11-02
+- id: request.reuse-identity
+  kind: request
+  title: Reuse an existing identity
+  state: planned
+  impact: medium
+  reported: 2026-11-01
+  entries: [sync.join-by-qr]
+- id: request.no-impact
+  kind: request
+  title: Unrated request

@@ -1,0 +1,4 @@
+- id: "5.0"
+  state: planned
+  title: Reading room
+  window: { from: 2027-04-20, to: 2027-05-30 }
