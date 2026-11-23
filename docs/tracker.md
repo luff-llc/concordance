@@ -114,13 +114,23 @@ issue kind comes from the subject's prefix (`bug.` or `request.`). `id` is an FN
 hash (16 hex digits) of the kind, the subject and the fields that make the fact distinct:
 nothing more for `reported` (one report per issue); `commit` for `fixed`; `by`, `evidence`
 and `commit` for `verified`; `reason` and `at` for `reopened`; `platform` and `build` for
-`uploaded`; `platform` for `released`; `reason` for `pulled`. Appending an event whose id
-is already in the log does nothing and prints `already recorded`.
+`uploaded`; `platform` and `commit` (or its absence) for `released`; `reason` for
+`pulled`. Appending an event whose id is already in the log does nothing and prints
+`already recorded`.
 
 Parsing is strict: unknown fields, missing or forbidden fields for the kind, malformed
-times and dates, blank lines, an `id` that does not match the content, duplicate ids, and
-references to unknown issues, entries or platforms are errors that name the line
-(`tracker/log.jsonl:7`). The `log` commands refuse to append while the log has errors.
+times and dates, an `id` that does not match the content, and references to unknown
+issues, entries or platforms are errors that name the line (`tracker/log.jsonl:7`). The
+`log` commands refuse to append while the log has errors. Blank lines are ignored and
+never written. A repeated id keeps its first line: an identical repeat is silent, and a
+repeat whose content differs is a warning (never an error), so writers racing to record
+the same fact cannot make the log unloadable.
+
+Writers queue their events, then take `tracker/log.jsonl.lock` (created exclusively;
+waiting up to 10 seconds; a lock older than 60 seconds is broken with a warning),
+re-read the log under the lock, and append every event not yet recorded in one write.
+`scan-git` writes all it found at once. They refuse to write when `tracker/`, the log or
+the lock is a symlink, or when `tracker/` resolves outside the catalog directory.
 
 ### Commands
 
@@ -141,6 +151,9 @@ it), `--by WHO` (default: `$CONCORDANCE_ACTOR`, then `git config user.name` in t
 repository, then `unknown`; `verified` requires it) and `--at` (UTC time or date; default
 now). Commits given to `fixed`, `verified`, `uploaded` and `released` are expanded to full
 hashes when git knows them. `released` without `--date` uses the day of `--at`.
+`verified` without `--commit` records the issue's current fix commit (the latest since
+the last reopen), so the same evidence after a new fix is a new fact while rerunning it
+for the same fix is a no-op.
 
 `report` prints the issue id: `bug.` or `request.` plus a slug of the title (lowercase
 ASCII letters and digits joined by hyphens, at most 48 characters), suffixed `-2`, `-3`, …
@@ -150,7 +163,9 @@ no-op, and reporting an issues.yaml title adds a report for it.
 
 ### `scan-git`
 
-Reads commits (oldest first; `REF..HEAD` with `--since`) in the catalog's `repo_root`
+Reads commits (oldest first; with `--since`, `REF..HEAD`, where REF is resolved with
+`git rev-parse --verify --end-of-options REF^{commit}` and refs that look like options are
+refused) in the catalog's `repo_root`
 (or `--repo`) and appends what their trailers state, with the commit's author as `by` and
 its commit time as `at`:
 
@@ -176,8 +191,10 @@ tag_pattern = ["ios/v{version}", "taupe-{version}"]   # or one string
 ```
 
 Each pattern has exactly one `{version}` (which must start with a digit); `*` matches
-within one path segment. With `--since`, tags whose commit the ref already contains are
-skipped. Rescanning records nothing new.
+within one path segment. Tags are read by full refname (`refs/tags/…`), so a branch with
+the same short name cannot stand in. With `--since`, tags whose commit the ref already
+contains are skipped; in a shallow clone, where git cannot always tell, such a tag is
+scanned with a warning. Rescanning records nothing new.
 
 ### Derived states
 
@@ -185,14 +202,22 @@ skipped. Rescanning records nothing new.
 
 - **Issues** reported only in the log appear beside issues.yaml ones (`reported` is the
   day of the report). An issue is **open** until a fix is recorded, **fixed** with a fix
-  commit, and **verified** when someone other than every fixer records a verification;
-  the verifying evidence joins the issue's evidence. A fixer's own check does not count:
-  the issue stays fixed and Unverified lists it as `self-verified by WHO`. **Shipped** is
-  shown instead of verified when a released release's `released` commit contains a fix
-  commit (`git merge-base --is-ancestor`); an unverified fix that shipped is listed in
-  Unverified with `release R has shipped`. **Reopened** discards earlier fixes and
-  verifications. When git is missing or a commit is unknown, shipping is not checked and a
-  warning says so.
+  commit, and **verified** when someone other than every fixer records a verification of
+  the latest fix; the verifying evidence joins the issue's evidence. A verification is of
+  the latest fix when it is recorded no earlier than that fix, or its `commit` is the fix
+  commit or contains it. A fixer's own check does not count: the issue stays fixed and
+  Unverified lists it as `self-verified by WHO`; another person's earlier check is listed
+  as `checked before the latest fix by WHO`. **Shipped** is shown instead of verified when
+  a released release's commit (from any `released` event that has one) contains the
+  latest fix commit (`git merge-base --is-ancestor`). **Reopened** discards earlier fixes
+  and verifications.
+- **Unverified and shipping**: a fixed issue lists `release R has shipped` only when git
+  confirms R's commit contains the fix. A released release the plan links to the issue
+  (its `release`, or one that carries it), or one git could not answer for, is listed as
+  `release R is out; containment unknown`, unless git says the fix is not in it. The plan
+  alone is never proof. When git is missing, a commit is unknown, or the clone is shallow
+  (where "not an ancestor" may only mean cut-off history), containment is unknown and a
+  warning says why.
 - **Releases**: uploaded builds replace the platform's build from releases.yaml; the last
   `released` or `pulled` event sets the state, and the earliest `released` date becomes
   `released`. A release with uploads only is a candidate. Releases only in the log appear
@@ -237,8 +262,10 @@ window has ended without release are marked overdue and upcoming beats are liste
 3. **Bugs** and **Requests**: open ones (not verified, closed, wont-fix or duplicate),
    ordered by impact, then reported date, then ID.
 4. **Unverified**: issues marked `fixed` without evidence, and fixed issues whose
-   release has shipped while they stay unverified. A shipped release is the issue's own
-   `release` or any `released` release that carries it; pulled releases do not count.
+   release is out while they stay unverified. A release is the issue's own `release` or
+   any `released` release that carries it; pulled releases do not count. Without a log
+   and git to prove the fix is in it, the reason reads `release R is out; containment
+   unknown`; `release R has shipped` needs git's confirmation (see Log).
 5. **Gaps**: for each platform, counts of missing, partial and stale entries and the
    first five in work-queue order. When the dependency-ordered work queue cannot be
    built (for example a dependency has no record on that platform), the list falls back

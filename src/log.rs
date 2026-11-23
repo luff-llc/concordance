@@ -142,8 +142,9 @@ impl Event {
 
     /// FNV-1a 64 over the kind, the subject and the fields that make this fact distinct:
     /// the commit of a fix; who verified, the evidence and commit of a verification; the
-    /// reason and time of a reopen; platform and build of an upload; the platform of a
-    /// release; the reason for a pull. A report is one per issue.
+    /// reason and time of a reopen; platform and build of an upload; the platform and
+    /// commit (or its absence) of a release; the reason for a pull. A report is one per
+    /// issue.
     pub fn stable_id(&self) -> String {
         let mut parts: Vec<String> = vec![self.kind.as_str().into(), self.subject.clone()];
         let opt = |v: &Option<String>| v.clone().unwrap_or_default();
@@ -163,7 +164,10 @@ impl Event {
                 parts.push(opt(&self.platform));
                 parts.push(opt(&self.build));
             }
-            EventKind::Released => parts.push(opt(&self.platform)),
+            EventKind::Released => {
+                parts.push(opt(&self.platform));
+                parts.push(opt(&self.commit));
+            }
             EventKind::Pulled => parts.push(opt(&self.reason)),
         }
         format!("{:016x}", fnv1a(parts.join("\u{1f}").as_bytes()))
@@ -375,45 +379,58 @@ pub type NumberedEvent = (usize, Event);
 /// A line number and what is wrong with that line.
 pub type LineError = (usize, String);
 
-/// Parse log text strictly. Returns events with their 1-based line numbers, and errors
-/// as (line, message). Every line must be one JSON event; blank lines are errors.
-pub fn parse(text: &str) -> (Vec<NumberedEvent>, Vec<LineError>) {
-    let mut events = Vec::new();
-    let mut errors = Vec::new();
-    let mut seen: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
-    let body = text.strip_suffix('\n').unwrap_or(text);
-    if body.is_empty() {
-        return (events, errors);
-    }
-    for (index, line) in body.split('\n').enumerate() {
+/// A parsed log: valid events, errors and warnings, each with its 1-based line number.
+#[derive(Debug, Default)]
+pub struct ParsedLog {
+    pub events: Vec<NumberedEvent>,
+    pub errors: Vec<LineError>,
+    /// Duplicate ids whose content differs (the first line is kept).
+    pub warnings: Vec<LineError>,
+}
+
+/// Parse log text strictly: every nonblank line must be one JSON event. Blank lines are
+/// ignored (and never written). A repeated id keeps the first line; when the repeat's
+/// content differs, it is a warning, never an error, so two writers racing to record the
+/// same fact cannot make the log unloadable.
+pub fn parse(text: &str) -> ParsedLog {
+    let mut parsed = ParsedLog::default();
+    let mut seen: std::collections::BTreeMap<String, (usize, Event)> =
+        std::collections::BTreeMap::new();
+    for (index, line) in text.split('\n').enumerate() {
         let number = index + 1;
         if line.trim().is_empty() {
-            errors.push((number, "blank line".into()));
             continue;
         }
         let event: Event = match serde_json::from_str(line) {
             Ok(event) => event,
             Err(error) => {
-                errors.push((number, error.to_string()));
+                parsed.errors.push((number, error.to_string()));
                 continue;
             }
         };
         let problems = event.structural_errors();
         if !problems.is_empty() {
-            errors.extend(problems.into_iter().map(|p| (number, p)));
+            parsed
+                .errors
+                .extend(problems.into_iter().map(|p| (number, p)));
             continue;
         }
-        if let Some(first) = seen.get(&event.id) {
-            errors.push((
-                number,
-                format!("duplicate event id {} (line {first})", event.id),
-            ));
+        if let Some((first, kept)) = seen.get(&event.id) {
+            if *kept != event {
+                parsed.warnings.push((
+                    number,
+                    format!(
+                        "event {} repeats line {first} with different content; line {first} is kept",
+                        event.id
+                    ),
+                ));
+            }
             continue;
         }
-        seen.insert(event.id.clone(), number);
-        events.push((number, event));
+        seen.insert(event.id.clone(), (number, event.clone()));
+        parsed.events.push((number, event));
     }
-    (events, errors)
+    parsed
 }
 
 // ---------------------------------------------------------------------------------------
@@ -579,12 +596,97 @@ pub fn repo_dir(catalog: &Catalog) -> PathBuf {
     catalog.directory.join(&catalog.config.repo_root)
 }
 
-/// A loaded catalog plus its log, ready to append to.
+/// How long a writer waits for the log lock.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+/// A lock older than this is assumed abandoned and broken, with a warning.
+const LOCK_STALE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A loaded catalog plus its log. Events are validated and queued with `append`, then
+/// written together by `flush` under a lock file beside the log.
 pub struct LogWriter {
     pub catalog: Catalog,
     path: PathBuf,
     ids: BTreeSet<String>,
+    pending: Vec<Event>,
 }
+
+/// Holds `tracker/log.jsonl.lock`; removes it when dropped.
+struct LogLock(PathBuf);
+impl Drop for LogLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+impl LogLock {
+    fn acquire(path: PathBuf) -> Result<Self> {
+        let start = std::time::Instant::now();
+        loop {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    let _ = writeln!(file, "{}", std::process::id());
+                    return Ok(Self(path));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let age = fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|m| m.elapsed().ok());
+                    if age.is_some_and(|age| age > LOCK_STALE) {
+                        eprintln!(
+                            "warning: breaking stale lock {} (older than {} s)",
+                            path.display(),
+                            LOCK_STALE.as_secs()
+                        );
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
+                    if start.elapsed() > LOCK_WAIT {
+                        return Err(format!(
+                            "{} is held by another writer; retry, or remove it if no writer is running",
+                            path.display()
+                        )
+                        .into());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(error) => return Err(format!("{}: {error}", path.display()).into()),
+            }
+        }
+    }
+}
+
+/// Refuse to write through a symlinked `tracker/`, log or lock, or outside the catalog.
+fn check_write_paths(directory: &Path) -> Result<()> {
+    let tracker = directory.join("tracker");
+    for path in [
+        tracker.clone(),
+        directory.join(LOG_FILE),
+        directory.join(LOCK_FILE),
+    ] {
+        if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(format!("refusing to write through symlink {}", path.display()).into());
+        }
+    }
+    if tracker.exists() {
+        let root = fs::canonicalize(directory)?;
+        let resolved = fs::canonicalize(&tracker)?;
+        if !resolved.starts_with(&root) {
+            return Err(format!(
+                "refusing to write: {} resolves outside the catalog directory",
+                tracker.display()
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+/// The lock file beside the log.
+pub const LOCK_FILE: &str = "tracker/log.jsonl.lock";
 
 impl LogWriter {
     /// Load the catalog; refuse when the existing log has errors.
@@ -608,6 +710,7 @@ impl LogWriter {
             path: catalog.directory.join(LOG_FILE),
             catalog,
             ids,
+            pending: vec![],
         })
     }
 
@@ -616,8 +719,17 @@ impl LogWriter {
         self.catalog.tracker.issue(id).is_some()
     }
 
-    /// Validate and append one event. Returns false (and appends nothing) when an event
-    /// with the same id is already recorded.
+    /// The latest fix commit recorded for an issue since its last reopen.
+    pub fn current_fix(&self, issue: &str) -> Option<String> {
+        self.catalog
+            .tracker
+            .derived
+            .get(issue)
+            .and_then(|d| d.fixes.last().cloned())
+    }
+
+    /// Validate and queue one event. Returns false when an event with the same id is
+    /// already recorded or queued. Nothing is written until `flush`.
     pub fn append(&mut self, event: &Event) -> Result<bool> {
         let mut problems = event.structural_errors();
         problems.extend(self.catalog.event_reference_errors(event));
@@ -630,29 +742,59 @@ impl LogWriter {
             )
             .into());
         }
-        if self.ids.contains(&event.id) {
+        if !self.ids.insert(event.id.clone()) {
             return Ok(false);
         }
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        // Keep the file newline-terminated even if someone left the last line open.
-        let needs_newline = fs::read(&self.path)
-            .map(|b| b.last().is_some_and(|c| *c != b'\n'))
-            .unwrap_or(false);
-        let mut line = event.line()?;
-        if needs_newline {
-            line.insert(0, '\n');
-        }
-        line.push('\n');
-        file.write_all(line.as_bytes())?;
-        self.ids.insert(event.id.clone());
+        self.pending.push(event.clone());
         self.catalog.tracker.record(event);
         Ok(true)
+    }
+
+    /// Write every queued event in one append, under the lock. The log is re-read under
+    /// the lock, so an event another writer recorded meanwhile is not written twice.
+    /// Returns each queued event and whether it was written.
+    pub fn flush(&mut self) -> Result<Vec<(Event, bool)>> {
+        let pending = std::mem::take(&mut self.pending);
+        if pending.is_empty() {
+            return Ok(vec![]);
+        }
+        let directory = self.catalog.directory.clone();
+        check_write_paths(&directory)?;
+        fs::create_dir_all(directory.join("tracker"))?;
+        check_write_paths(&directory)?;
+        let _lock = LogLock::acquire(directory.join(LOCK_FILE))?;
+        let current = match fs::read_to_string(&self.path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(format!("{}: {error}", self.path.display()).into()),
+        };
+        let parsed = parse(&current);
+        if let Some((line, message)) = parsed.errors.first() {
+            return Err(format!("{LOG_FILE}:{line}: {message}; not appending").into());
+        }
+        let mut recorded: BTreeSet<String> = parsed.events.into_iter().map(|(_, e)| e.id).collect();
+        let mut text = String::new();
+        if current.as_bytes().last().is_some_and(|c| *c != b'\n') {
+            text.push('\n');
+        }
+        let mut results = Vec::new();
+        for event in pending {
+            let added = recorded.insert(event.id.clone());
+            if added {
+                text.push_str(&event.line()?);
+                text.push('\n');
+            }
+            results.push((event, added));
+        }
+        if results.iter().any(|(_, added)| *added) {
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)?;
+            file.write_all(text.as_bytes())?;
+            file.sync_data()?;
+        }
+        Ok(results)
     }
 }
 
@@ -772,7 +914,12 @@ pub fn run(args: LogArgs) -> Result<()> {
             }
             let mut event = Event::new(EventKind::Verified, &issue, &at, &by);
             event.evidence = evidence;
-            event.commit = commit.map(|c| resolve_commit(&repo, &c));
+            // Without --commit, a check is of the issue's current fix: the same evidence
+            // after a new fix is a new fact; rerunning it for the same fix is not.
+            event.commit = match commit {
+                Some(c) => Some(resolve_commit(&repo, &c)),
+                None => writer.current_fix(&issue),
+            };
             event
         }
         LogAction::Reopened { issue, reason } => {
@@ -811,7 +958,11 @@ pub fn run(args: LogArgs) -> Result<()> {
         }
     };
     let event = event.with_id();
-    let added = writer.append(&event)?;
+    writer.append(&event)?;
+    let added = writer
+        .flush()?
+        .iter()
+        .any(|(e, added)| e.id == event.id && *added);
     announce(&event, added);
     Ok(())
 }

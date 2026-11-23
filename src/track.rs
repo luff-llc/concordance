@@ -3,7 +3,7 @@
 use crate::tracker::{calendar_day, IssueKind, IssueState, Release, ReleaseState, TrackerIssue};
 use crate::{Catalog, Entry, Impact, Result, Status};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -367,17 +367,29 @@ impl Catalog {
             }
             let mut reasons = Vec::new();
             let derived = self.tracker.derived.get(&issue.id);
-            let selves = derived
-                .map(|d| d.self_verified_by.as_slice())
-                .unwrap_or(&[]);
+            let list = |pick: fn(&crate::Derivation) -> &Vec<String>| -> Vec<String> {
+                derived.map(|d| pick(d).clone()).unwrap_or_default()
+            };
+            let selves = list(|d| &d.self_verified_by);
+            let stale = list(|d| &d.stale_verified_by);
             if !selves.is_empty() {
                 reasons.push(format!("self-verified by {}", selves.join(", ")));
+            } else if !stale.is_empty() {
+                reasons.push(format!(
+                    "checked before the latest fix by {}",
+                    stale.join(", ")
+                ));
             } else if issue.evidence.is_empty() {
                 reasons.push("fixed without evidence".to_owned());
             }
-            // The issue's own release and every released release that carries it; pulled
-            // releases do not count.
-            let mut shipped: std::collections::BTreeSet<&str> = self
+            // Shipped only when git confirms a released commit contains the fix
+            // (tracker/log.jsonl). A released release the plan links to the issue (its own
+            // release, or one that carries it; pulled releases do not count), or one git
+            // could not answer for, is out with containment unknown, unless git says the
+            // fix is not in it. The plan alone is never proof.
+            let shipped: BTreeSet<String> = list(|d| &d.shipped_in).into_iter().collect();
+            let not_in: BTreeSet<String> = list(|d| &d.not_in).into_iter().collect();
+            let mut out_unknown: BTreeSet<String> = self
                 .tracker
                 .releases
                 .iter()
@@ -385,16 +397,17 @@ impl Catalog {
                 .filter(|r| {
                     issue.release.as_deref() == Some(r.id.as_str()) || r.carries.contains(&issue.id)
                 })
-                .map(|r| r.id.as_str())
+                .map(|r| r.id.clone())
                 .collect();
-            // Releases whose commit contains a fix (tracker/log.jsonl).
-            shipped.extend(
-                derived
-                    .into_iter()
-                    .flat_map(|d| d.shipped_in.iter().map(String::as_str)),
-            );
-            for release in shipped {
+            out_unknown.extend(list(|d| &d.containment_unknown));
+            for release in &shipped {
                 reasons.push(format!("release {release} has shipped"));
+            }
+            for release in out_unknown
+                .iter()
+                .filter(|r| !shipped.contains(*r) && !not_in.contains(*r))
+            {
+                reasons.push(format!("release {release} is out; containment unknown"));
             }
             if !reasons.is_empty() {
                 out.push(Unverified {

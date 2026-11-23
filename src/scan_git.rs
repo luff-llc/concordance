@@ -3,7 +3,8 @@
 //! Also the small git helpers the log uses (`rev-parse`, `merge-base --is-ancestor`).
 use crate::log::{announce, timestamp_from_unix, Event, EventKind, LogWriter};
 use crate::Result;
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Run git in `repo` and return stdout. Errors name git's stderr, or say git is unavailable.
@@ -43,6 +44,64 @@ pub(crate) fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Resu
         )
         .into()),
     }
+}
+
+/// Ancestry answers for one repository, cached. In a shallow clone a "not an ancestor"
+/// answer may only mean the history is cut off, so it becomes unknown (`None`).
+pub(crate) struct Ancestry {
+    repo: PathBuf,
+    shallow: Option<bool>,
+    cache: BTreeMap<(String, String), Option<bool>>,
+}
+impl Ancestry {
+    pub(crate) fn new(repo: &Path) -> Self {
+        Self {
+            repo: repo.to_path_buf(),
+            shallow: None,
+            cache: BTreeMap::new(),
+        }
+    }
+    pub(crate) fn is_shallow(&mut self) -> bool {
+        if self.shallow.is_none() {
+            let shallow = git(&self.repo, &["rev-parse", "--is-shallow-repository"])
+                .is_ok_and(|out| out.trim() == "true");
+            self.shallow = Some(shallow);
+        }
+        self.shallow == Some(true)
+    }
+    /// Whether `descendant` contains `ancestor`: `Some(true)`, `Some(false)`, or `None`
+    /// when a shallow history cannot say. Errors when git cannot answer at all.
+    pub(crate) fn contains(&mut self, ancestor: &str, descendant: &str) -> Result<Option<bool>> {
+        let key = (ancestor.to_owned(), descendant.to_owned());
+        if let Some(answer) = self.cache.get(&key) {
+            return Ok(*answer);
+        }
+        let answer = match is_ancestor(&self.repo, ancestor, descendant)? {
+            true => Some(true),
+            false if self.is_shallow() => None,
+            false => Some(false),
+        };
+        self.cache.insert(key, answer);
+        Ok(answer)
+    }
+}
+
+/// Resolve `--since` to a commit hash, refusing option-shaped refs.
+fn resolve_since(repo: &Path, since: &str) -> Result<String> {
+    if since.starts_with('-') || since.trim().is_empty() {
+        return Err(format!("--since {since:?} is not a git ref").into());
+    }
+    let sha = git(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{since}^{{commit}}"),
+        ],
+    )
+    .map_err(|e| format!("--since {since:?} does not name a commit: {e}"))?;
+    Ok(sha.trim().to_owned())
 }
 
 /// A tag glob with one `{version}` placeholder as a regex; `*` matches within one path
@@ -109,31 +168,27 @@ fn trailer_items(value: &str) -> Vec<(String, Option<String>)> {
 }
 
 struct Tally {
-    recorded: usize,
-    already: usize,
+    seen: usize,
     warnings: Vec<String>,
 }
 impl Tally {
+    /// Queue an event; everything is written in one append at the end.
     fn add(&mut self, writer: &mut LogWriter, event: Event) -> Result<()> {
-        let event = event.with_id();
-        if writer.append(&event)? {
-            announce(&event, true);
-            self.recorded += 1;
-        } else {
-            self.already += 1;
-        }
+        writer.append(&event.with_id())?;
+        self.seen += 1;
         Ok(())
     }
 }
 
 pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<()> {
     let mut tally = Tally {
-        recorded: 0,
-        already: 0,
+        seen: 0,
         warnings: vec![],
     };
+    let since = since.map(|s| resolve_since(repo, s)).transpose()?;
+    let mut ancestry = Ancestry::new(repo);
     // Commits, oldest first: hash, author, commit time, trailer block.
-    let range = since.map(|s| format!("{s}..HEAD"));
+    let range = since.as_ref().map(|s| format!("{s}..HEAD"));
     let mut args = vec![
         "log",
         "--reverse",
@@ -210,14 +265,18 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
             repo,
             &[
                 "for-each-ref",
-                "--format=%(refname:short)%1f%(objectname)%1f%(*objectname)%1f%(creatordate:unix)%1f%(taggername)%1f%(authorname)",
+                "--format=%(refname)%1f%(objectname)%1f%(*objectname)%1f%(creatordate:unix)%1f%(taggername)%1f%(authorname)",
                 "refs/tags",
             ],
         )?;
         let mut tags = Vec::new();
         for line in text.lines() {
             let fields: Vec<&str> = line.split('\u{1f}').collect();
-            let [name, object, peeled, time, tagger, author] = fields[..] else {
+            let [refname, object, peeled, time, tagger, author] = fields[..] else {
+                continue;
+            };
+            // The full refname, so a branch with the same short name cannot stand in.
+            let Some(name) = refname.strip_prefix("refs/tags/") else {
                 continue;
             };
             let Some(version) = regexes
@@ -240,9 +299,13 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
         }
         tags.sort();
         for (seconds, name, version, commit, by) in tags {
-            if let Some(since) = since {
-                if is_ancestor(repo, &commit, since)? {
-                    continue;
+            if let Some(since) = &since {
+                match ancestry.contains(&commit, since)? {
+                    Some(true) => continue,
+                    Some(false) => {}
+                    None => tally.warnings.push(format!(
+                        "tag {name}: shallow history cannot tell whether --since contains it; scanned"
+                    )),
                 }
             }
             let at = timestamp_from_unix(seconds);
@@ -260,12 +323,17 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
         }
     }
 
+    let results = writer.flush()?;
+    let recorded = results.iter().filter(|(_, added)| *added).count();
+    for (event, _) in results.iter().filter(|(_, added)| *added) {
+        announce(event, true);
+    }
     for warning in &tally.warnings {
         eprintln!("warning: {warning}");
     }
     println!(
-        "scan-git: {} recorded, {} already recorded",
-        tally.recorded, tally.already
+        "scan-git: {recorded} recorded, {} already recorded",
+        tally.seen - recorded
     );
     Ok(())
 }

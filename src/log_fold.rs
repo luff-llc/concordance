@@ -17,6 +17,60 @@ pub struct Derivation {
     pub shipped_in: Vec<String>,
     /// People who verified their own fix (those checks do not count).
     pub self_verified_by: Vec<String>,
+    /// Others whose checks predate the latest fix and are not of its commit or a later one.
+    pub stale_verified_by: Vec<String>,
+    /// Released releases git says do not contain the latest fix.
+    pub not_in: Vec<String>,
+    /// Released releases whose containment of the latest fix git could not answer.
+    pub containment_unknown: Vec<String>,
+}
+
+/// Two spellings of one commit: equal, or one an abbreviation (7+ characters) of the other.
+fn same_commit(a: &str, b: &str) -> bool {
+    a == b || (a.len().min(b.len()) >= 7 && (a.starts_with(b) || b.starts_with(a)))
+}
+
+/// Ancestry questions for the fold, turning git failures into warnings.
+struct GitAsk {
+    ancestry: crate::scan_git::Ancestry,
+    unavailable: bool,
+    warnings: Vec<String>,
+}
+impl GitAsk {
+    /// `Some(answer)`, or `None` when git cannot say (a warning names why, once).
+    fn contains(&mut self, ancestor: &str, descendant: &str, context: &str) -> Option<bool> {
+        if self.unavailable {
+            return None;
+        }
+        if same_commit(ancestor, descendant) {
+            return Some(true);
+        }
+        match self.ancestry.contains(ancestor, descendant) {
+            Ok(Some(answer)) => Some(answer),
+            Ok(None) => {
+                self.warnings.push(format!(
+                    "{context}: shallow history cannot tell whether {} contains {}",
+                    short(descendant),
+                    short(ancestor)
+                ));
+                None
+            }
+            Err(error) => {
+                let text = error.to_string();
+                if text.starts_with("git unavailable") {
+                    self.unavailable = true;
+                    self.warnings
+                        .push(format!("shipped and commit checks skipped: {text}"));
+                } else {
+                    self.warnings.push(format!("{context}: {text}"));
+                }
+                None
+            }
+        }
+    }
+}
+fn short(commit: &str) -> &str {
+    &commit[..commit.len().min(12)]
 }
 
 fn issue_from_report(event: &Event) -> TrackerIssue {
@@ -114,8 +168,16 @@ impl Catalog {
                 return;
             }
         };
-        let (events, errors) = crate::log::parse(&text);
-        let mut problems: Vec<(usize, String, String)> = errors
+        let parsed = crate::log::parse(&text);
+        let events = parsed.events;
+        self.tracker.warnings.extend(
+            parsed
+                .warnings
+                .into_iter()
+                .map(|(line, message)| format!("{LOG_FILE}:{line}: {message}")),
+        );
+        let mut problems: Vec<(usize, String, String)> = parsed
+            .errors
             .into_iter()
             .map(|(line, message)| (line, String::new(), message))
             .collect();
@@ -171,17 +233,28 @@ impl Catalog {
         let repo = crate::log::repo_dir(self);
         let undeclared = self.issues_without_state();
         let tracker = &mut self.tracker;
-        let mut warnings: Vec<String> = Vec::new();
+        let mut warnings: Vec<String> = std::mem::take(&mut tracker.warnings);
         // Replay in time order; the file order breaks ties.
         let mut order: Vec<&Event> = tracker.log.iter().collect();
         order.sort_by(|a, b| a.at.cmp(&b.at));
 
+        struct Fix {
+            commit: String,
+            by: String,
+            at: String,
+        }
+        struct Check {
+            by: String,
+            evidence: Vec<String>,
+            at: String,
+            commit: Option<String>,
+        }
         #[derive(Default)]
         struct IssueRun {
             stateful: bool,
             reported: Option<String>,
-            fixes: Vec<(String, String)>,
-            verifications: Vec<(String, Vec<String>)>,
+            fixes: Vec<Fix>,
+            verifications: Vec<Check>,
         }
         #[derive(Default)]
         struct ReleaseRun {
@@ -202,13 +275,20 @@ impl Catalog {
                     }
                     EventKind::Fixed => {
                         run.stateful = true;
-                        let commit = event.commit.clone().unwrap_or_default();
-                        run.fixes.push((commit, event.by.clone()));
+                        run.fixes.push(Fix {
+                            commit: event.commit.clone().unwrap_or_default(),
+                            by: event.by.clone(),
+                            at: event.at.clone(),
+                        });
                     }
                     EventKind::Verified => {
                         run.stateful = true;
-                        run.verifications
-                            .push((event.by.clone(), event.evidence.clone()));
+                        run.verifications.push(Check {
+                            by: event.by.clone(),
+                            evidence: event.evidence.clone(),
+                            at: event.at.clone(),
+                            commit: event.commit.clone(),
+                        });
                     }
                     _ => {
                         // Reopened: back to open; earlier fixes and checks no longer count.
@@ -304,8 +384,11 @@ impl Catalog {
         }
 
         // Issues.
-        let mut ancestry: BTreeMap<(String, String), bool> = BTreeMap::new();
-        let mut git_unavailable = false;
+        let mut git = GitAsk {
+            ancestry: crate::scan_git::Ancestry::new(&repo),
+            unavailable: false,
+            warnings: vec![],
+        };
         for (id, run) in issues {
             let Some(issue) = tracker.issues.iter_mut().find(|i| i.id == id) else {
                 continue;
@@ -317,12 +400,36 @@ impl Catalog {
             if !run.stateful {
                 continue;
             }
-            let fixers: BTreeSet<&str> = run.fixes.iter().map(|(_, by)| by.as_str()).collect();
-            let counted: Vec<&(String, Vec<String>)> = run
-                .verifications
-                .iter()
-                .filter(|(by, _)| !fixers.contains(by.as_str()))
-                .collect();
+            let fixers: BTreeSet<&str> = run.fixes.iter().map(|f| f.by.as_str()).collect();
+            // A check counts only for a fix it could have checked: recorded no earlier than
+            // the latest fix, or of that fix's commit or a later one.
+            let latest = run.fixes.last();
+            let mut counted: Vec<&Check> = Vec::new();
+            let mut selves: BTreeSet<String> = BTreeSet::new();
+            let mut stale: BTreeSet<String> = BTreeSet::new();
+            if let Some(fix) = latest {
+                for check in &run.verifications {
+                    let covers = check.at >= fix.at
+                        || check.commit.as_deref().is_some_and(|commit| {
+                            git.contains(
+                                &fix.commit,
+                                commit,
+                                &format!("issue `{id}`: verification by {}", check.by),
+                            ) == Some(true)
+                        });
+                    let own = fixers.contains(check.by.as_str());
+                    match (covers, own) {
+                        (true, false) => counted.push(check),
+                        (true, true) => {
+                            selves.insert(check.by.clone());
+                        }
+                        (false, false) => {
+                            stale.insert(check.by.clone());
+                        }
+                        (false, true) => {}
+                    }
+                }
+            }
             let derived = if run.fixes.is_empty() {
                 if !run.verifications.is_empty() {
                     warnings.push(format!(
@@ -354,65 +461,45 @@ impl Catalog {
             } else if level(declared) > 0 {
                 issue.state = derived;
             }
-            for (_, evidence) in &counted {
-                for item in evidence {
+            for check in &counted {
+                for item in &check.evidence {
                     if !issue.evidence.contains(item) {
                         issue.evidence.push(item.clone());
                     }
                 }
             }
             let mut derivation = Derivation {
-                fixes: run.fixes.iter().map(|(c, _)| c.clone()).collect(),
+                fixes: run.fixes.iter().map(|f| f.commit.clone()).collect(),
                 ..Derivation::default()
             };
             if derived == IssueState::Fixed && !terminal {
-                let mut selves: Vec<String> =
-                    run.verifications.iter().map(|(by, _)| by.clone()).collect();
-                selves.sort();
-                selves.dedup();
-                derivation.self_verified_by = selves;
+                derivation.self_verified_by = selves.into_iter().collect();
+                derivation.stale_verified_by = stale.into_iter().collect();
             }
-            if derived != IssueState::Open && !terminal {
+            if let (Some(fix), false) = (latest, derived == IssueState::Open || terminal) {
                 for (release, commits) in &release_commits {
-                    let mut shipped = false;
-                    for fix in &derivation.fixes {
-                        for commit in commits {
-                            if git_unavailable || shipped {
-                                continue;
-                            }
-                            let key = (fix.clone(), commit.clone());
-                            let answer = match ancestry.get(&key) {
-                                Some(answer) => Some(*answer),
-                                None => match crate::scan_git::is_ancestor(&repo, fix, commit) {
-                                    Ok(answer) => {
-                                        ancestry.insert(key, answer);
-                                        Some(answer)
-                                    }
-                                    Err(error) => {
-                                        let text = error.to_string();
-                                        if text.starts_with("git unavailable") {
-                                            git_unavailable = true;
-                                            warnings.push(format!("shipped not checked: {text}"));
-                                        } else {
-                                            warnings.push(format!(
-                                                "issue `{id}`: could not check whether fix {} shipped in `{release}`: {text}",
-                                                &fix[..fix.len().min(12)]
-                                            ));
-                                        }
-                                        None
-                                    }
-                                },
-                            };
-                            shipped |= answer == Some(true);
-                        }
-                    }
-                    if shipped {
+                    let answers: Vec<Option<bool>> = commits
+                        .iter()
+                        .map(|commit| {
+                            git.contains(
+                                &fix.commit,
+                                commit,
+                                &format!("issue `{id}`: fix {} in `{release}`", short(&fix.commit)),
+                            )
+                        })
+                        .collect();
+                    if answers.contains(&Some(true)) {
                         derivation.shipped_in.push(release.clone());
+                    } else if answers.iter().all(|a| *a == Some(false)) {
+                        derivation.not_in.push(release.clone());
+                    } else {
+                        derivation.containment_unknown.push(release.clone());
                     }
                 }
             }
             tracker.derived.insert(id, derivation);
         }
+        warnings.append(&mut git.warnings);
         warnings.sort();
         warnings.dedup();
         tracker.warnings = warnings;
