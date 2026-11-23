@@ -130,8 +130,9 @@ The repo's agent guide carries one line: *product state is kept by Concordance; 
 
 ## Build order
 
-1. Event log, `log` commands, fold into `track` (derived states, warnings).
-2. `scan-git`: trailers and tags.
+1. Event log, `log` commands, fold into `track` (derived states, warnings). Done; see
+   docs/tracker.md ("Log").
+2. `scan-git`: trailers and tags. Done.
 3. `init` and `inventory` (detection, globs, strings, identifiers, coverage).
 4. `plan-audit` and `guide`.
 5. Adopt on Taupe: log events from today's facts, trailers in the agent guide, release tooling
