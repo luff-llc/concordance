@@ -1,0 +1,28 @@
+# The fixture repository's catalog, as `concordance init` wrote it, with repo_root pointing
+# at the fixture repository.
+repo_root = "../../repo"
+
+[platforms]
+android = "android"
+ios = "apple"
+
+[source_globs.android]
+all = ["app/src/main/**/*.kt"]
+user_visible = ["app/src/main/**/*.kt"]
+strings = ["app/src/main/res/values*/strings.xml"]
+tests = ["app/src/test/**/*.kt"]
+
+[source_globs.ios]
+all = ["Fixture/**/*.swift"]
+user_visible = ["Fixture/**/*.swift"]
+strings = ["**/*.xcstrings"]
+tests = ["FixtureUITests/**/*.swift"]
+
+[report]
+title = "Fixture native parity"
+baseline = "ios"
+target = "android"
+
+[report.labels]
+android = "Android"
+ios = "iOS"
