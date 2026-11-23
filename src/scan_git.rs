@@ -85,17 +85,20 @@ impl Ancestry {
         self.resolved.insert(reference.to_owned(), answer.clone());
         Ok(answer)
     }
-    /// A short name (not a full `refs/...` name, not hex) that more than one of
-    /// refs/heads/X, refs/tags/X and refs/remotes/X names. Git would pick one silently.
+    /// A short name (not a full `refs/...` name, not a full 40- or 64-digit hash) that
+    /// more than one of refs/heads/X, refs/tags/X and refs/remotes/X names, or, when it
+    /// looks like hex, that names a ref and also abbreviates an object. Git would pick one
+    /// silently.
     fn ambiguous(&self, reference: &str) -> Result<bool> {
         let base = reference
             .split(['~', '^', '@', ':'])
             .next()
             .unwrap_or(reference);
+        let hex = !base.is_empty() && base.bytes().all(|c| c.is_ascii_hexdigit());
         if base.is_empty()
             || base == "HEAD"
             || base.starts_with("refs/")
-            || base.bytes().all(|c| c.is_ascii_hexdigit())
+            || (hex && matches!(base.len(), 40 | 64))
         {
             return Ok(false);
         }
@@ -112,10 +115,23 @@ impl Ancestry {
             .output()
             .map_err(|e| format!("git unavailable: {e}"))?;
         let listed = String::from_utf8_lossy(&output.stdout).into_owned();
-        let found = listed
+        let mut found = listed
             .lines()
             .filter(|line| candidates.iter().any(|c| c == line))
             .count();
+        if hex && found > 0 && base.len() >= 4 {
+            // Objects this name abbreviates, besides the refs it names.
+            let objects = Command::new("git")
+                .arg("-C")
+                .arg(&self.repo)
+                .arg("rev-parse")
+                .arg(format!("--disambiguate={base}"))
+                .output()
+                .map_err(|e| format!("git unavailable: {e}"))?;
+            if !String::from_utf8_lossy(&objects.stdout).trim().is_empty() {
+                found += 1;
+            }
+        }
         Ok(found > 1)
     }
     pub(crate) fn is_shallow(&mut self) -> bool {
@@ -259,16 +275,28 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
             continue;
         };
         let at = timestamp_from_unix(time.trim().parse().unwrap_or(0));
-        let short = &sha[..sha.len().min(12)];
+        let short = crate::log::prefix(sha, 12);
+        // Every Fixes: in a commit before its Verifies:, whatever the trailer order, so a
+        // self-contained commit binds its check to its own fix.
+        let mut items: Vec<(u8, String, String, Option<String>)> = Vec::new();
         for line in trailers.lines() {
             let Some((key, value)) = line.split_once(':') else {
                 continue;
             };
             let key = key.trim().to_ascii_lowercase();
-            if !matches!(key.as_str(), "fixes" | "verifies" | "reports") {
-                continue;
-            }
+            let rank = match key.as_str() {
+                "fixes" => 0,
+                "verifies" => 1,
+                "reports" => 2,
+                _ => continue,
+            };
             for (id, evidence) in trailer_items(value) {
+                items.push((rank, key.clone(), id, evidence));
+            }
+        }
+        items.sort_by_key(|(rank, ..)| *rank);
+        {
+            for (_, key, id, evidence) in items {
                 let Some(issue) = writer.catalog.tracker.issue(&id).cloned() else {
                     tally.warnings.push(format!(
                         "commit {short}: {}: {id} is not a known issue; nothing recorded",
@@ -368,7 +396,7 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
                 by
             };
             let mut event = Event::new(EventKind::Released, &version, &at, &by);
-            event.date = Some(at[..10].to_owned());
+            event.date = Some(crate::log::day(&at));
             event.commit = Some(commit);
             if let Err(error) = tally.add(writer, event) {
                 tally.warnings.push(format!("tag {name}: {error}"));

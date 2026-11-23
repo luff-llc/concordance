@@ -104,8 +104,10 @@ impl GitAsk {
         }
     }
 }
+/// A commit or ref shortened for messages, on a character boundary: refs are user text
+/// (`feature/café`).
 fn short(commit: &str) -> &str {
-    &commit[..commit.len().min(12)]
+    crate::log::prefix(commit, 12)
 }
 
 fn issue_from_report(event: &Event) -> TrackerIssue {
@@ -116,7 +118,7 @@ fn issue_from_report(event: &Event) -> TrackerIssue {
         summary: None,
         state: IssueState::Open,
         impact: event.impact,
-        reported: Some(event.at[..10].to_owned()),
+        reported: Some(crate::log::day(&event.at)),
         source: event.source.clone(),
         platforms: event.platforms.clone(),
         entries: event.entries.clone(),
@@ -323,7 +325,7 @@ impl Catalog {
                 match event.kind {
                     EventKind::Reported => {
                         run.reported
-                            .get_or_insert_with(|| event.at[..10].to_owned());
+                            .get_or_insert_with(|| crate::log::day(&event.at));
                     }
                     EventKind::Fixed => {
                         run.stateful = true;

@@ -1781,3 +1781,180 @@ fn issue_index_never_returns_the_wrong_issue() {
     catalog.tracker.issues.clear();
     assert!(catalog.tracker.issue(&id).is_none());
 }
+
+// ---------------------------------------------------------------------------------------
+// Fourth review: character-safe truncation, hex ambiguity, trailer order, cycles, paths.
+
+#[test]
+fn non_ascii_refs_do_not_panic() {
+    let repo = Repo::new();
+    repo.commit("Alice", "2026-11-10T00:00:00Z", "First");
+    // 13 bytes, 12 characters: a 12-byte cut would land inside the é.
+    let reference = "feature/café";
+    repo.log(&[
+        "--by",
+        "alice",
+        "fixed",
+        "bug.home-blank",
+        "--commit",
+        reference,
+    ]);
+    repo.log(&[
+        "--by",
+        "bob",
+        "verified",
+        "bug.home-blank",
+        "--evidence",
+        "ok",
+        "--commit",
+        "feature/cafébabe",
+    ]);
+    repo.log(&["released", "1.1.0", "--commit", "HEAD"]);
+    let view = repo.track_json();
+    let warnings = strings(&view["warnings"]);
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("commit feature/café is not known to git")),
+        "{warnings:#?}"
+    );
+}
+
+#[test]
+fn hex_looking_names_get_the_ambiguity_check() {
+    let repo = Repo::new();
+    let first = repo.commit("Alice", "2026-11-10T00:00:00Z", "First");
+    let second = repo.commit("Alice", "2026-11-11T00:00:00Z", "Second");
+    // A branch named like an abbreviation of another commit.
+    let abbreviation = &first[..8];
+    repo.git(
+        &["branch", abbreviation, &second],
+        "Alice",
+        "2026-11-11T00:00:00Z",
+    );
+    let output = repo.run(&["log", "fixed", "bug.home-blank", "--commit", abbreviation]);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    success(output);
+    assert!(
+        stderr.contains("does not resolve to exactly one commit"),
+        "{stderr}"
+    );
+    assert_eq!(repo.lines()[0]["commit"], abbreviation);
+    // A hex name that is both a tag and a branch.
+    repo.git(&["tag", "beef", &first], "Alice", "2026-11-11T00:00:00Z");
+    repo.git(
+        &["branch", "beef", &second],
+        "Alice",
+        "2026-11-11T00:00:00Z",
+    );
+    let err = failure(repo.run(&["log", "scan-git", "--since", "beef"]));
+    assert!(err.contains("does not name exactly one commit"), "{err}");
+    // A full hash is fine.
+    let out = success(repo.run(&["log", "scan-git", "--since", &first]));
+    assert!(out.starts_with("scan-git:"), "{out}");
+}
+
+#[test]
+fn fixes_are_read_before_verifies_in_one_commit() {
+    for message in [
+        "Fix and check\n\nVerifies: bug.home-blank (ok)\nFixes: bug.home-blank\n",
+        "Fix and check\n\nFixes: bug.home-blank\nVerifies: bug.home-blank (ok)\n",
+    ] {
+        let repo = Repo::new();
+        let sha = repo.commit("Alice", "2026-11-10T00:00:00Z", message);
+        let first = success(repo.run(&["log", "scan-git"]));
+        assert!(
+            first.ends_with("scan-git: 2 recorded, 0 already recorded\n"),
+            "{first}"
+        );
+        let lines = repo.lines();
+        assert_eq!(lines[0]["kind"], "fixed");
+        assert_eq!(lines[1]["kind"], "verified");
+        assert_eq!(lines[1]["fix"], sha.as_str(), "{message}");
+        let second = success(repo.run(&["log", "scan-git"]));
+        assert_eq!(
+            second, "scan-git: 0 recorded, 2 already recorded\n",
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn release_after_a_pull_and_fix_after_a_reopen_are_new_facts() {
+    let repo = Repo::new();
+    let commit = repo.commit("Rel", "2026-11-10T00:00:00Z", "Release");
+    let release = |at: &str| repo.log(&["--at", at, "released", "1.1.0", "--commit", &commit]);
+    assert!(release("2026-11-10T01:00:00Z").starts_with("recorded"));
+    assert!(release("2026-11-10T02:00:00Z").starts_with("already recorded"));
+    repo.log(&[
+        "--at",
+        "2026-11-11T00:00:00Z",
+        "pulled",
+        "1.1.0",
+        "--reason",
+        "crash",
+    ]);
+    assert!(release("2026-11-12T00:00:00Z").starts_with("recorded"));
+    assert!(release("2026-11-12T01:00:00Z").starts_with("already recorded"));
+    assert_eq!(repo.lines()[2]["cycle"], 1);
+    let catalog = Catalog::load(repo.catalog()).expect("valid");
+    let state = catalog.tracker.release("1.1.0").map(|r| r.state.as_str());
+    assert_eq!(state, Some("released"));
+
+    let fix = |at: &str| {
+        repo.log(&[
+            "--at",
+            at,
+            "--by",
+            "alice",
+            "fixed",
+            "bug.home-blank",
+            "--commit",
+            &commit,
+        ])
+    };
+    assert!(fix("2026-11-13T00:00:00Z").starts_with("recorded"));
+    repo.log(&[
+        "--at",
+        "2026-11-14T00:00:00Z",
+        "reopened",
+        "bug.home-blank",
+        "--reason",
+        "back",
+    ]);
+    assert!(fix("2026-11-15T00:00:00Z").starts_with("recorded"));
+    assert!(fix("2026-11-15T01:00:00Z").starts_with("already recorded"));
+    let view = repo.track_json();
+    assert_eq!(
+        issue(&view, "bugs", "bug.home-blank").expect("open")["state"],
+        "fixed"
+    );
+}
+
+#[test]
+fn catalog_paths_through_symlinks_are_refused() {
+    let repo = Repo::new();
+    // spec/app is a symlink to a real catalog elsewhere in the repository.
+    fs::rename(repo.catalog(), repo.0.join("real-app")).expect("move");
+    std::os::unix::fs::symlink(repo.0.join("real-app"), repo.catalog()).expect("symlink");
+    for args in [
+        vec!["log", "report", "bug", "Nope"],
+        vec!["log", "--catalog", "spec/app", "report", "bug", "Nope"],
+    ] {
+        let err = failure(repo.run(&args));
+        assert!(err.contains("goes through symlink"), "{err}");
+    }
+    let absolute = repo.catalog().display().to_string();
+    let err = failure(repo.run(&["log", "--catalog", &absolute, "report", "bug", "Nope"]));
+    assert!(err.contains("goes through symlink"), "{err}");
+    // The real path works.
+    repo.log(&["--catalog", "real-app", "report", "bug", "Fine"]);
+    // A relative path that leaves the current directory is refused.
+    let other = Repo::new();
+    let outside = format!(
+        "../{}/spec/app",
+        other.0.file_name().and_then(|n| n.to_str()).expect("name")
+    );
+    let err = failure(repo.run(&["log", "--catalog", &outside, "report", "bug", "Nope"]));
+    assert!(err.contains("resolves outside"), "{err}");
+}

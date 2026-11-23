@@ -113,6 +113,11 @@ pub struct Event {
     pub date: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// How many earlier pulls (for `released`) or reopens (for `fixed` and `verified`) of
+    /// the subject precede this fact; omitted when none. A release after a pull, or a fix
+    /// or check after a reopen, is then a new fact even with the same commit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycle: Option<u32>,
 }
 
 impl Event {
@@ -136,6 +141,7 @@ impl Event {
             build: None,
             date: None,
             reason: None,
+            cycle: None,
         }
     }
     /// Set the id from the fact's distinguishing fields.
@@ -200,6 +206,9 @@ impl Event {
             }
             EventKind::Pulled => parts.push(opt(&self.reason)),
         }
+        if let (Some(cycle), false) = (self.cycle, legacy) {
+            parts.push(format!("cycle {cycle}"));
+        }
         format!("{:016x}", fnv1a(parts.join("\u{1f}").as_bytes()))
     }
 
@@ -235,7 +244,7 @@ impl Event {
                 self.subject
             ));
         }
-        let present: [(&str, bool); 12] = [
+        let present: [(&str, bool); 13] = [
             ("title", self.title.is_some()),
             ("entries", !self.entries.is_empty()),
             ("platforms", !self.platforms.is_empty()),
@@ -248,17 +257,18 @@ impl Event {
             ("build", self.build.is_some()),
             ("date", self.date.is_some()),
             ("reason", self.reason.is_some()),
+            ("cycle", self.cycle.is_some()),
         ];
         let (required, optional): (&[&str], &[&str]) = match self.kind {
             EventKind::Reported => (
                 &["title"],
                 &["entries", "platforms", "impact", "source"][..],
             ),
-            EventKind::Fixed => (&["commit"], &[]),
-            EventKind::Verified => (&["evidence"], &["commit", "fix"]),
+            EventKind::Fixed => (&["commit"], &["cycle"]),
+            EventKind::Verified => (&["evidence"], &["commit", "fix", "cycle"]),
             EventKind::Reopened => (&["reason"], &[]),
             EventKind::Uploaded => (&["platform", "build"], &["commit"]),
-            EventKind::Released => (&["date"], &["platform", "commit"]),
+            EventKind::Released => (&["date"], &["platform", "commit", "cycle"]),
             EventKind::Pulled => (&["reason"], &[]),
         };
         for (field, is_present) in present {
@@ -280,6 +290,9 @@ impl Event {
             if blank(value) {
                 errors.push(format!("{field} must not be empty"));
             }
+        }
+        if self.cycle == Some(0) {
+            errors.push("cycle must be at least 1; omit it otherwise".into());
         }
         if self.evidence.iter().any(|e| e.trim().is_empty()) {
             errors.push("evidence items must not be empty".into());
@@ -377,6 +390,19 @@ pub fn parse_at(text: &str) -> Result<String> {
         return Ok(format!("{text}T00:00:00Z"));
     }
     Err(format!("--at {text:?} must be YYYY-MM-DDTHH:MM:SSZ (UTC) or YYYY-MM-DD").into())
+}
+
+/// At most `n` characters of `text`, cut on a character boundary.
+pub fn prefix(text: &str, n: usize) -> &str {
+    match text.char_indices().nth(n) {
+        Some((end, _)) => &text[..end],
+        None => text,
+    }
+}
+
+/// The `YYYY-MM-DD` day of a timestamp (validated timestamps are ASCII).
+pub fn day(at: &str) -> String {
+    prefix(at, 10).to_owned()
 }
 
 /// Lowercase ASCII letters and digits joined by single hyphens, at most `SLUG_MAX` bytes,
@@ -694,7 +720,8 @@ fn already_recorded(recorded: &BTreeMap<String, Event>, event: &Event) -> bool {
         return true;
     }
     let legacy = event.legacy_id();
-    if legacy == event.id {
+    // Legacy lines never carry a cycle, so an event with one is always new to them.
+    if legacy == event.id || event.cycle.is_some() {
         return false;
     }
     recorded.get(&legacy).is_some_and(|old| {
@@ -706,6 +733,29 @@ fn already_recorded(recorded: &BTreeMap<String, Event>, event: &Event) -> bool {
         };
         !adds
     })
+}
+
+/// The cycle of `event`: how many pulls (for a release) or reopens (for a fix or check)
+/// of its subject in `events` are recorded at or before its time.
+fn cycle_in<'a>(events: impl Iterator<Item = &'a Event>, event: &Event) -> Option<u32> {
+    let resets = match event.kind {
+        EventKind::Released => EventKind::Pulled,
+        EventKind::Fixed | EventKind::Verified => EventKind::Reopened,
+        _ => return None,
+    };
+    let count = events
+        .filter(|e| e.subject == event.subject && e.kind == resets && e.at <= event.at)
+        .count();
+    u32::try_from(count).ok().filter(|n| *n > 0)
+}
+
+/// `event` with its cycle set from `events` and its id recomputed.
+fn with_cycle<'a>(event: Event, events: impl Iterator<Item = &'a Event>) -> Event {
+    let cycle = cycle_in(events, &event);
+    if cycle == event.cycle && !event.id.is_empty() {
+        return event;
+    }
+    Event { cycle, ..event }.with_id()
 }
 
 /// The latest fix commit for `issue` since its last reopen, replaying `events` in order.
@@ -852,6 +902,7 @@ impl LogWriter {
     /// Validate and queue one event. Returns false when an event with the same id (or its
     /// legacy id) is already recorded or queued. Nothing is written until `flush`.
     pub fn append(&mut self, event: &Event) -> Result<bool> {
+        let event = &with_cycle(event.clone(), self.catalog.tracker.log.iter());
         self.check(event)?;
         if already_recorded(&self.ids, event) {
             return Ok(false);
@@ -973,7 +1024,7 @@ impl LogWriter {
         let mut results = Vec::new();
         for item in pending {
             let event = match item {
-                Pending::Event(event) => event,
+                Pending::Event(event) => with_cycle(event, recent.iter()),
                 Pending::Report { kind, mut event } => {
                     let title = event.title.clone().unwrap_or_default();
                     event.subject = self.allocate_report_id(kind, &title, &recent, &subjects);
@@ -987,7 +1038,7 @@ impl LogWriter {
                 }
                 Pending::Verify(mut event) => {
                     event.fix = current_fix_in(recent.iter(), &event.subject);
-                    let event = event.with_id();
+                    let event = with_cycle(event.with_id(), recent.iter());
                     self.check(&event)?;
                     if !self.ids.contains_key(&event.id) {
                         self.ids.insert(event.id.clone(), event.clone());
@@ -1049,8 +1100,63 @@ fn resolve_commit(repo: &Path, commit: &str) -> String {
     }
 }
 
+/// Refuse a catalog path that reaches the catalog through a symlink, or resolves outside
+/// the root it was found from. The root is the current directory for a relative path, and
+/// for an absolute path the nearest ancestor holding `.git` (else the catalog's parent).
+/// Only components below the root are checked, so a system-level symlink above it (such
+/// as macOS's /var) does not count.
+pub fn check_catalog_path(dir: &Path) -> Result<()> {
+    use std::path::Component;
+    let cwd = std::env::current_dir()?;
+    let (root, rest): (PathBuf, PathBuf) = if dir.is_absolute() {
+        let root = dir
+            .ancestors()
+            .skip(1)
+            .find(|a| a.join(".git").exists())
+            .or_else(|| dir.parent())
+            .unwrap_or(dir)
+            .to_path_buf();
+        let rest = dir
+            .strip_prefix(&root)
+            .unwrap_or(Path::new(""))
+            .to_path_buf();
+        (root, rest)
+    } else {
+        (cwd.clone(), dir.to_path_buf())
+    };
+    let mut walked = root.clone();
+    for component in rest.components() {
+        match component {
+            Component::Normal(part) => walked.push(part),
+            Component::ParentDir => walked.push(".."),
+            _ => continue,
+        }
+        if fs::symlink_metadata(&walked).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(format!(
+                "refusing to write: catalog path {} goes through symlink {}",
+                dir.display(),
+                walked.display()
+            )
+            .into());
+        }
+    }
+    let resolved =
+        fs::canonicalize(root.join(&rest)).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let root = fs::canonicalize(&root)?;
+    if !resolved.starts_with(&root) {
+        return Err(format!(
+            "refusing to write: catalog {} resolves outside {}",
+            dir.display(),
+            root.display()
+        )
+        .into());
+    }
+    Ok(())
+}
+
 pub fn run(args: LogArgs) -> Result<()> {
     let dir = catalog_dir(args.catalog)?;
+    check_catalog_path(&dir)?;
     let mut writer = LogWriter::open(&dir)?;
     let repo = repo_dir(&writer.catalog);
     let at = match &args.at {
@@ -1146,7 +1252,7 @@ pub fn run(args: LogArgs) -> Result<()> {
         } => {
             let mut event = Event::new(EventKind::Released, &release, &at, &by);
             event.platform = platform;
-            event.date = Some(date.unwrap_or_else(|| at[..10].to_owned()));
+            event.date = Some(date.unwrap_or_else(|| day(&at)));
             event.commit = commit.map(|c| resolve_commit(&repo, &c));
             event
         }
@@ -1157,12 +1263,15 @@ pub fn run(args: LogArgs) -> Result<()> {
         }
     };
     let event = event.with_id();
-    writer.append(&event)?;
-    let added = writer
-        .flush()?
-        .iter()
-        .any(|(e, added)| e.id == event.id && *added);
-    announce(&event, added);
+    // Not queued means already recorded; a queued event may gain a cycle (and a new id)
+    // on the way, so report what was written.
+    if !writer.append(&event)? {
+        announce(&event, false);
+        return Ok(());
+    }
+    for (event, added) in writer.flush()? {
+        announce(&event, added);
+    }
     Ok(())
 }
 
