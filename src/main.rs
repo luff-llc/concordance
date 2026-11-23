@@ -55,6 +55,9 @@ enum Command {
         #[arg(long)]
         today: Option<String>,
     },
+    /// Append facts to tracker/log.jsonl (reported, fixed, verified, reopened, uploaded,
+    /// released, pulled) or scan git for them; see docs/tracker.md ("Log").
+    Log(concordance::log::LogArgs),
     /// Join several app catalogs (suite.toml) into one view of releases, beats and shared features.
     Suite {
         suite: PathBuf,
@@ -364,6 +367,59 @@ enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Scan a repository and write a starting catalog directory; never overwrites.
+    Init {
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Default: the repository directory's name.
+        #[arg(long)]
+        app: Option<String>,
+        /// Catalog directory, relative to --repo (default spec/<app>).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Only search this subtree (relative to --repo) for markers and sources; repeatable.
+        /// Marker files in its parent directories still count.
+        #[arg(long = "scope")]
+        scopes: Vec<PathBuf>,
+        /// Print the plan and catalog.toml without writing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Source files by candidate area, strings, identifiers and tests, and which entries cite them.
+    Inventory {
+        dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long)]
+        platform: Option<String>,
+        /// List only items no entry cites.
+        #[arg(long)]
+        uncatalogued: bool,
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: DriftFormat,
+    },
+    /// Write one audit brief per candidate area (a parity brief with --target); never overwrites.
+    PlanAudit {
+        dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        /// Default: the report baseline.
+        #[arg(long)]
+        platform: Option<String>,
+        #[arg(long)]
+        target: Option<String>,
+        /// Default: DIR/tasks.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        area: Option<String>,
+    },
+    /// Print the agent kit for this catalog.
+    Guide { dir: PathBuf },
 }
 #[derive(Subcommand)]
 enum AnchorsAction {
@@ -692,6 +748,7 @@ fn run(cli: Cli) -> Result<()> {
             );
             write_or_check(&out, &content, check, "track", &regenerate)?;
         }
+        Command::Log(args) => concordance::log::run(args)?,
         Command::Suite {
             suite,
             out,
@@ -1366,6 +1423,83 @@ fn run(cli: Cli) -> Result<()> {
                 catalog.entries.len(),
                 out.display()
             );
+        }
+        Command::Init {
+            repo,
+            app,
+            out,
+            scopes,
+            dry_run,
+        } => {
+            let plan = concordance::adopt::plan_init(&concordance::adopt::InitOptions {
+                repo,
+                app,
+                out,
+                scopes,
+            })?;
+            if !dry_run {
+                plan.apply()?;
+            }
+            print!("{}", plan.render(dry_run));
+        }
+        Command::Inventory {
+            dir,
+            roots,
+            repo,
+            platform,
+            uncatalogued,
+            format,
+        } => {
+            let catalog = Catalog::load(&dir)?;
+            let mut options = roots.options(&catalog)?;
+            options.repo = repo;
+            let mut inventory = catalog.inventory(&options, platform.as_deref())?;
+            if uncatalogued {
+                inventory = inventory.uncatalogued();
+            }
+            match format {
+                DriftFormat::Markdown => print!("{}", inventory.markdown()),
+                DriftFormat::Json => println!("{}", serde_json::to_string_pretty(&inventory)?),
+            }
+        }
+        Command::PlanAudit {
+            dir,
+            roots,
+            repo,
+            platform,
+            target,
+            out,
+            area,
+        } => {
+            let catalog = Catalog::load(&dir)?;
+            let mut options = roots.options(&catalog)?;
+            options.repo = repo;
+            let result = catalog.plan_audit(
+                &options,
+                &concordance::AuditOptions {
+                    platform,
+                    target,
+                    area,
+                    dir: dir.display().to_string(),
+                },
+                out.as_deref(),
+            )?;
+            println!(
+                "{} created; {} unchanged; {} existing briefs preserved.",
+                result.created.len(),
+                result.unchanged.len(),
+                result.preserved.len()
+            );
+            for path in result.created {
+                println!("Created: {}", path.display());
+            }
+            for path in result.preserved {
+                eprintln!("Preserved: {}", path.display());
+            }
+        }
+        Command::Guide { dir } => {
+            let catalog = Catalog::load(&dir)?;
+            print!("{}", catalog.guide(&dir.display().to_string()));
         }
         Command::Journeys { dir, platform, out } => {
             let catalog = Catalog::load(dir)?;

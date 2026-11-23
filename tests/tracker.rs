@@ -472,7 +472,8 @@ fn track_json_shape() {
     assert_eq!(value["gaps"][0]["order"], "work-queue");
     assert!(value["gaps"][0]["order_note"].is_null());
     // A fixed issue carried by a released release is unverified even without its own
-    // release field; one carried only by a pulled release is not.
+    // release field; one carried only by a pulled release is not. Without a log and git,
+    // the plan alone never proves the fix is in the release.
     let unverified: Vec<(&str, &str)> = value["unverified"]
         .as_array()
         .expect("unverified")
@@ -482,9 +483,12 @@ fn track_json_shape() {
     assert_eq!(
         unverified,
         [
-            ("bug.carried-fix", "release 1.1.0 has shipped"),
+            (
+                "bug.carried-fix",
+                "release 1.1.0 is out; containment unknown"
+            ),
             ("bug.home-recovery-blank", "fixed without evidence"),
-            ("bug.old-thing", "release 1.1.0 has shipped"),
+            ("bug.old-thing", "release 1.1.0 is out; containment unknown"),
         ]
     );
     assert!(value.get("today").is_none());

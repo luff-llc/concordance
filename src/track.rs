@@ -3,7 +3,7 @@
 use crate::tracker::{calendar_day, IssueKind, IssueState, Release, ReleaseState, TrackerIssue};
 use crate::{Catalog, Entry, Impact, Result, Status};
 use serde::Serialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -31,6 +31,10 @@ pub struct TrackView {
     pub unverified: Vec<Unverified>,
     pub gaps: Vec<PlatformGaps>,
     pub shared: Vec<SharedView>,
+    /// Declared states that disagree with tracker/log.jsonl, and facts that could not be
+    /// checked. Omitted when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -276,7 +280,7 @@ impl Catalog {
                 kind: issue.kind.as_str().into(),
                 title: issue.title.clone(),
                 statuses: BTreeMap::new(),
-                state: Some(issue.state.as_str().into()),
+                state: Some(self.issue_state_label(issue)),
                 ready: issue.state.is_done(),
             },
             None => CarriedItem {
@@ -322,6 +326,21 @@ impl Catalog {
         }
     }
 
+    /// An issue's state for display: `shipped` once verified and a released release
+    /// contains its fix (from tracker/log.jsonl), else its state.
+    pub(crate) fn issue_state_label(&self, issue: &TrackerIssue) -> String {
+        let shipped = self
+            .tracker
+            .derived
+            .get(&issue.id)
+            .is_some_and(|d| !d.shipped_in.is_empty());
+        if issue.state == IssueState::Verified && shipped {
+            "shipped".into()
+        } else {
+            issue.state.as_str().into()
+        }
+    }
+
     /// Open issues of a kind, by impact, reported date, then ID.
     fn open_issues(&self, kind: IssueKind) -> Vec<&TrackerIssue> {
         let mut open: Vec<&TrackerIssue> = self
@@ -347,12 +366,43 @@ impl Catalog {
                 continue;
             }
             let mut reasons = Vec::new();
-            if issue.evidence.is_empty() {
+            let derived = self.tracker.derived.get(&issue.id);
+            let list = |pick: fn(&crate::Derivation) -> &Vec<String>| -> Vec<String> {
+                derived.map(|d| pick(d).clone()).unwrap_or_default()
+            };
+            let selves = list(|d| &d.self_verified_by);
+            let stale = list(|d| &d.stale_verified_by);
+            let unconfirmed = list(|d| &d.unconfirmed_by);
+            if !selves.is_empty() {
+                reasons.push(format!("self-verified by {}", selves.join(", ")));
+            }
+            if !stale.is_empty() {
+                reasons.push(format!(
+                    "checked before the latest fix by {}",
+                    stale.join(", ")
+                ));
+            }
+            let earlier = list(|d| &d.earlier_fix_by);
+            if !earlier.is_empty() {
+                reasons.push(format!("checked an earlier fix by {}", earlier.join(", ")));
+            }
+            if !unconfirmed.is_empty() {
+                reasons.push(format!(
+                    "check by {} unconfirmed: git cannot place its commit after the fix",
+                    unconfirmed.join(", ")
+                ));
+            }
+            if reasons.is_empty() && issue.evidence.is_empty() {
                 reasons.push("fixed without evidence".to_owned());
             }
-            // The issue's own release and every released release that carries it; pulled
-            // releases do not count.
-            let shipped: std::collections::BTreeSet<&str> = self
+            // Shipped only when git confirms a released commit contains the fix
+            // (tracker/log.jsonl). A released release the plan links to the issue (its own
+            // release, or one that carries it; pulled releases do not count), or one git
+            // could not answer for, is out with containment unknown, unless git says the
+            // fix is not in it. The plan alone is never proof.
+            let shipped: BTreeSet<String> = list(|d| &d.shipped_in).into_iter().collect();
+            let not_in: BTreeSet<String> = list(|d| &d.not_in).into_iter().collect();
+            let mut out_unknown: BTreeSet<String> = self
                 .tracker
                 .releases
                 .iter()
@@ -360,10 +410,17 @@ impl Catalog {
                 .filter(|r| {
                     issue.release.as_deref() == Some(r.id.as_str()) || r.carries.contains(&issue.id)
                 })
-                .map(|r| r.id.as_str())
+                .map(|r| r.id.clone())
                 .collect();
-            for release in shipped {
+            out_unknown.extend(list(|d| &d.containment_unknown));
+            for release in &shipped {
                 reasons.push(format!("release {release} has shipped"));
+            }
+            for release in out_unknown
+                .iter()
+                .filter(|r| !shipped.contains(*r) && !not_in.contains(*r))
+            {
+                reasons.push(format!("release {release} is out; containment unknown"));
             }
             if !reasons.is_empty() {
                 out.push(Unverified {
@@ -484,7 +541,7 @@ impl Catalog {
         let issue_view = |i: &TrackerIssue| IssueView {
             id: i.id.clone(),
             title: i.title.clone(),
-            state: i.state.as_str().into(),
+            state: self.issue_state_label(i),
             impact: i.impact.map(|x| x.as_str().into()),
             reported: i.reported.clone(),
             platforms: i.platforms.clone(),
@@ -560,6 +617,7 @@ impl Catalog {
             unverified: self.unverified(),
             gaps,
             shared,
+            warnings: self.tracker.warnings.clone(),
         })
     }
 }
@@ -672,6 +730,13 @@ impl TrackView {
         out.push(format!("- Open requests: {}", s.open_requests));
         out.push(format!("- Unverified: {}", s.unverified));
         out.push(format!("- Gaps: {}", gaps_text(&s.gaps)));
+
+        if !self.warnings.is_empty() {
+            out.extend(["".into(), "## Warnings".into(), String::new()]);
+            for warning in &self.warnings {
+                out.push(format!("- {warning}"));
+            }
+        }
 
         out.extend(["".into(), "## Releases".into()]);
         if self.releases.is_empty() {

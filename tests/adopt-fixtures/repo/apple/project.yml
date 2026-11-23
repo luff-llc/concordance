@@ -1,0 +1,10 @@
+name: Fixture
+targets:
+  Fixture:
+    type: application
+    platform: iOS
+    sources: [Fixture]
+  FixtureUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [FixtureUITests]

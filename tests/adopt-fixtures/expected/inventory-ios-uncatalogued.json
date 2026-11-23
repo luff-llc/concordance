@@ -1,0 +1,133 @@
+{
+  "app": "fixture",
+  "uncatalogued": true,
+  "platforms": [
+    {
+      "platform": "ios",
+      "root": "apple",
+      "summary": {
+        "files": 4,
+        "files_cited": 1,
+        "identifiers": 3,
+        "identifiers_cited": 1,
+        "strings": 5,
+        "strings_cited": 1,
+        "tests": 1,
+        "tests_cited": 1
+      },
+      "areas": [
+        {
+          "area": "app",
+          "files": 1,
+          "files_cited": 0,
+          "identifiers": 0,
+          "identifiers_cited": 0,
+          "strings": 0,
+          "strings_cited": 0,
+          "tests": 0,
+          "entries": []
+        },
+        {
+          "area": "home",
+          "files": 2,
+          "files_cited": 1,
+          "identifiers": 2,
+          "identifiers_cited": 1,
+          "strings": 2,
+          "strings_cited": 1,
+          "tests": 1,
+          "entries": [
+            "home.browse-items"
+          ]
+        },
+        {
+          "area": "player",
+          "files": 1,
+          "files_cited": 0,
+          "identifiers": 1,
+          "identifiers_cited": 0,
+          "strings": 2,
+          "strings_cited": 0,
+          "tests": 0,
+          "entries": []
+        }
+      ],
+      "files": [
+        {
+          "path": "Fixture/FixtureApp.swift",
+          "area": "app",
+          "cited_by": []
+        },
+        {
+          "path": "Fixture/Home/Item.swift",
+          "area": "home",
+          "cited_by": []
+        },
+        {
+          "path": "Fixture/Player/PlayerView.swift",
+          "area": "player",
+          "cited_by": []
+        }
+      ],
+      "identifiers": [
+        {
+          "identifier": "home.row.*",
+          "areas": [
+            "home"
+          ],
+          "files": [
+            "Fixture/Home/HomeView.swift"
+          ],
+          "cited_by": []
+        },
+        {
+          "identifier": "player.play",
+          "areas": [
+            "player"
+          ],
+          "files": [
+            "Fixture/Player/PlayerView.swift"
+          ],
+          "cited_by": []
+        }
+      ],
+      "strings": [
+        {
+          "key": "%lld episodes",
+          "value": "%lld episodes",
+          "file": "Fixture/Resources/Localizable.xcstrings",
+          "areas": [
+            "home"
+          ],
+          "cited_by": []
+        },
+        {
+          "key": "Pause",
+          "value": "Pause",
+          "file": "Fixture/Resources/Localizable.xcstrings",
+          "areas": [
+            "player"
+          ],
+          "cited_by": []
+        },
+        {
+          "key": "Play",
+          "value": "Play",
+          "file": "Fixture/Resources/Localizable.xcstrings",
+          "areas": [
+            "player"
+          ],
+          "cited_by": []
+        },
+        {
+          "key": "Unused string",
+          "value": "Unused string",
+          "file": "Fixture/Resources/Localizable.xcstrings",
+          "areas": [],
+          "cited_by": []
+        }
+      ],
+      "tests": []
+    }
+  ]
+}

@@ -69,6 +69,10 @@ pub struct AppRow {
     pub app: String,
     pub label: String,
     pub summary: Summary,
+    /// The app's tracker warnings (declared and derived states that disagree). Omitted
+    /// when empty.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -185,6 +189,7 @@ impl Suite {
                 app: key.clone(),
                 label: label.clone(),
                 summary: catalog.tracker_summary(),
+                warnings: catalog.tracker.warnings.clone(),
             })
             .collect();
         let beats = self
@@ -354,6 +359,14 @@ impl SuiteView {
                 s.unverified.to_string(),
                 gaps_text(&s.gaps),
             ]));
+        }
+        if self.apps.iter().any(|a| !a.warnings.is_empty()) {
+            out.extend(["".into(), "## Warnings".into(), String::new()]);
+            for app in &self.apps {
+                for warning in &app.warnings {
+                    out.push(format!("- {}: {warning}", app.label));
+                }
+            }
         }
         out.extend(["".into(), "## Beats".into()]);
         if self.beats.is_empty() {

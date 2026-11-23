@@ -1,0 +1,15 @@
+- id: bug.declared-fixed
+  kind: bug
+  title: Declared fixed in the plan
+  state: fixed
+  impact: high
+  evidence: ["unit 2/2"]
+- id: bug.declared-planned
+  kind: bug
+  title: Planned work
+  state: planned
+  impact: low
+- id: bug.home-blank
+  kind: bug
+  title: Home is blank
+  impact: medium

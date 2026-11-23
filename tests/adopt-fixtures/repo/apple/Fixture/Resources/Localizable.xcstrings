@@ -1,0 +1,16 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "%lld episodes" : {
+      "localizations" : { "en" : { "stringUnit" : { "state" : "translated", "value" : "%lld episodes" } } }
+    },
+    "Nothing here yet" : {},
+    "Pause" : {},
+    "Play" : {
+      "localizations" : { "fr" : { "stringUnit" : { "state" : "translated", "value" : "Lire" } } }
+    },
+    "Removed long ago" : { "extractionState" : "stale" },
+    "Unused string" : {}
+  },
+  "version" : "1.0"
+}

@@ -492,6 +492,9 @@ pub struct Config {
     /// One shared marketing version that every platform must ship.
     #[serde(default)]
     pub version: Option<VersionConfig>,
+    /// `[tracker]`: release tag patterns for `log scan-git`.
+    #[serde(default)]
+    pub tracker: Option<crate::log::TrackerConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -582,6 +585,9 @@ pub enum SourceGlobs {
         user_visible: Vec<String>,
         #[serde(default)]
         strings: Vec<String>,
+        /// Test files, for `inventory` (files matching `all` that look like tests also count).
+        #[serde(default)]
+        tests: Vec<String>,
     },
 }
 impl SourceGlobs {
@@ -600,6 +606,12 @@ impl SourceGlobs {
         match self {
             Self::All(_) => &[],
             Self::Table { strings, .. } => strings,
+        }
+    }
+    pub fn tests(&self) -> &[String] {
+        match self {
+            Self::All(_) => &[],
+            Self::Table { tests, .. } => tests,
         }
     }
 }
