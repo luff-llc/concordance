@@ -33,8 +33,14 @@ spec/product/
   catalog/library.yaml
   catalog/reader.yaml
   retired-ids.json       # optional
+  tracker/releases.yaml  # optional; see tracker.md
+  tracker/issues.yaml    # optional; see tracker.md
   parity.md             # generated
 ```
+
+Releases, bug reports, feature requests and features shared with other apps live in the
+optional `tracker/` files and are reported by `concordance track` and `concordance
+suite`. They are validated with the catalog. See [Tracker](tracker.md).
 
 ```toml
 # Relative to this catalog directory. Defaults to ".".
@@ -198,6 +204,11 @@ Acceptance has at least one nonempty given/when/then journey. Interactions, stat
 and surfaces are also nonempty. Empty lists are allowed for settings, data reads
 and writes, copy, design, and dependency lists. Accessibility label/identifier may
 be empty to record the absence of established source evidence.
+
+Optional `shared_with` names the same feature in other apps of a suite, as
+`<app>:<entry-id>` (for example `["marginalia:player.skip-forward"]`). A single catalog
+checks only the syntax; `concordance suite` resolves the references. See
+[Tracker](tracker.md#shared-features).
 
 ## Blockers
 

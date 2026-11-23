@@ -42,6 +42,9 @@ concordance strings export path/to/catalog --from Localizable.xcstrings --keys-f
 concordance review set ui-report detail.dark --verdict differs --note "Title wraps"
 concordance verify path/to/catalog --review ui-report/review.json --out proposal.yaml
 concordance ui-report path/to/catalog --captures captures
+concordance track path/to/catalog --check
+concordance track path/to/catalog --format json --today 2026-11-22 --out tracker.json
+concordance suite suite.toml --out suite.md
 ```
 
 Validation collects schema, identity, dependency, retirement, and evidence problems in
@@ -62,6 +65,11 @@ Evidence may be anchored (`path#Symbol`, preferred, or `path:L10-L20`) so `drift
 hits rather than whole files. Capture coverage counts produced, skipped and missing
 captures per area and screen, and `compare` writes side-by-side pair images and a
 review page whose notes `verify` turns into a proposed patch, never an edit.
+
+Optional `tracker/releases.yaml` and `tracker/issues.yaml` add releases, bug reports
+and feature requests that point at catalog entries; `track` writes them into one
+deterministic `tracker.md` (or JSON for boards), and `suite` joins several apps' catalogs
+with shared features and dated beats. See [docs/tracker.md](docs/tracker.md).
 
 The format is in [docs/format.md](docs/format.md) and the JSON Schema in
 [schema/catalog.schema.json](schema/catalog.schema.json).
