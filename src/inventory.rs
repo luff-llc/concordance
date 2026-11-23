@@ -73,7 +73,7 @@ pub(crate) struct WalkExtras {
 
 /// Every file below `root/start`, as sorted `/`-separated paths relative to `root`.
 /// A symbolic link is followed only when it is a file inside the root; a fixed `start`
-/// that resolves outside the root is skipped. Skipped links are recorded in `extras`.
+/// with a symbolic link in it is skipped. Skipped links are recorded in `extras`.
 pub(crate) fn walk(
     root: &Path,
     start: &str,
@@ -81,13 +81,23 @@ pub(crate) fn walk(
     extras: &mut WalkExtras,
 ) -> Result<()> {
     let canonical_root = root.canonicalize()?;
-    if !start.is_empty() {
-        match root.join(start).canonicalize() {
+    // Never walk through a symbolic link in a fixed prefix, wherever it points.
+    let mut current = root.to_path_buf();
+    let mut walked = String::new();
+    for part in start.split('/').filter(|p| !p.is_empty()) {
+        current.push(part);
+        walked = if walked.is_empty() {
+            part.to_owned()
+        } else {
+            format!("{walked}/{part}")
+        };
+        match fs::symlink_metadata(&current) {
             Err(_) => return Ok(()), // a glob prefix that does not exist yet matches nothing
-            Ok(dir) if !dir.starts_with(&canonical_root) => {
-                extras.skipped_symlinks.insert(start.to_owned());
+            Ok(meta) if meta.file_type().is_symlink() => {
+                extras.skipped_symlinks.insert(walked);
                 return Ok(());
             }
+            Ok(meta) if !meta.is_dir() => return Ok(()),
             Ok(_) => {}
         }
     }

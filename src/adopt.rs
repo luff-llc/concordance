@@ -604,6 +604,25 @@ fn scan(repo: &Path, scopes: &[String]) -> Result<(BTreeSet<String>, WalkExtras)
             }
             dir = parent(&dir).to_owned();
         }
+        // A scope inside an Android module's source set: the nearest module above it keeps
+        // its manifest in `src/main`.
+        let mut dir = scope.clone();
+        loop {
+            let has_gradle = ["build.gradle", "build.gradle.kts"]
+                .iter()
+                .any(|g| fs::symlink_metadata(repo.join(join(&dir, g))).is_ok_and(|m| m.is_file()));
+            if has_gradle {
+                let manifest = join(&dir, "src/main/AndroidManifest.xml");
+                if fs::symlink_metadata(repo.join(&manifest)).is_ok_and(|m| m.is_file()) {
+                    files.insert(manifest);
+                }
+                break;
+            }
+            if dir.is_empty() {
+                break;
+            }
+            dir = parent(&dir).to_owned();
+        }
     }
     Ok((files, extras))
 }
@@ -611,13 +630,14 @@ fn scan(repo: &Path, scopes: &[String]) -> Result<(BTreeSet<String>, WalkExtras)
 /// Platforms found in a repository (or in its scopes), in name order.
 pub fn detect(repo: &Path, scopes: &[String]) -> Result<Vec<DetectedPlatform>> {
     let (files, extras) = scan(repo, scopes)?;
-    Ok(detect_in(repo, &files, &extras.bundles))
+    Ok(detect_in(repo, &files, &extras.bundles, scopes))
 }
 
 fn detect_in(
     repo: &Path,
     files: &BTreeSet<String>,
     bundles: &BTreeSet<String>,
+    scopes: &[String],
 ) -> Vec<DetectedPlatform> {
     let mut platforms: Vec<DetectedPlatform> = detect_apple(repo, files, bundles)
         .into_iter()
@@ -625,8 +645,103 @@ fn detect_in(
         .chain(detect_web(files))
         .chain(detect_cli(files))
         .collect();
+    for platform in &mut platforms {
+        narrow_to_scopes(platform, scopes, files);
+        platform.user_visible_files = inventory_count(platform, files);
+    }
+    platforms.retain(|p| !p.globs.all.is_empty() || !p.globs.user_visible.is_empty());
     platforms.sort_by(|a, b| a.name.cmp(&b.name));
     platforms
+}
+
+fn platform_dir(platform: &DetectedPlatform) -> &str {
+    if platform.root == "." {
+        ""
+    } else {
+        &platform.root
+    }
+}
+
+/// Make every glob no broader than the scopes: a glob whose fixed prefix lies inside a scope
+/// is kept; a scope inside a glob's fixed prefix narrows it to `<scope>/**/<pattern>`.
+/// Globs that match no scanned file are dropped.
+fn narrow_to_scopes(platform: &mut DetectedPlatform, scopes: &[String], files: &BTreeSet<String>) {
+    let root = platform_dir(platform).to_owned();
+    let mut relative = Vec::new();
+    for scope in scopes {
+        if scope == &root || inside(scope, &root) {
+            return; // a scope at or above the root covers all of it
+        }
+        if inside(&root, scope) {
+            relative.push(under(&root, scope).to_owned());
+        }
+    }
+    if relative.is_empty() {
+        return;
+    }
+    let rel_files: Vec<&str> = files
+        .iter()
+        .filter(|f| inside(&root, f))
+        .map(|f| under(&root, f))
+        .collect();
+    let any_match = |g: &str| {
+        rel_files
+            .iter()
+            .any(|f| crate::drift::glob(g.as_bytes(), f.as_bytes()))
+    };
+    let globs = &mut platform.globs;
+    for list in [
+        &mut globs.all,
+        &mut globs.user_visible,
+        &mut globs.strings,
+        &mut globs.tests,
+    ] {
+        let mut narrowed: Vec<String> = Vec::new();
+        for pattern in list.iter() {
+            let prefix = crate::inventory::static_prefix(pattern);
+            for scope in &relative {
+                let candidate =
+                    if prefix == *scope || (inside(scope, &prefix) && !prefix.is_empty()) {
+                        pattern.clone()
+                    } else if inside(&prefix, scope) {
+                        let tail = under(&prefix, pattern);
+                        match tail.strip_prefix("**/") {
+                            Some(rest) => format!("{scope}/**/{rest}"),
+                            None => format!("{scope}/**/{}", file_name(pattern)),
+                        }
+                    } else {
+                        continue;
+                    };
+                if any_match(&candidate) && !narrowed.contains(&candidate) {
+                    narrowed.push(candidate);
+                }
+            }
+        }
+        *list = narrowed;
+    }
+}
+
+/// User-visible source files exactly as `inventory` counts them: matching `user_visible`
+/// (else `all`), not a string catalog, not a test.
+fn inventory_count(platform: &DetectedPlatform, files: &BTreeSet<String>) -> usize {
+    let root = platform_dir(platform);
+    let g = &platform.globs;
+    let sources = if g.user_visible.is_empty() {
+        &g.all
+    } else {
+        &g.user_visible
+    };
+    let hit = |globs: &[String], f: &str| {
+        globs
+            .iter()
+            .any(|p| crate::drift::glob(p.as_bytes(), f.as_bytes()))
+    };
+    files
+        .iter()
+        .filter(|f| inside(root, f))
+        .map(|f| under(root, f))
+        .filter(|f| hit(sources, f) && !hit(&g.strings, f) && !hit(&g.tests, f) && !is_test_file(f))
+        .count()
 }
 
 fn candidate_key(name: &str) -> String {
@@ -787,7 +902,16 @@ fn app_candidates(
         .filter(|f| matches!(file_name(f), "build.gradle" | "build.gradle.kts"))
     {
         let text = fs::read_to_string(repo.join(gradle)).unwrap_or_default();
-        if !(text.contains("com.android.application") || text.contains("android.application")) {
+        // `id("com.android.application") apply false` in a root build file declares the
+        // plugin without applying it.
+        let applies = text.lines().any(|line| {
+            let line = line.trim();
+            !line.starts_with("//")
+                && (line.contains("com.android.application")
+                    || line.contains("android.application"))
+                && !line.contains("apply false")
+        });
+        if !applies {
             continue;
         }
         let module = parent(gradle);
@@ -1193,7 +1317,7 @@ pub fn plan_init(options: &InitOptions) -> Result<InitPlan> {
         vec![".."; depth].join("/")
     };
     let (scanned, extras) = scan(&repo, &scopes)?;
-    let platforms = detect_in(&repo, &scanned, &extras.bundles);
+    let platforms = detect_in(&repo, &scanned, &extras.bundles, &scopes);
     let candidates = if scopes.is_empty() {
         app_candidates(&repo, &scanned, &extras.bundles)
     } else {
