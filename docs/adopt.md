@@ -89,8 +89,9 @@ concordance log scan-git [--repo .] [--since REF]
 ```
 
 Each command appends one event to `tracker/log.jsonl`: a line with the event kind, its subject,
-time, who recorded it, its evidence, and a stable id derived from those. Appending the same fact
-twice is a no-op, so tools can call these freely. `report` creates the issue (its id comes from
+time, who recorded it and its evidence. A command typed by a person or an agent always records a
+new fact. Automated sources pass a source key (`--key`, or the keys `scan-git` sets from commits
+and tags), and a key already in the log is not recorded again, so tools can call these freely. `report` creates the issue (its id comes from
 the title, `bug.`/`request.` plus a slug, made unique), so `tracker/issues.yaml` is optional.
 
 `scan-git` reads commit trailers and tags and appends what they state:
