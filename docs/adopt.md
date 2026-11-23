@@ -204,6 +204,9 @@ Choices where the proposal left room:
   passes through any symbolic link, even one pointing inside the root, is never walked and is
   listed the same way. Out of scope: a concurrent local process that replaces a parent
   directory with a symbolic link between these checks and the writes.
+- **Single-platform repositories.** `[report] target` is written as the baseline (marked as
+  the only platform), so release readiness without builds never falls back to the model's
+  default `android` target.
 - **Rerunning.** When `catalog.toml` exists, `init` writes nothing, not even missing kit files;
   it lists what it would add (missing files, newly detected platforms, missing
   `[source_globs]`, a tag pattern). In a fresh catalog directory, files that already exist are
@@ -228,7 +231,9 @@ Choices where the proposal left room:
   and match entry identifiers as a glob. Citations: files by entry evidence on that platform
   (after `[path_prefixes]`), identifiers by `accessibility.identifier`, strings by `copy` or
   a copy detail's text or key. External platforms without `--root` are listed as unchecked.
-- **`plan-audit`.** The output directory (default `tasks` in the canonical catalog directory)
+- **`plan-audit`.** The catalog argument is checked first by the log's catalog-path rule
+  (no `..`, and no symbolic link on the way into the checkout, such as a `spec` linked into
+  another checkout). The output directory (default `tasks` in the canonical catalog directory)
   must be inside the catalog directory or the Git checkout that contains it (`repo_root` may
   be a shared parent of several checkouts, so it is not a base, and a sibling checkout is
   refused), may not contain `..`, and is checked and created with `init`'s

@@ -375,6 +375,9 @@ impl Catalog {
         options: &AuditOptions,
         out: Option<&Path>,
     ) -> Result<AuditResult> {
+        // The catalog path must not reach the catalog through a link (for example a `spec`
+        // linked into another checkout), by the same rule the log uses before writing.
+        crate::log::check_catalog_path(&self.directory)?;
         let platform = options
             .platform
             .clone()
