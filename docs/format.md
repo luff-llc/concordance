@@ -331,6 +331,7 @@ root are matched against `[source_globs.<platform>]`:
 all = ["Sources/**/*.swift"]                  # uncatalogued-change detection (drift)
 user_visible = ["Sources/**/Views/**/*.swift"] # files whose changes need a catalog update
 strings = ["**/*.xcstrings"]                  # string catalogs, also user-visible
+tests = ["Tests/**/*.swift"]                  # test files, for `inventory` only
 ```
 
 (The plain list form `ios = [...]` is still accepted; with no `user_visible` or

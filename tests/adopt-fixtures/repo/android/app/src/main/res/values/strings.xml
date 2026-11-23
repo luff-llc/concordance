@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name" translatable="false">Fixture</string>
+    <string name="home_empty">Nothing here yet</string>
+    <string name="player_play">Play</string>
+</resources>

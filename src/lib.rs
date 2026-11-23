@@ -23,8 +23,12 @@ pub use set::{SetOutcome, SetRequest, CLEARABLE};
 pub use suite::{Suite, SuiteView};
 pub use track::{Format as TrackFormat, TrackView};
 pub use tracker::{calendar_day, Tracker};
+pub mod adopt;
+mod audit_plan;
+pub use audit_plan::{AuditOptions, AuditResult};
 mod evidence;
 mod generate;
+pub mod inventory;
 mod model;
 mod report;
 mod validation;
@@ -153,7 +157,8 @@ impl Catalog {
                 && (nested || p.file_name().and_then(|s| s.to_str()) != Some("tokens.yaml"))
         });
         files.sort();
-        if files.is_empty() {
+        // A fresh `init` catalog has an empty `catalog/` directory and is valid.
+        if files.is_empty() && !nested {
             report.error(
                 "schema",
                 "",

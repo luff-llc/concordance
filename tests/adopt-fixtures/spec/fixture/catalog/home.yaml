@@ -1,0 +1,28 @@
+- id: home.browse-items
+  title: Browse items
+  summary: Home lists every item, with an empty state when there are none.
+  surfaces: [home]
+  interactions:
+    - trigger: Open the app
+      result: Home lists the items.
+  states: [ready, empty]
+  settings: []
+  data: {reads: [items], writes: []}
+  copy: [Nothing here yet]
+  accessibility: {label: Items, identifier: home.list, notes: []}
+  design: []
+  depends_on: []
+  impact: high
+  platforms:
+    ios:
+      status: implemented
+      source: ["Fixture/Home/HomeView.swift#HomeView"]
+      tests: ["FixtureUITests/HomeUITests.swift#HomeUITests.testEmptyHome"]
+    android:
+      status: partial
+      source: ["app/src/main/kotlin/com/example/fixture/home/HomeScreen.kt"]
+      gap: Rows have no artwork.
+  acceptance:
+    - given: No items
+      when: Home opens
+      then: The empty state reads "Nothing here yet".

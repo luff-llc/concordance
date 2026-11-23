@@ -1,0 +1,61 @@
+Concordance init: fixture
+Catalog directory: spec/fixture (repo_root = "../..")
+
+Platforms:
+- android: `android` (android; 3 user-visible files; markers: android/app/build.gradle.kts, android/app/src/main/AndroidManifest.xml)
+- ios: `apple` (apple; 4 user-visible files; markers: apple/project.yml)
+Report: baseline ios, target android.
+Releases: no version tags found; [tracker] tag_pattern is a commented example.
+
+Files:
+- would create spec/fixture/catalog.toml
+- would create spec/fixture/catalog/
+- would create spec/fixture/catalog/README.md
+- would create spec/fixture/tracker/
+- would create spec/fixture/AGENTS.md
+
+catalog.toml:
+
+    # Concordance catalog for fixture, written by `concordance init`.
+    # Format: https://github.com/luff-llc/concordance/blob/main/docs/format.md
+    repo_root = "../.."
+
+    # Platform roots, relative to repo_root.
+    [platforms]
+    android = "android"
+    ios = "apple"
+
+    # Relative to each platform root. `all` feeds drift; `user_visible` and `strings` feed gate
+    # and inventory; `tests` feeds inventory.
+    [source_globs.android]
+    all = ["app/src/main/**/*.kt"]
+    user_visible = ["app/src/main/**/*.kt"]
+    strings = ["app/src/main/res/values*/strings.xml"]
+    tests = ["app/src/test/**/*.kt"]
+
+    [source_globs.ios]
+    all = ["Fixture/**/*.swift"]
+    user_visible = ["Fixture/**/*.swift"]
+    strings = ["**/*.xcstrings"]
+    tests = ["FixtureUITests/**/*.swift"]
+
+    [report]
+    title = "Fixture native parity"
+    baseline = "ios"  # most user-visible files (4)
+    target = "android"
+
+    [report.labels]
+    android = "Android"
+    ios = "iOS"
+
+    # Git tags that mark releases; `concordance log scan-git` records matching tags as released.
+    # [tracker]
+    # tag_pattern = "^v(\\d+\\.\\d+\\.\\d+)$"
+
+Dry run: nothing written.
+
+Add this line to the repository's own agent guide (init never writes it):
+
+    Product state is kept by Concordance; run `concordance guide spec/fixture`.
+
+Next: concordance inventory spec/fixture --uncatalogued, then concordance plan-audit spec/fixture.
