@@ -3,7 +3,9 @@
 //! declared state disagrees with the derived one, the derived state wins and a warning is
 //! kept for `track` and `suite`.
 use crate::log::{issue_kind, Event, EventKind, LOG_FILE};
-use crate::tracker::{IssueKind, IssueState, Release, ReleaseState, Tracker, TrackerIssue};
+use crate::tracker::{
+    IssueKind, IssueState, Release, ReleaseState, Tracker, TrackerIssue, ISSUES_FILE,
+};
 use crate::{Catalog, ValidationReport};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -228,11 +230,20 @@ impl Catalog {
             .collect();
         // Reports first, so later facts may refer to issues the log defines.
         let mut valid = Vec::new();
+        // Every subject the log names, so a split report never takes a later one's id.
+        let mut taken: BTreeSet<String> = events.iter().map(|(_, e)| e.subject.clone()).collect();
+        // Issue id -> (line, title) of the report that defines it.
+        let mut first_report: BTreeMap<String, (usize, String)> = BTreeMap::new();
         for pass in [true, false] {
             for (line, event) in &events {
                 if (event.kind == EventKind::Reported) != pass {
                     continue;
                 }
+                let mut event = event.clone();
+                if pass {
+                    self.split_colliding_report(&mut event, *line, &mut first_report, &mut taken);
+                }
+                let event = &event;
                 let errors = self.event_reference_errors(event);
                 if errors.is_empty() {
                     if pass && self.tracker.issue(&event.subject).is_none() {
@@ -256,6 +267,55 @@ impl Catalog {
         valid.sort_by_key(|(line, _)| *line);
         self.tracker.log = valid.into_iter().map(|(_, e)| e).collect();
         self.derive_from_log();
+    }
+
+    /// Two checkouts can give different issues one id (titles that slug alike), and a git
+    /// merge joins their logs. A report whose id is already defined with a different title
+    /// is moved to the next free `<id>-N`, with a warning; facts naming the id keep
+    /// applying to the first.
+    fn split_colliding_report(
+        &mut self,
+        event: &mut Event,
+        line: usize,
+        first_report: &mut BTreeMap<String, (usize, String)>,
+        taken: &mut BTreeSet<String>,
+    ) {
+        let title = event.title.clone().unwrap_or_default();
+        let defined = match first_report.get(&event.subject) {
+            Some((first, existing)) => Some((Some(*first), existing.clone())),
+            None => self
+                .tracker
+                .issue(&event.subject)
+                .filter(|_| !self.tracker.log_only_issues.contains(&event.subject))
+                .map(|issue| (None, issue.title.clone())),
+        };
+        match defined {
+            Some((first, existing)) if existing != title => {
+                let id = (2..)
+                    .map(|n| format!("{}-{n}", event.subject))
+                    .find(|id| {
+                        !taken.contains(id)
+                            && self.tracker.issue(id).is_none()
+                            && !self.entries.contains_key(id)
+                    })
+                    .unwrap_or_else(|| event.subject.clone());
+                let lines = match first {
+                    Some(first) => format!("lines {first}, {line}"),
+                    None => format!("{ISSUES_FILE} and line {line}"),
+                };
+                self.tracker.warnings.push(format!(
+                    "issue id {} reported twice with different titles ({lines}); the second is listed as {id}",
+                    event.subject
+                ));
+                taken.insert(id.clone());
+                event.subject = id.clone();
+                first_report.insert(id, (line, title));
+            }
+            Some(_) => {}
+            None => {
+                first_report.insert(event.subject.clone(), (line, title));
+            }
+        }
     }
 
     /// Issues in issues.yaml that leave `state` out (it defaults to open, but nothing was

@@ -8,13 +8,18 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Git in `repo`, with user configuration that changes output turned off: signatures
-/// shown by `git log`, and colour.
+/// shown by `git log`, colour, and trailer separators.
 fn git_command(repo: &Path) -> Command {
     let mut command = Command::new("git");
-    command
-        .arg("-C")
-        .arg(repo)
-        .args(["-c", "log.showSignature=false", "-c", "color.ui=false"]);
+    command.arg("-C").arg(repo).args([
+        "-c",
+        "log.showSignature=false",
+        "-c",
+        "color.ui=false",
+        // Trailers are `Key: value`, whatever separators the repository configures.
+        "-c",
+        "trailer.separators=:",
+    ]);
     command
 }
 
@@ -265,7 +270,7 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
         "--no-show-signature",
         "--no-color",
         "--reverse",
-        "--format=%H%x1f%an%x1f%ct%x1f%(trailers:only,unfold)%x1e",
+        "--format=%H%x1f%an%x1f%ct%x1f%(trailers:only,unfold)%x1f%B%x1e",
     ];
     if let Some(range) = &range {
         args.push(range);
@@ -276,8 +281,8 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
         if record.trim().is_empty() {
             continue;
         }
-        let fields: Vec<&str> = record.splitn(4, '\u{1f}').collect();
-        let [sha, author, time, trailers] = fields[..] else {
+        let fields: Vec<&str> = record.splitn(5, '\u{1f}').collect();
+        let [sha, author, time, trailers, body] = fields[..] else {
             continue;
         };
         if !is_full_hash(sha) {
@@ -289,6 +294,23 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
         }
         let at = timestamp_from_unix(time.trim().parse().unwrap_or(0));
         let short = crate::log::prefix(sha, 12);
+        // Lines that look like our trailers but git did not read as trailers (a different
+        // separator, or not in the last paragraph) record nothing: say so.
+        let read: Vec<&str> = trailers.lines().map(str::trim).collect();
+        for line in body.lines().map(str::trim) {
+            let lower = line.to_ascii_lowercase();
+            let looks = ["fixes", "verifies", "reports"].iter().any(|k| {
+                lower.strip_prefix(k).is_some_and(|rest| {
+                    rest.trim_start()
+                        .starts_with(|c: char| c.is_ascii_punctuation())
+                })
+            });
+            if looks && !read.contains(&line) {
+                tally.warnings.push(format!(
+                    "commit {short}: {line:?} was not read as a trailer; write `Key: value` in the message's last paragraph"
+                ));
+            }
+        }
         // Every Fixes: in a commit before its Verifies:, whatever the trailer order, so in
         // file order a commit's fix comes before its check.
         let mut items: Vec<(u8, String, String, Option<String>)> = Vec::new();

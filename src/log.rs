@@ -378,8 +378,8 @@ pub fn day(at: &str) -> String {
     prefix(at, 10).to_owned()
 }
 
-/// Lowercase ASCII letters and digits joined by single hyphens, at most `SLUG_MAX` bytes,
-/// cut at a hyphen when possible.
+/// Lowercase ASCII letters and digits joined by single hyphens, at most `SLUG_MAX` bytes.
+/// A longer slug is cut on a word boundary and ends in six hex digits of the title's hash.
 pub fn slug(title: &str) -> String {
     let mut out = String::new();
     for c in title.chars() {
@@ -391,12 +391,17 @@ pub fn slug(title: &str) -> String {
     }
     let mut out = out.trim_end_matches('-').to_owned();
     if out.len() > SLUG_MAX {
-        let cut = out[..=SLUG_MAX]
-            .rfind('-')
-            .filter(|&i| i > SLUG_MAX / 2)
-            .unwrap_or(SLUG_MAX);
+        // Cut on a word boundary, leaving room for `-` and a short hash of the whole
+        // title, so two long titles that share a beginning rarely share a slug.
+        let budget = SLUG_MAX - 7;
+        let cut = if out.as_bytes().get(budget) == Some(&b'-') {
+            budget
+        } else {
+            out[..budget].rfind('-').unwrap_or(budget)
+        };
         out.truncate(cut);
-        out = out.trim_end_matches('-').to_owned();
+        let hash = fnv1a(title.as_bytes()) & 0xff_ffff;
+        out = format!("{}-{hash:06x}", out.trim_end_matches('-'));
     }
     if out.is_empty() {
         "untitled".into()
@@ -832,6 +837,16 @@ impl LogWriter {
         Ok(true)
     }
 
+    /// The recorded event carrying `key`, if any.
+    pub fn recorded_key(&self, key: &str) -> Option<Event> {
+        self.catalog
+            .tracker
+            .log
+            .iter()
+            .find(|e| e.key.as_deref() == Some(key))
+            .cloned()
+    }
+
     /// The recorded event carrying `event`'s source key (for "already recorded" output),
     /// or `event` itself when none is found.
     pub fn recorded_with_key(&self, event: &Event) -> Event {
@@ -1123,6 +1138,14 @@ pub fn run(args: LogArgs) -> Result<()> {
     if key.as_deref().is_some_and(|k| k.trim().is_empty()) {
         return Err("--key must not be empty".into());
     }
+    // A keyed retry is answered from the log before anything else is resolved, so it
+    // works even after the ref it once named is gone.
+    if let (Some(key), false) = (&key, matches!(args.action, LogAction::ScanGit { .. })) {
+        if let Some(existing) = writer.recorded_key(key) {
+            announce(&existing, false);
+            return Ok(());
+        }
+    }
     let mut event = match args.action {
         LogAction::ScanGit {
             repo: chosen,
@@ -1246,8 +1269,11 @@ mod tests {
         let long =
             slug("Playback stops when the phone locks during a long episode download on cellular");
         assert!(long.len() <= SLUG_MAX, "{long}");
-        assert!(!long.ends_with('-'));
-        assert_eq!(long, "playback-stops-when-the-phone-locks-during-a");
+        let (words, hash) = long.rsplit_once('-').expect("hash suffix");
+        assert_eq!(words, "playback-stops-when-the-phone-locks");
+        assert!(hash.len() == 6 && hash.bytes().all(|c| c.is_ascii_hexdigit()));
+        let other = slug("Playback stops when the phone locks during a short clip on wifi");
+        assert_ne!(long, other);
     }
     #[test]
     fn timestamps() {

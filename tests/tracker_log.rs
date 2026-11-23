@@ -2208,3 +2208,126 @@ fn keyed_retry_reports_the_recorded_event() {
         format!("already recorded: reported bug.crash ({report_id})\n")
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// Merge round: colliding issue ids, pinned trailers, keyed retries before resolving.
+
+#[test]
+fn colliding_issue_ids_from_two_checkouts_are_kept_apart() {
+    let repo = Repo::new();
+    use concordance::log::EventKind as K;
+    let report = |title: &str, at: &str| {
+        let mut e = event(K::Reported, "bug.login-fails", at, "a");
+        e.title = Some(title.into());
+        e
+    };
+    append_event(&repo, report("Login fails!", "2026-11-10T00:00:00Z"));
+    append_event(&repo, report("Login fails?", "2026-11-11T00:00:00Z"));
+    // A fact naming the id applies to the first report.
+    let commit = repo.commit("Alice", "2026-11-12T00:00:00Z", "Fix");
+    let mut fix = event(K::Fixed, "bug.login-fails", "2026-11-12T00:00:00Z", "alice");
+    fix.commit = Some(commit);
+    append_event(&repo, fix);
+    let view = repo.track_json();
+    assert!(
+        strings(&view["warnings"]).iter().any(|w| w
+            == "issue id bug.login-fails reported twice with different titles (lines 1, 2); the second is listed as bug.login-fails-2"),
+        "{view:#}"
+    );
+    let first = issue(&view, "bugs", "bug.login-fails").expect("first");
+    assert_eq!(first["title"], "Login fails!");
+    assert_eq!(first["state"], "fixed");
+    let second = issue(&view, "bugs", "bug.login-fails-2").expect("second kept");
+    assert_eq!(second["title"], "Login fails?");
+    assert_eq!(second["state"], "open");
+}
+
+#[test]
+fn long_titles_get_word_boundary_slugs_with_a_hash() {
+    let repo = Repo::new();
+    let a = repo.log(&[
+        "report",
+        "bug",
+        "Playback stops when the phone locks during a long episode download",
+    ]);
+    let b = repo.log(&[
+        "report",
+        "bug",
+        "Playback stops when the phone locks during a short clip on wifi",
+    ]);
+    let lines = repo.lines();
+    let (sa, sb) = (
+        lines[0]["subject"].as_str().unwrap_or_default(),
+        lines[1]["subject"].as_str().unwrap_or_default(),
+    );
+    assert!(
+        sa.starts_with("bug.playback-stops-when-the-phone-locks-"),
+        "{a}"
+    );
+    assert_ne!(sa, sb, "{a}{b}");
+    assert!(!sb.ends_with("-2"), "a hash, not a counter: {sb}");
+}
+
+#[test]
+fn trailer_parsing_ignores_repository_separators() {
+    let repo = Repo::new();
+    repo.git(
+        &["config", "trailer.separators", "="],
+        "x",
+        "2026-11-01T00:00:00Z",
+    );
+    repo.commit(
+        "Alice",
+        "2026-11-10T00:00:00Z",
+        "Fix\n\nFixes: bug.home-blank\n",
+    );
+    repo.commit(
+        "Alice",
+        "2026-11-11T00:00:00Z",
+        "Other\n\nFixes= bug.declared-planned\n",
+    );
+    let output = repo.run(&["log", "scan-git"]);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let out = success(output);
+    assert!(
+        out.ends_with("scan-git: 1 recorded, 0 already recorded\n"),
+        "{out}"
+    );
+    assert_eq!(repo.lines()[0]["subject"], "bug.home-blank");
+    assert!(
+        stderr.contains("\"Fixes= bug.declared-planned\" was not read as a trailer"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn keyed_retry_is_answered_before_resolving_the_commit() {
+    let repo = Repo::new();
+    repo.commit("Rel", "2026-11-10T00:00:00Z", "Release");
+    repo.git(&["tag", "rc-9"], "Rel", "2026-11-10T00:00:00Z");
+    let first = repo.log(&[
+        "--key",
+        "release-taupe:rc-9",
+        "released",
+        "1.1.0",
+        "--commit",
+        "refs/tags/rc-9",
+    ]);
+    assert!(first.starts_with("recorded"), "{first}");
+    repo.git(&["tag", "-d", "rc-9"], "Rel", "2026-11-10T00:00:00Z");
+    let retry = repo.log(&[
+        "--key",
+        "release-taupe:rc-9",
+        "released",
+        "1.1.0",
+        "--commit",
+        "refs/tags/rc-9",
+    ]);
+    assert!(
+        retry.starts_with("already recorded: released 1.1.0"),
+        "{retry}"
+    );
+    // Without the key, the deleted ref is refused.
+    let err = failure(repo.run(&["log", "released", "1.1.0", "--commit", "refs/tags/rc-9"]));
+    assert!(err.contains("does not name exactly one commit"), "{err}");
+}

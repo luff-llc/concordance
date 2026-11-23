@@ -130,6 +130,11 @@ for byte shares its id and loads once. Ids from earlier releases are accepted as
 are, as are the older fields `fix` (a verification's bound fix) and `cycle` (ignored);
 neither is written any more.
 
+Two checkouts can still give different issues one id, and a git merge joins their logs.
+On replay, a `reported` event naming an id already defined with a different title is
+listed under the next free `<id>-N`, with a warning (`issue id X reported twice with
+different titles (lines M, N)`); facts that name the id keep applying to the first.
+
 A key counts once on replay: when two lines carry the same key (two checkouts scanned
 the same tag and git merged both logs), the first in file order counts and later ones
 are ignored with a warning (`key K repeated on line N`). A retried keyed command prints
@@ -189,7 +194,9 @@ Every `log` command takes `--catalog DIR` (default: `$CONCORDANCE_CATALOG`, then
 current directory if it holds `catalog.toml`, then the only `spec/*/catalog.toml` below
 it), `--by WHO` (default: `$CONCORDANCE_ACTOR`, then `git config user.name` in the
 repository, then `unknown`; `verified` requires it), `--at` (UTC time or date; default
-now) and `--key KEY` (not for `scan-git`, which sets its own). `--commit` is resolved to
+now) and `--key KEY` (not for `scan-git`, which sets its own; a command whose key is
+already recorded prints that event before anything else is checked, so a retry works
+even after the ref it named is gone). `--commit` is resolved to
 a full hash when it is recorded; a commit that is unknown or ambiguous (a name that more
 than one of `refs/heads/X`, `refs/tags/X` and `refs/remotes/X` names, or a hex-looking name
 that names a ref and also abbreviates an object) refuses the command. Full refs and full
@@ -198,16 +205,20 @@ older line that is not a full hash is unknown.
 `released` without `--date` uses the day of `--at`.
 
 `report` prints the issue id: `bug.` or `request.` plus a slug of the title (lowercase
-ASCII letters and digits joined by hyphens, at most 48 characters), suffixed `-2`, `-3`, …
-when issues.yaml, an entry or the log already uses it. The id is allocated under the
+ASCII letters and digits joined by hyphens, at most 48 characters; a longer title is cut
+on a word boundary and ends in six hex digits of a hash of the whole title, so long
+titles that share a beginning rarely share an id), suffixed `-2`, `-3`, … when
+issues.yaml, an entry or the log already uses it. The id is allocated under the
 lock, so two titles with the same slug reported at once become two issues. A title an
 existing issue of the same kind already has reuses that issue's id.
 
 ### `scan-git`
 
-Git runs with `-c log.showSignature=false -c color.ui=false` (and `git log
---no-show-signature --no-color` with an explicit `--format`), so user configuration
-cannot change what is parsed, and every hash read back must be a full 40- or 64-digit
+Git runs with `-c log.showSignature=false -c color.ui=false -c trailer.separators=:` (and
+`git log --no-show-signature --no-color` with an explicit `--format`), so user
+configuration cannot change what is parsed; a message line that looks like one of these
+trailers but was not read as one (another separator, or outside the last paragraph) is
+warned about, and every hash read back must be a full 40- or 64-digit
 hash. It reads commits (oldest first; with `--since`, `REF..HEAD`, REF resolved to exactly one
 commit and option-shaped refs refused) in the catalog's `repo_root` (or `--repo`) and
 appends what their trailers state, with the commit's author as `by` and its commit time as
