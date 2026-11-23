@@ -464,7 +464,49 @@ fn detect_web(files: &BTreeSet<String>) -> Option<DetectedPlatform> {
     })
 }
 
-fn detect_cli(files: &BTreeSet<String>) -> Vec<DetectedPlatform> {
+/// Member directories of a Cargo workspace manifest (relative to its directory), matched
+/// against the crates found; `None` when the manifest has no `[workspace] members`.
+fn cargo_members(repo: &Path, root: &str, files: &BTreeSet<String>) -> Option<Vec<String>> {
+    let text = fs::read_to_string(repo.join(join(root, "Cargo.toml"))).ok()?;
+    let table: toml::Table = text.parse().ok()?;
+    let workspace = table.get("workspace")?.as_table()?;
+    let list = |key: &str| -> Vec<String> {
+        workspace
+            .get(key)
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|m| m.trim_end_matches('/').to_owned())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let members = list("members");
+    let exclude = list("exclude");
+    if members.is_empty() {
+        return None;
+    }
+    let crates: BTreeSet<&str> = files
+        .iter()
+        .filter(|f| file_name(f) == "Cargo.toml" && inside(root, f) && parent(f) != root)
+        .map(|f| under(root, parent(f)))
+        .collect();
+    let hit = |patterns: &[String], dir: &str| {
+        patterns
+            .iter()
+            .any(|p| crate::drift::glob(p.as_bytes(), dir.as_bytes()))
+    };
+    Some(
+        crates
+            .into_iter()
+            .filter(|d| hit(&members, d) && !hit(&exclude, d))
+            .map(str::to_owned)
+            .collect(),
+    )
+}
+
+fn detect_cli(repo: &Path, files: &BTreeSet<String>) -> Vec<DetectedPlatform> {
     let mut out = Vec::new();
     for (marker, language, ext) in [
         ("Cargo.toml", "rust", "rs"),
@@ -488,9 +530,27 @@ fn detect_cli(files: &BTreeSet<String>) -> Vec<DetectedPlatform> {
         let mut globs = GlobPlan::default();
         match language {
             "rust" => {
-                globs.all.push("src/**/*.rs".into());
-                if rel.iter().any(|f| f.starts_with("tests/")) {
-                    globs.tests.push("tests/**/*.rs".into());
+                // A workspace lists its member crates; a virtual workspace has no root `src/`.
+                let mut crates = vec![String::new()];
+                if let Some(members) = cargo_members(repo, root, files) {
+                    if !rel.iter().any(|f| f.starts_with("src/")) {
+                        crates.clear();
+                    }
+                    crates.extend(members);
+                }
+                for krate in &crates {
+                    if rel
+                        .iter()
+                        .any(|f| inside(krate, f) && under(krate, f).starts_with("src/"))
+                    {
+                        globs.all.push(join(krate, "src/**/*.rs"));
+                    }
+                    if rel
+                        .iter()
+                        .any(|f| inside(krate, f) && under(krate, f).starts_with("tests/"))
+                    {
+                        globs.tests.push(join(krate, "tests/**/*.rs"));
+                    }
                 }
             }
             "go" => {
@@ -643,7 +703,7 @@ fn detect_in(
         .into_iter()
         .chain(detect_android(repo, files))
         .chain(detect_web(files))
-        .chain(detect_cli(files))
+        .chain(detect_cli(repo, files))
         .collect();
     for platform in &mut platforms {
         narrow_to_scopes(platform, scopes, files);
@@ -1205,51 +1265,63 @@ fn relative_inside(repo: &Path, path: &Path) -> Result<String> {
     Ok(parts.join("/"))
 }
 
-/// `path` made absolute (against the current directory) with `.` and `..` resolved
-/// lexically, so no symbolic link is followed.
-fn lexical_absolute(path: &Path) -> Result<PathBuf> {
-    let joined = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
-    let mut normal = PathBuf::new();
-    for component in joined.components() {
-        match component {
-            Component::ParentDir => {
-                normal.pop();
-            }
-            Component::CurDir => {}
-            other => normal.push(other),
-        }
+/// Refuse a user-supplied path with a `..` component: resolving it lexically can name a
+/// different directory than the operating system would when a component is a link.
+pub(crate) fn reject_parent_components(flag: &str, path: &Path) -> Result<()> {
+    if path.components().any(|c| c == Component::ParentDir) {
+        return fail(format!(
+            "{flag} {} must not contain `..`; give a path inside the repository instead",
+            path.display()
+        ));
     }
-    Ok(normal)
+    Ok(())
 }
 
-/// An output directory inside a repository that init and plan-audit write into without
-/// following symbolic links.
+/// An output directory inside a base directory (a repository or catalog directory) that
+/// init and plan-audit write into without following symbolic links. Every write goes
+/// through `base` (canonical) joined with the checked relative path.
 pub(crate) struct SafeDir {
-    repo: PathBuf,
+    base: PathBuf,
     relative: String,
 }
 impl SafeDir {
-    /// Refuse `dir` unless it is inside `repo`, no existing component below the repository
-    /// is a symbolic link, and its nearest existing ancestor resolves inside the repository.
-    pub(crate) fn new(repo: &Path, dir: &Path) -> Result<Self> {
-        let repo = lexical_absolute(repo)?;
-        let relative = relative_inside(&repo, &lexical_absolute(dir)?)?;
-        check_no_symlinks(&repo, &relative)?;
-        Ok(Self { repo, relative })
+    /// Refuse `dir` (absolute, or relative to the current directory; no `..`) unless it is
+    /// inside `base`, no existing component below `base` is a symbolic link, and its nearest
+    /// existing ancestor resolves inside `base`.
+    pub(crate) fn new(base: &Path, dir: &Path) -> Result<Self> {
+        reject_parent_components("--out", dir)?;
+        let base = base
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", base.display()))?;
+        let absolute = if dir.is_absolute() {
+            dir.to_path_buf()
+        } else {
+            std::env::current_dir()?.canonicalize()?.join(dir)
+        };
+        let relative = relative_inside(&base, &absolute)?;
+        check_no_symlinks(&base, &relative)?;
+        Ok(Self { base, relative })
+    }
+    /// `name` inside a canonical directory, e.g. `tasks` in the catalog directory.
+    pub(crate) fn child(base: &Path, name: &str) -> Result<Self> {
+        let base = base
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", base.display()))?;
+        check_no_symlinks(&base, name)?;
+        Ok(Self {
+            base,
+            relative: name.to_owned(),
+        })
     }
     /// Create the directory one component at a time.
     pub(crate) fn create(&self) -> Result<()> {
-        create_dirs(&self.repo, &self.relative)
+        create_dirs(&self.base, &self.relative)
     }
-    /// The path of `name` in the directory, after the same checks.
+    /// The path of `name` in the directory, after the same checks; write through it.
     pub(crate) fn file(&self, name: &str) -> Result<PathBuf> {
         let relative = join(&self.relative, name);
-        check_no_symlinks(&self.repo, &relative)?;
-        Ok(self.repo.join(relative))
+        check_no_symlinks(&self.base, &relative)?;
+        Ok(self.base.join(relative))
     }
 }
 
@@ -1361,6 +1433,12 @@ pub fn plan_init(options: &InitOptions) -> Result<InitPlan> {
     };
     if app.is_empty() {
         return fail("--app must not be empty");
+    }
+    if let Some(out) = &options.out {
+        reject_parent_components("--out", out)?;
+    }
+    for scope in &options.scopes {
+        reject_parent_components("--scope", scope)?;
     }
     let out_path = match &options.out {
         Some(out) if out.is_absolute() => out.clone(),

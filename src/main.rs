@@ -1474,7 +1474,6 @@ fn run(cli: Cli) -> Result<()> {
             let catalog = Catalog::load(&dir)?;
             let mut options = roots.options(&catalog)?;
             options.repo = repo;
-            let out = out.unwrap_or_else(|| dir.join("tasks"));
             let result = catalog.plan_audit(
                 &options,
                 &concordance::AuditOptions {
@@ -1483,7 +1482,7 @@ fn run(cli: Cli) -> Result<()> {
                     area,
                     dir: dir.display().to_string(),
                 },
-                &out,
+                out.as_deref(),
             )?;
             println!(
                 "{} created; {} unchanged; {} existing briefs preserved.",

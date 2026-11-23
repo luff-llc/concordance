@@ -143,7 +143,9 @@ The repo's agent guide carries one line: *product state is kept by Concordance; 
 
 Choices where the proposal left room:
 
-- **`init` paths.** `--out` is relative to `--repo` and must be inside it; `repo_root` is
+- **`init` paths.** `--out` is relative to `--repo` and must be inside it; `--out` and
+  `--scope` may not contain `..` (a lexical `..` can name a different directory than the
+  operating system resolves through a link); `repo_root` is
   derived from its depth. Platform roots: Apple is the common ancestor of every
   `Package.swift`, `project.yml` and `*.xcodeproj`; it is named `ios` or `macos` only when
   the project files mention exactly one of them, else `apple`. Android is the deepest
@@ -151,7 +153,10 @@ Choices where the proposal left room:
   above an `AndroidManifest.xml`. Web is the `package.json` directory with the most sources
   under `src/`, `app/`, `pages/`, `components/` or `lib/`. `Cargo.toml`, `go.mod` and
   `pyproject.toml` each give a CLI platform (`cli`, or `cli-rust`/`cli-go`/`cli-python` when
-  there are several). A platform with no source files is dropped. Hidden directories,
+  there are several). A Cargo workspace's `[workspace] members` (globs allowed, minus
+  `exclude`) give one `<member>/src/**/*.rs` glob per member crate, plus
+  `<member>/tests/**/*.rs`; a virtual workspace gets no root `src/` glob, and a scope inside a
+  member keeps the platform because the workspace manifest above it still counts. A platform with no source files is dropped. Hidden directories,
   `node_modules`, `build`, `.build`, `DerivedData`, `target`, `Pods`, `.git` and `dist` are
   skipped.
 - **Globs.** One `all` glob per top-level source directory (per module source set on
@@ -222,9 +227,10 @@ Choices where the proposal left room:
   and match entry identifiers as a glob. Citations: files by entry evidence on that platform
   (after `[path_prefixes]`), identifiers by `accessibility.identifier`, strings by `copy` or
   a copy detail's text or key. External platforms without `--root` are listed as unchecked.
-- **`plan-audit`.** The output directory must be inside the catalog's repository (or the
-  catalog directory, when the catalog sits outside the repository) and is checked and created
-  with `init`'s rules: no existing component may be a symbolic link and nothing is written
+- **`plan-audit`.** The output directory (default `tasks` in the canonical catalog directory)
+  must be inside the catalog's repository (or the catalog directory, when the catalog sits
+  outside the repository), may not contain `..`, and is checked and created with `init`'s
+  rules, writing through exactly the checked path: no existing component may be a symbolic link and nothing is written
   through one. Briefs go to `DIR/tasks` (or `--out`) as `audit-<platform>-<area>.md`, or
   `parity-<baseline>-<target>-<area>.md` with `--target`, created exclusively; edited briefs
   are preserved. `--platform` defaults to `[report].baseline`. The parity findings file is
