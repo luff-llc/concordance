@@ -294,3 +294,212 @@ fn guide_reads_tag_patterns_as_string_or_list() {
         "{kit}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn init_refuses_to_write_through_symbolic_links() {
+    use std::os::unix::fs::symlink;
+    let temp = Temp::new();
+    let repo = temp.repo();
+    let outside = temp.0.join("outside");
+    fs::create_dir(&outside).expect("mkdir");
+
+    // An output directory reached through a link that leaves the repository.
+    symlink(&outside, repo.join("spec")).expect("symlink");
+    let refused = run_in(&repo, &["init", "--app", "fixture"]);
+    assert!(!refused.status.success());
+    let message = String::from_utf8_lossy(&refused.stderr);
+    assert!(message.contains("symbolic link"), "{message}");
+    assert_eq!(fs::read_dir(&outside).expect("read").count(), 0);
+    // A dry run refuses too.
+    assert!(!run_in(&repo, &["init", "--app", "fixture", "--dry-run"])
+        .status
+        .success());
+    fs::remove_file(repo.join("spec")).expect("unlink");
+
+    // A link inside the catalog directory, even one that stays inside the repository.
+    fs::create_dir_all(repo.join("spec/fixture")).expect("mkdir");
+    symlink(repo.join("apple"), repo.join("spec/fixture/tracker")).expect("symlink");
+    let inner = run_in(&repo, &["init", "--app", "fixture"]);
+    assert!(!inner.status.success());
+    assert!(!repo.join("spec/fixture/catalog.toml").exists());
+    fs::remove_file(repo.join("spec/fixture/tracker")).expect("unlink");
+
+    // A dangling link where AGENTS.md goes.
+    symlink(
+        outside.join("AGENTS.md"),
+        repo.join("spec/fixture/AGENTS.md"),
+    )
+    .expect("symlink");
+    assert!(!run_in(&repo, &["init", "--app", "fixture"])
+        .status
+        .success());
+    assert!(!outside.join("AGENTS.md").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_skips_symbolic_links_that_leave_the_root() {
+    use std::os::unix::fs::symlink;
+    let temp = Temp::new();
+    let outside = temp.0.join("outside");
+    fs::create_dir(&outside).expect("mkdir");
+    fs::write(
+        outside.join("Leak.swift"),
+        "import SwiftUI\nlet x = Text(\"x\").accessibilityIdentifier(\"leak.id\")\n",
+    )
+    .expect("write");
+    let fixture = temp.repo().join("apple/Fixture");
+    symlink(outside.join("Leak.swift"), fixture.join("Leak.swift")).expect("symlink");
+    symlink(&outside, fixture.join("Outside")).expect("symlink");
+    // A fixed glob prefix (the tests glob) that resolves outside the root.
+    let tests = temp.repo().join("apple/FixtureUITests");
+    fs::rename(&tests, outside.join("FixtureUITests")).expect("move");
+    symlink(outside.join("FixtureUITests"), &tests).expect("symlink");
+    let out = stdout(&run_in(
+        &temp.0,
+        &["inventory", "spec/fixture", "--platform", "ios"],
+    ));
+    assert!(!out.contains("leak.id"), "{out}");
+    assert!(!out.contains("HomeUITests"), "{out}");
+    assert!(
+        out.contains("Skipped 3 symbolic link(s)")
+            && out.contains("`Fixture/Leak.swift`")
+            && out.contains("`Fixture/Outside`")
+            && out.contains("`FixtureUITests`"),
+        "{out}"
+    );
+}
+
+#[test]
+fn inventory_keeps_same_key_strings_per_module() {
+    let temp = Temp::new();
+    let config = temp.0.join("spec/fixture/catalog.toml");
+    let text = fs::read_to_string(&config).expect("read");
+    let text = text
+        .replace(
+            "user_visible = [\"app/src/main/**/*.kt\"]",
+            "user_visible = [\"app/src/main/**/*.kt\", \"feature/src/main/**/*.kt\"]",
+        )
+        .replace(
+            "strings = [\"app/src/main/res/values*/strings.xml\"]",
+            "strings = [\"**/src/main/res/values*/strings.xml\"]",
+        );
+    fs::write(&config, text).expect("write");
+    let feature = temp.repo().join("android/feature/src/main");
+    fs::create_dir_all(feature.join("res/values")).expect("mkdir");
+    fs::create_dir_all(feature.join("kotlin/com/example/feature")).expect("mkdir");
+    fs::write(
+        feature.join("res/values/strings.xml"),
+        "<resources>\n    <string name=\"home_empty\">No features yet</string>\n</resources>\n",
+    )
+    .expect("write");
+    fs::write(
+        feature.join("kotlin/com/example/feature/FeatureScreen.kt"),
+        "package com.example.feature\nfun label() = stringResource(R.string.home_empty)\n",
+    )
+    .expect("write");
+    let json = stdout(&run_in(
+        &temp.0,
+        &[
+            "inventory",
+            "spec/fixture",
+            "--platform",
+            "android",
+            "--format",
+            "json",
+        ],
+    ));
+    let value: serde_json::Value = serde_json::from_str(&json).expect("json");
+    let strings: Vec<(String, String, String)> = value["platforms"][0]["strings"]
+        .as_array()
+        .expect("strings")
+        .iter()
+        .filter(|s| s["key"] == "home_empty")
+        .map(|s| {
+            (
+                s["file"].as_str().unwrap_or_default().to_owned(),
+                s["value"].as_str().unwrap_or_default().to_owned(),
+                s["areas"].to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        strings,
+        vec![
+            (
+                "app/src/main/res/values/strings.xml".to_owned(),
+                "Nothing here yet".to_owned(),
+                "[\"home\"]".to_owned()
+            ),
+            (
+                "feature/src/main/res/values/strings.xml".to_owned(),
+                "No features yet".to_owned(),
+                "[\"feature\"]".to_owned()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn init_scope_limits_detection() {
+    let out = stdout(&run_in(
+        &fixtures(),
+        &[
+            "init",
+            "--repo",
+            "repo",
+            "--app",
+            "fixture",
+            "--scope",
+            "apple/Fixture",
+            "--dry-run",
+        ],
+    ));
+    assert!(out.contains("Scopes: apple/Fixture"), "{out}");
+    assert!(out.contains("- ios: `apple`"), "{out}");
+    assert!(!out.contains("- android:"), "{out}");
+    assert!(out.contains("all = [\"Fixture/**/*.swift\"]"), "{out}");
+    assert!(out.contains("tests = []"), "{out}");
+    let outside = run_in(
+        &fixtures(),
+        &["init", "--repo", "repo", "--scope", "../spec", "--dry-run"],
+    );
+    assert!(!outside.status.success());
+}
+
+#[test]
+fn init_lists_several_apps_with_scope_suggestions() {
+    let temp = Temp::new();
+    let repo = temp.repo();
+    // A second app: an Xcode project with its own application target.
+    let project = repo.join("other/Other.xcodeproj");
+    fs::create_dir_all(&project).expect("mkdir");
+    fs::write(
+        project.join("project.pbxproj"),
+        "{ objects = {\n\t\tA1 = {\n\t\t\tisa = PBXNativeTarget;\n\t\t\tname = Other;\n\t\t\tproductType = \"com.apple.product-type.application\";\n\t\t};\n\t\tA2 = {\n\t\t\tisa = PBXNativeTarget;\n\t\t\tname = OtherWidgets;\n\t\t\tproductType = \"com.apple.product-type.app-extension\";\n\t\t};\n\t\tA3 = {\n\t\t\tisa = PBXNativeTarget;\n\t\t\tname = OtherTests;\n\t\t\tproductType = \"com.apple.product-type.bundle.unit-test\";\n\t\t};\n\t}; }\n",
+    )
+    .expect("write");
+    for dir in ["Other", "OtherWidgets"] {
+        fs::create_dir_all(repo.join("other").join(dir)).expect("mkdir");
+        fs::write(
+            repo.join("other").join(dir).join("Main.swift"),
+            "import SwiftUI\n",
+        )
+        .expect("write");
+    }
+    let out = stdout(&run_in(&repo, &["init", "--app", "all", "--dry-run"]));
+    assert!(out.contains("Several apps found (2)"), "{out}");
+    assert!(
+        out.contains(
+            "    concordance init --app fixture --scope android/app --scope apple/Fixture"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "    concordance init --app other --scope other/Other --scope other/OtherWidgets"
+        ),
+        "{out}"
+    );
+}

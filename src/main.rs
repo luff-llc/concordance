@@ -377,6 +377,10 @@ enum Command {
         /// Catalog directory, relative to --repo (default spec/<app>).
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Only search this subtree (relative to --repo) for markers and sources; repeatable.
+        /// Marker files in its parent directories still count.
+        #[arg(long = "scope")]
+        scopes: Vec<PathBuf>,
         /// Print the plan and catalog.toml without writing.
         #[arg(long)]
         dry_run: bool,
@@ -1424,10 +1428,15 @@ fn run(cli: Cli) -> Result<()> {
             repo,
             app,
             out,
+            scopes,
             dry_run,
         } => {
-            let plan =
-                concordance::adopt::plan_init(&concordance::adopt::InitOptions { repo, app, out })?;
+            let plan = concordance::adopt::plan_init(&concordance::adopt::InitOptions {
+                repo,
+                app,
+                out,
+                scopes,
+            })?;
             if !dry_run {
                 plan.apply()?;
             }

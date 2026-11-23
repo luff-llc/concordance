@@ -61,19 +61,45 @@ pub(crate) fn skip_dir(name: &str) -> bool {
         || name.ends_with(".xcassets")
 }
 
-/// Every file below `root/start`, as sorted `/`-separated paths relative to `root`.
-/// Symbolic links are not followed.
-pub(crate) fn walk(root: &Path, start: &str, out: &mut BTreeSet<String>) -> Result<()> {
-    walk_with(root, start, out, &mut BTreeSet::new())
+/// What a walk found besides files.
+#[derive(Debug, Default)]
+pub(crate) struct WalkExtras {
+    /// Xcode project bundles (`*.xcodeproj`), recorded instead of descended into.
+    pub bundles: BTreeSet<String>,
+    /// Symbolic links not followed: directory links, dangling links and links that resolve
+    /// outside the root (relative to the root).
+    pub skipped_symlinks: BTreeSet<String>,
 }
 
-/// Like `walk`; Xcode project bundles (`*.xcodeproj`) are recorded in `bundles` instead
-/// of being descended into.
-pub(crate) fn walk_with(
+/// Every file below `root/start`, as sorted `/`-separated paths relative to `root`.
+/// A symbolic link is followed only when it is a file inside the root; a fixed `start`
+/// that resolves outside the root is skipped. Skipped links are recorded in `extras`.
+pub(crate) fn walk(
     root: &Path,
     start: &str,
     out: &mut BTreeSet<String>,
-    bundles: &mut BTreeSet<String>,
+    extras: &mut WalkExtras,
+) -> Result<()> {
+    let canonical_root = root.canonicalize()?;
+    if !start.is_empty() {
+        match root.join(start).canonicalize() {
+            Err(_) => return Ok(()), // a glob prefix that does not exist yet matches nothing
+            Ok(dir) if !dir.starts_with(&canonical_root) => {
+                extras.skipped_symlinks.insert(start.to_owned());
+                return Ok(());
+            }
+            Ok(_) => {}
+        }
+    }
+    walk_dir(root, &canonical_root, start, out, extras)
+}
+
+fn walk_dir(
+    root: &Path,
+    canonical_root: &Path,
+    start: &str,
+    out: &mut BTreeSet<String>,
+    extras: &mut WalkExtras,
 ) -> Result<()> {
     let dir = if start.is_empty() {
         root.to_path_buf()
@@ -81,7 +107,7 @@ pub(crate) fn walk_with(
         root.join(start)
     };
     let Ok(entries) = fs::read_dir(&dir) else {
-        return Ok(()); // a glob prefix that does not exist yet matches nothing
+        return Ok(());
     };
     let mut entries = entries.collect::<std::io::Result<Vec<_>>>()?;
     entries.sort_by_key(|e| e.file_name());
@@ -95,17 +121,34 @@ pub(crate) fn walk_with(
             format!("{start}/{name}")
         };
         let kind = entry.file_type()?;
-        if kind.is_dir() {
+        if kind.is_symlink() {
+            match entry.path().canonicalize() {
+                Ok(target) if target.starts_with(canonical_root) && target.is_file() => {
+                    out.insert(relative);
+                }
+                _ => {
+                    extras.skipped_symlinks.insert(relative);
+                }
+            }
+        } else if kind.is_dir() {
             if name.ends_with(".xcodeproj") {
-                bundles.insert(relative);
+                extras.bundles.insert(relative);
             } else if !skip_dir(&name) {
-                walk_with(root, &relative, out, bundles)?;
+                walk_dir(root, canonical_root, &relative, out, extras)?;
             }
         } else if kind.is_file() {
             out.insert(relative);
         }
     }
     Ok(())
+}
+
+/// The module a path belongs to: everything before its `src/` directory (`""` when none).
+fn module_of(path: &str) -> &str {
+    if path.starts_with("src/") {
+        return "";
+    }
+    path.find("/src/").map(|i| &path[..i]).unwrap_or("")
 }
 
 /// The directory a glob can match under: its components before the first wildcard (all
@@ -449,6 +492,9 @@ pub struct PlatformInventory {
     pub identifiers: Vec<IdentifierItem>,
     pub strings: Vec<StringItem>,
     pub tests: Vec<FileItem>,
+    /// Symbolic links not followed (relative to the platform root).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped_symlinks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -582,7 +628,14 @@ fn areas_for(files: &BTreeMap<String, String>) -> BTreeMap<String, String> {
             group
                 .split('/')
                 .rev()
-                .find(|c| !c.is_empty() && !GENERIC_DIRS.contains(&c.to_ascii_lowercase().as_str()))
+                .find(|c| {
+                    // A module or target folder may be called `feature`; skip only layout folders.
+                    !c.is_empty()
+                        && !matches!(
+                            c.to_ascii_lowercase().as_str(),
+                            "src" | "source" | "sources" | "main" | "kotlin" | "java" | "swift"
+                        )
+                })
                 .map(slug)
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "app".to_owned())
@@ -685,8 +738,9 @@ impl Catalog {
     ) -> Result<PlatformInventory> {
         let globs = Globs::of(self, name);
         let mut paths = BTreeSet::new();
+        let mut extras = WalkExtras::default();
         for prefix in globs.prefixes() {
-            walk(root, &prefix, &mut paths)?;
+            walk(root, &prefix, &mut paths, &mut extras)?;
         }
         // Classify: string catalogs, tests, then user-visible sources.
         let mut sources: BTreeMap<String, String> = BTreeMap::new();
@@ -795,8 +849,10 @@ impl Catalog {
 
         let mut identifiers: BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)> =
             BTreeMap::new();
-        let mut literal_areas: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        let mut resource_areas: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        // Text (or resource name) -> module -> areas using it.
+        type Usage = BTreeMap<String, BTreeMap<String, BTreeSet<String>>>;
+        let mut literal_areas: Usage = BTreeMap::new();
+        let mut resource_areas: Usage = BTreeMap::new();
         for path in &scanned {
             let Ok(text) = fs::read_to_string(root.join(path)) else {
                 continue; // binary or unreadable
@@ -810,30 +866,45 @@ impl Catalog {
                 }
             }
             let area = area.unwrap_or_else(|| "(other)".to_owned());
+            let module = module_of(path).to_owned();
             let (literals, resources) = usages_in(&text);
-            for literal in literals {
-                literal_areas
-                    .entry(literal)
-                    .or_default()
-                    .insert(area.clone());
-            }
-            for resource in resources {
-                resource_areas
-                    .entry(resource)
-                    .or_default()
-                    .insert(area.clone());
+            for (map, keys) in [
+                (&mut literal_areas, literals),
+                (&mut resource_areas, resources),
+            ] {
+                for key in keys {
+                    map.entry(key)
+                        .or_default()
+                        .entry(module.clone())
+                        .or_default()
+                        .insert(area.clone());
+                }
             }
         }
+        // A string's areas: uses in its own module, or anywhere when its module has none.
+        let areas_of = |usage: Option<&BTreeMap<String, BTreeSet<String>>>, file: &str| {
+            let Some(by_module) = usage else {
+                return Vec::new();
+            };
+            match by_module.get(module_of(file)) {
+                Some(own) => own.iter().cloned().collect(),
+                None => by_module
+                    .values()
+                    .flatten()
+                    .cloned()
+                    .collect::<BTreeSet<String>>()
+                    .into_iter()
+                    .collect(),
+            }
+        };
 
-        let mut strings: BTreeMap<String, StringItem> = BTreeMap::new();
+        // Keyed by (file, key): two modules' `title` strings stay separate.
+        let mut strings: BTreeMap<(String, String), StringItem> = BTreeMap::new();
         for file in &string_files {
             let Ok(text) = fs::read_to_string(root.join(file)) else {
                 continue;
             };
             for s in strings_in(file, &text) {
-                if strings.contains_key(&s.key) {
-                    continue;
-                }
                 let usage = if s.resource {
                     resource_areas.get(&s.key)
                 } else {
@@ -843,16 +914,15 @@ impl Catalog {
                 for text in [&s.key, &s.value] {
                     cited_by.extend(entry_copy.get(text).into_iter().flatten().cloned());
                 }
-                strings.insert(
-                    s.key.clone(),
-                    StringItem {
+                strings
+                    .entry((s.key.clone(), file.clone()))
+                    .or_insert(StringItem {
+                        areas: areas_of(usage, file),
                         key: s.key,
                         value: s.value,
                         file: file.clone(),
-                        areas: usage.into_iter().flatten().cloned().collect(),
                         cited_by: cited_by.into_iter().collect(),
-                    },
-                );
+                    });
             }
         }
 
@@ -973,6 +1043,7 @@ impl Catalog {
             identifiers,
             strings,
             tests,
+            skipped_symlinks: extras.skipped_symlinks.into_iter().collect(),
         })
     }
 }
@@ -989,6 +1060,7 @@ impl PlatformInventory {
             identifiers: Vec::new(),
             strings: Vec::new(),
             tests: Vec::new(),
+            skipped_symlinks: Vec::new(),
         }
     }
 }
@@ -1066,6 +1138,18 @@ impl Inventory {
         });
         for p in self.platforms.iter().filter(|p| p.unchecked.is_none()) {
             out.extend([String::new(), format!("## {}", p.platform), String::new()]);
+            if !p.skipped_symlinks.is_empty() {
+                out.push(format!(
+                    "Skipped {} symbolic link(s) (directory links, dangling links, or links that leave the platform root): {}.",
+                    p.skipped_symlinks.len(),
+                    p.skipped_symlinks
+                        .iter()
+                        .map(|l| md_code(l))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                out.push(String::new());
+            }
             out.push(
                 "| Area | Files cited | Identifiers cited | Strings cited | Tests | Entries |"
                     .into(),
