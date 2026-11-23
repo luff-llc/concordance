@@ -472,7 +472,35 @@ fn init_scope_limits_detection() {
 fn init_lists_several_apps_with_scope_suggestions() {
     let temp = Temp::new();
     let repo = temp.repo();
-    // A second app: an Xcode project with its own application target.
+    add_other_app(&repo);
+    // A root build file that declares the Android plugin without applying it is no app.
+    fs::write(
+        repo.join("android/build.gradle.kts"),
+        "plugins {\n    id(\"com.android.application\") version \"8.7.0\" apply false\n}\n",
+    )
+    .expect("write");
+    let out = stdout(&run_in(&repo, &["init", "--app", "all", "--dry-run"]));
+    assert!(out.contains("Several apps found (2)"), "{out}");
+    assert!(
+        !out.contains("Android module in android/build.gradle.kts"),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "    concordance init --app fixture --scope android/app --scope apple/Fixture"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains(
+            "    concordance init --app other --scope other/Other --scope other/OtherWidgets"
+        ),
+        "{out}"
+    );
+}
+
+/// A second app: an Xcode project with an application and a widget target.
+fn add_other_app(repo: &Path) {
     let project = repo.join("other/Other.xcodeproj");
     fs::create_dir_all(&project).expect("mkdir");
     fs::write(
@@ -488,18 +516,113 @@ fn init_lists_several_apps_with_scope_suggestions() {
         )
         .expect("write");
     }
-    let out = stdout(&run_in(&repo, &["init", "--app", "all", "--dry-run"]));
-    assert!(out.contains("Several apps found (2)"), "{out}");
+}
+
+#[cfg(unix)]
+#[test]
+fn inventory_never_walks_a_linked_prefix_even_inside_the_root() {
+    use std::os::unix::fs::symlink;
+    let temp = Temp::new();
+    let apple = temp.repo().join("apple");
+    fs::rename(apple.join("FixtureUITests"), apple.join("RealTests")).expect("move");
+    symlink(apple.join("RealTests"), apple.join("FixtureUITests")).expect("symlink");
+    let out = stdout(&run_in(
+        &temp.0,
+        &["inventory", "spec/fixture", "--platform", "ios"],
+    ));
+    assert!(!out.contains("HomeUITests"), "{out}");
     assert!(
-        out.contains(
-            "    concordance init --app fixture --scope android/app --scope apple/Fixture"
-        ),
+        out.contains("Skipped 1 symbolic link(s)") && out.contains("`FixtureUITests`"),
         "{out}"
     );
+}
+
+/// `- <platform>: `<root>` (<kind>; N user-visible files; ...` lines of an init plan.
+fn planned_counts(plan: &str) -> Vec<(String, usize)> {
+    plan.lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("- ")?;
+            let (name, rest) = rest.split_once(": `")?;
+            let count = rest
+                .split("; ")
+                .nth(1)?
+                .strip_suffix(" user-visible files")?;
+            Some((name.to_owned(), count.parse().ok()?))
+        })
+        .collect()
+}
+
+#[test]
+fn narrow_scopes_give_narrow_globs_and_matching_counts() {
+    let temp = Temp::new();
+    let repo = temp.repo();
+    let plan = stdout(&run_in(
+        &repo,
+        &[
+            "init",
+            "--app",
+            "narrow",
+            "--scope",
+            "apple/Fixture/Home",
+            "--scope",
+            "android/app/src/main/kotlin",
+        ],
+    ));
+    let toml = fs::read_to_string(repo.join("spec/narrow/catalog.toml")).expect("catalog");
     assert!(
-        out.contains(
-            "    concordance init --app other --scope other/Other --scope other/OtherWidgets"
-        ),
-        "{out}"
+        toml.contains("all = [\"Fixture/Home/**/*.swift\"]"),
+        "{toml}"
     );
+    assert!(
+        toml.contains("all = [\"app/src/main/kotlin/**/*.kt\"]"),
+        "{toml}"
+    );
+    assert!(!toml.contains("Fixture/**/*.swift"), "{toml}");
+    let planned = planned_counts(&plan);
+    assert_eq!(
+        planned,
+        vec![("android".to_owned(), 3), ("ios".to_owned(), 2)],
+        "{plan}"
+    );
+    let json = stdout(&run_in(
+        &repo,
+        &["inventory", "spec/narrow", "--format", "json"],
+    ));
+    let value: serde_json::Value = serde_json::from_str(&json).expect("json");
+    let counted: Vec<(String, usize)> = value["platforms"]
+        .as_array()
+        .expect("platforms")
+        .iter()
+        .map(|p| {
+            (
+                p["platform"].as_str().unwrap_or_default().to_owned(),
+                p["summary"]["files"].as_u64().unwrap_or_default() as usize,
+            )
+        })
+        .collect();
+    assert_eq!(counted, planned);
+}
+
+#[test]
+fn whole_repository_counts_match_inventory() {
+    let temp = Temp::new();
+    let repo = temp.repo();
+    let plan = stdout(&run_in(&repo, &["init", "--app", "fixture"]));
+    let json = stdout(&run_in(
+        &repo,
+        &["inventory", "spec/fixture", "--format", "json"],
+    ));
+    let value: serde_json::Value = serde_json::from_str(&json).expect("json");
+    let counted: Vec<(String, usize)> = value["platforms"]
+        .as_array()
+        .expect("platforms")
+        .iter()
+        .map(|p| {
+            (
+                p["platform"].as_str().unwrap_or_default().to_owned(),
+                p["summary"]["files"].as_u64().unwrap_or_default() as usize,
+            )
+        })
+        .collect();
+    assert_eq!(counted, planned_counts(&plan));
 }

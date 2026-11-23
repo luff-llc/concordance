@@ -168,11 +168,19 @@ Choices where the proposal left room:
 - **Monorepos and `--scope`.** `init --scope PATH` (repeatable, relative to `--repo`, a
   directory inside it) searches only those subtrees for sources, plus the marker files and
   `*.xcodeproj` bundles in each scope's parent directories, so a shared project or Gradle
-  settings file above the scope still names the platform and its root. String-catalog globs
-  are limited to the top-level folders that hold them. Without `--scope`, `init` lists the apps
+  settings file above the scope still names the platform and its root; a scope inside an
+  Android module's source set (`android/app/src/main/kotlin`) also picks up
+  `<module>/src/main/AndroidManifest.xml` for the nearest module above it. Globs are never
+  broader than the scopes: a scope inside a glob's fixed prefix narrows it
+  (`--scope apple/Fixture/Home` gives `Fixture/Home/**/*.swift`), and globs that match nothing
+  in the scopes are dropped. String-catalog globs are limited to the top-level folders that
+  hold them. The user-visible count `init` prints is computed exactly as `inventory` counts
+  files (matching `user_visible`, else `all`, and neither a string catalog nor a test), so the
+  two agree on the written catalog. Without `--scope`, `init` lists the apps
   it finds when there is more than one: Apple application targets (from `project.pbxproj`,
   quoted or not, and XcodeGen `project.yml`) and Android modules applying
-  `com.android.application`. Apps are grouped by name without platform suffixes (`TaupeWatch`
+  `com.android.application` (a declaration with `apply false`, as in a root build file, does
+  not count). Apps are grouped by name without platform suffixes (`TaupeWatch`
   joins `Taupe`; an Android module called `app` takes the Gradle `rootProject.name`). Each
   target's scope is the source folder named after it, plus extension targets whose names start
   with it (`TaupeWidgets`); a project holding one app falls back to its own folder. `init` then
@@ -184,7 +192,10 @@ Choices where the proposal left room:
   component at a time and files with exclusive create, so nothing is written through a link.
   Scans follow a symbolic link only when it is a file inside the root; directory links,
   dangling links, links leaving the root, and fixed glob prefixes that resolve outside it are
-  skipped, and `inventory` lists them as skipped symbolic links.
+  skipped, and `inventory` lists them as skipped symbolic links. A fixed glob prefix that
+  passes through any symbolic link, even one pointing inside the root, is never walked and is
+  listed the same way. Out of scope: a concurrent local process that replaces a parent
+  directory with a symbolic link between these checks and the writes.
 - **Rerunning.** When `catalog.toml` exists, `init` writes nothing, not even missing kit files;
   it lists what it would add (missing files, newly detected platforms, missing
   `[source_globs]`, a tag pattern). In a fresh catalog directory, files that already exist are
