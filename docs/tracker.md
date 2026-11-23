@@ -113,21 +113,29 @@ Any event may carry `key`. `at` is UTC to the second (`YYYY-MM-DDTHH:MM:SSZ`); `
 recorded the fact. The issue kind comes from the subject's prefix (`bug.` or `request.`).
 
 **Idempotency is by source, not content.** `key` is a stable source key set only by
-automated sources: `scan-git` uses `git:trailer:<commit>:<Fixes|Verifies|Reports>:<issue>`
-and `git:tag:<full refname>:<commit>`, and tools pass `--key` (a release hook might pass
+automated sources: `scan-git` uses `git:trailer:<commit>:<Fixes|Reports>:<issue>`,
+`git:trailer:<commit>:Verifies:<issue>:<n>` (the n-th `Verifies:` item for that issue in
+that commit, so each evidence item is its own fact) and
+`git:tag:<full refname>:<commit>`, and tools pass `--key` (a release hook might pass
 `release-taupe:<upload id>`). An event whose key is already in the log is `already
 recorded`. An event without a key is always appended: a person or agent running a
 command states a new fact. So a rescan never re-adds a trailer or tag, whatever happened
 since (a pull, a reopen), and a re-release after a pull is just another `released` line.
+A `report` retried with a key already recorded prints the issue that key created.
 
-`id` is an FNV-1a 64 hash (16 hex digits) of the whole line with `id` left empty, `at`
-included: unique per line, and equal for identical lines. Ids written by earlier
-releases (derived from a fact's distinguishing fields) are still accepted, as are the
-older fields `fix` (a verification's bound fix) and `cycle` (ignored); neither is
-written any more.
+`id` is 16 lowercase hex digits, fresh for every appended line (64 bits from
+`/dev/urandom` mixed with the process, time, a sequence number and the content), so two
+unkeyed facts never collide even with identical fields and `at`. A line duplicated byte
+for byte shares its id and loads once. Ids from earlier releases are accepted as they
+are, as are the older fields `fix` (a verification's bound fix) and `cycle` (ignored);
+neither is written any more.
+
+**Upgrading a pre-key log.** Automated facts written before source keys have no `key`,
+so a rescan would add them again. Delete `tracker/log.jsonl` (or the scan-git lines) and
+run `scan-git` from scratch; re-record any manual facts.
 
 Parsing is strict: unknown fields, missing or forbidden fields for the kind, malformed
-times and dates, an `id` that matches no known derivation, and references to unknown
+times and dates, a malformed `id`, and references to unknown
 issues, entries or platforms are errors that name the line (`tracker/log.jsonl:7`). The
 `log` commands refuse to append while the log has errors. Blank lines are ignored and
 never written. A repeated id keeps its first line: an identical repeat is silent, one
@@ -144,8 +152,9 @@ everything in one write. Writers refuse to write when `tracker/`, the log or the
 symlink, or when `tracker/` resolves outside the catalog directory.
 
 **Catalog path.** Before any write, the catalog path (from `--catalog`,
-`$CONCORDANCE_CATALOG`, the current directory or `spec/*/catalog.toml`) is checked. Its
-root is the git toplevel of the *canonical* catalog directory (or its canonical parent
+`$CONCORDANCE_CATALOG`, the current directory or `spec/*/catalog.toml`) is checked, and
+the writer then uses exactly that path. A path with a `..` component is refused
+outright. Its root is the git toplevel of the *canonical* catalog directory (or its canonical parent
 outside git). Some ancestor of the lexical path (made absolute, `..` resolved) must
 canonicalize to that root; the deepest one is its lexical counterpart. Writes are
 refused when none does (the path enters the repository through a symlink, as when
@@ -174,11 +183,12 @@ Every `log` command takes `--catalog DIR` (default: `$CONCORDANCE_CATALOG`, then
 current directory if it holds `catalog.toml`, then the only `spec/*/catalog.toml` below
 it), `--by WHO` (default: `$CONCORDANCE_ACTOR`, then `git config user.name` in the
 repository, then `unknown`; `verified` requires it), `--at` (UTC time or date; default
-now) and `--key KEY` (not for `scan-git`, which sets its own). Commits are expanded to
-full hashes when git resolves them to exactly one commit. A name that more than one of
-`refs/heads/X`, `refs/tags/X` and `refs/remotes/X` names, or a hex-looking name that names
-a ref and also abbreviates an object, is ambiguous: recorded as given with a warning and
-never treated as a known commit. Full refs and full 40- or 64-digit hashes are fine.
+now) and `--key KEY` (not for `scan-git`, which sets its own). `--commit` is resolved to
+a full hash when it is recorded; a commit that is unknown or ambiguous (a name that more
+than one of `refs/heads/X`, `refs/tags/X` and `refs/remotes/X` names, or a hex-looking name
+that names a ref and also abbreviates an object) refuses the command. Full refs and full
+40- or 64-digit hashes are fine. Replay never re-resolves a stored name: a commit in an
+older line that is not a full hash is unknown.
 `released` without `--date` uses the day of `--at`.
 
 `report` prints the issue id: `bug.` or `request.` plus a slug of the title (lowercase

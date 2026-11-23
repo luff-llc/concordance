@@ -295,7 +295,7 @@ fn strict_log_parsing_names_lines() {
         ),
         (
             "{\"id\":\"0\",\"kind\":\"pulled\",\"subject\":\"1.0\",\"at\":\"2026-11-20T00:00:00Z\",\"by\":\"a\",\"reason\":\"r\"}",
-            "does not match its content",
+            "must be 16 lowercase hex digits",
         ),
         (
             "{\"id\":\"0\",\"kind\":\"fixed\",\"subject\":\"crash\",\"at\":\"2026-11-20T00:00:00Z\",\"by\":\"a\",\"commit\":\"abc\"}",
@@ -334,6 +334,9 @@ fn strict_log_parsing_names_lines() {
 #[test]
 fn derived_issue_states_and_warnings() {
     let repo = Repo::new();
+    let fake_aaaa111 = repo.commit("Alice", "2026-11-01T00:00:00Z", "commit aaaa111");
+    let fake_bbbb222 = repo.commit("Alice", "2026-11-01T00:00:00Z", "commit bbbb222");
+    let fake_cccc333 = repo.commit("Alice", "2026-11-01T00:00:00Z", "commit cccc333");
     let at = |t: &str| format!("2026-11-{t}");
     repo.log(&[
         "--at",
@@ -353,7 +356,7 @@ fn derived_issue_states_and_warnings() {
         "fixed",
         "bug.log-only",
         "--commit",
-        "aaaa111",
+        &fake_aaaa111,
     ]);
     repo.log(&[
         "--at",
@@ -374,7 +377,7 @@ fn derived_issue_states_and_warnings() {
         "fixed",
         "bug.home-blank",
         "--commit",
-        "bbbb222",
+        &fake_bbbb222,
     ]);
     repo.log(&[
         "--at",
@@ -444,7 +447,7 @@ fn derived_issue_states_and_warnings() {
         "fixed",
         "bug.declared-fixed",
         "--commit",
-        "cccc333",
+        &fake_cccc333,
     ]);
     repo.log(&[
         "--at",
@@ -734,41 +737,27 @@ fn scan_git_reads_trailers_and_tags() {
 #[test]
 fn shipped_needs_git() {
     let repo = Repo::new();
-    // Commits git does not know: the check is skipped with a warning, never guessed.
-    repo.log(&[
-        "--at",
-        "2026-11-10T09:00:00Z",
-        "--by",
-        "alice",
-        "fixed",
-        "bug.home-blank",
-        "--commit",
-        "1111111",
-    ]);
-    repo.log(&[
-        "--at",
-        "2026-11-11T09:00:00Z",
-        "--by",
-        "bob",
-        "verified",
-        "bug.home-blank",
-        "--evidence",
-        "ok",
-    ]);
-    repo.log(&[
-        "--at",
-        "2026-11-12T09:00:00Z",
-        "released",
-        "1.1.0",
-        "--commit",
-        "2222222",
-    ]);
+    // Recording refuses commits git does not know.
+    let err = failure(repo.run(&["log", "fixed", "bug.home-blank", "--commit", "1111111"]));
+    assert!(err.contains("does not name exactly one commit"), "{err}");
+    assert!(repo.lines().is_empty());
+    // Older lines with short names are never re-resolved: unknown, with a warning.
+    use concordance::log::EventKind as K;
+    let mut fix = event(K::Fixed, "bug.home-blank", "2026-11-10T09:00:00Z", "alice");
+    fix.commit = Some("1111111".into());
+    append_event(&repo, fix);
+    let mut check = event(K::Verified, "bug.home-blank", "2026-11-11T09:00:00Z", "bob");
+    check.evidence = vec!["ok".into()];
+    append_event(&repo, check);
+    let mut released = event(K::Released, "1.1.0", "2026-11-12T09:00:00Z", "rel");
+    released.date = Some("2026-11-12".into());
+    released.commit = Some("2222222".into());
+    append_event(&repo, released);
     let view = repo.track_json();
     let warnings = strings(&view["warnings"]);
     assert!(
-        warnings.iter().any(
-            |w| w == "issue `bug.home-blank`: fix 1111111 in `1.1.0`: commit 1111111 is not known to git (or is ambiguous)"
-        ),
+        warnings.iter().any(|w| w
+            == "issue `bug.home-blank`: fix 1111111 in `1.1.0`: commit 1111111 is not a full commit hash; treated as unknown"),
         "{warnings:#?}"
     );
     let release = view["releases"]
@@ -778,6 +767,22 @@ fn shipped_needs_git() {
     assert_eq!(release["carries"][0]["state"], "verified");
 }
 
+/// Append a line as an older release wrote it (commits stored as given).
+fn append_event(repo: &Repo, event: concordance::log::Event) {
+    let mut text = fs::read_to_string(repo.0.join(LOG)).unwrap_or_default();
+    text.push_str(&event.with_id().line().expect("line"));
+    text.push('\n');
+    fs::create_dir_all(repo.catalog().join("tracker")).expect("mkdir");
+    fs::write(repo.0.join(LOG), text).expect("write");
+}
+fn event(
+    kind: concordance::log::EventKind,
+    subject: &str,
+    at: &str,
+    by: &str,
+) -> concordance::log::Event {
+    concordance::log::Event::new(kind, subject, at, by)
+}
 // ---------------------------------------------------------------------------------------
 // Review fixes: concurrency, path safety, verification and shipping rules, git edge cases.
 
@@ -838,7 +843,7 @@ fn repeated_ids_load_and_blank_lines_are_ignored() {
             by,
         );
         event.commit = Some("abc1234".into());
-        event.id = event.older_ids()[0].clone();
+        event.id = "0123456789abcdef".into();
         event.line().expect("line")
     };
     fs::write(
@@ -955,6 +960,7 @@ fn refuses_symlinked_log_paths() {
 #[test]
 fn verification_must_postdate_or_descend_from_the_fix() {
     let repo = Repo::new();
+    let fake_aaaa1111 = repo.commit("Alice", "2026-11-01T00:00:00Z", "commit aaaa1111");
     // Bob checks before any fix exists, then Alice fixes: the check does not count.
     repo.log(&[
         "--at",
@@ -974,7 +980,7 @@ fn verification_must_postdate_or_descend_from_the_fix() {
         "fixed",
         "bug.home-blank",
         "--commit",
-        "aaaa1111",
+        &fake_aaaa1111,
     ]);
     let view = repo.track_json();
     assert_eq!(
@@ -1314,54 +1320,34 @@ fn finish(child: std::process::Child) -> String {
 #[test]
 fn older_ids_and_fields_still_load() {
     let repo = Repo::new();
-    // A released event as the previous release wrote it: the id omits the commit part.
-    let mut released = concordance::log::Event::new(
-        concordance::log::EventKind::Released,
-        "1.1.0",
-        "2026-11-11T00:00:00Z",
-        "rel",
-    );
+    // Lines with ids from earlier releases and the older-only fields `fix` and `cycle`.
+    use concordance::log::EventKind as K;
+    let mut released = event(K::Released, "1.1.0", "2026-11-11T00:00:00Z", "rel");
     released.date = Some("2026-11-11".into());
-    let legacy = released.legacy_id();
-    assert_ne!(legacy, released.stable_id());
-    released.id = legacy.clone();
-    let line = released.line().expect("line");
+    released.cycle = Some(1);
+    released.id = "0123456789abcdef".into();
+    let mut check = event(K::Verified, "bug.home-blank", "2026-11-12T00:00:00Z", "bob");
+    check.evidence = vec!["ok".into()];
+    check.fix = Some("a".repeat(40));
+    check.id = "fedcba9876543210".into();
     fs::create_dir_all(repo.catalog().join("tracker")).expect("mkdir");
-    fs::write(repo.0.join(LOG), format!("{line}\n")).expect("write");
-    let catalog = Catalog::load(repo.catalog()).expect("legacy id accepted");
-    assert_eq!(catalog.tracker.log[0].id, legacy);
-    // Without a source key, recording it again is a new line.
-    let again = repo.log(&["--at", "2026-11-11T00:00:00Z", "released", "1.1.0"]);
-    assert!(again.starts_with("recorded"), "{again}");
-    assert_eq!(repo.lines().len(), 2);
-    // Lines with the older-only fields `fix` and `cycle` still load.
-    let mut old = concordance::log::Event::new(
-        concordance::log::EventKind::Released,
-        "1.1.0",
-        "2026-11-13T00:00:00Z",
-        "rel",
-    );
-    old.date = Some("2026-11-13".into());
-    old.cycle = Some(1);
-    let old = old.with_id();
-    let mut text = fs::read_to_string(repo.0.join(LOG)).expect("log");
-    text.push_str(&old.line().expect("line"));
-    text.push('\n');
-    fs::write(repo.0.join(LOG), text).expect("write");
-    Catalog::load(repo.catalog()).expect("cycle field accepted");
-    // New lines use the current form.
+    fs::write(
+        repo.0.join(LOG),
+        format!(
+            "{}\n{}\n",
+            released.line().expect("line"),
+            check.line().expect("line")
+        ),
+    )
+    .expect("write");
+    let catalog = Catalog::load(repo.catalog()).expect("older lines accepted");
+    assert_eq!(catalog.tracker.log[0].id, "0123456789abcdef");
+    // New lines get fresh ids and none of the older fields.
     repo.log(&["--at", "2026-11-12T00:00:00Z", "released", "1.2.0"]);
     let lines = repo.lines();
-    let mut fresh = concordance::log::Event::new(
-        concordance::log::EventKind::Released,
-        "1.2.0",
-        "2026-11-12T00:00:00Z",
-        "tester",
-    );
-    fresh.date = Some("2026-11-12".into());
-    assert_eq!(lines[3]["id"], fresh.stable_id().as_str());
+    assert!(lines[2].get("cycle").is_none() && lines[2].get("fix").is_none());
+    assert_ne!(lines[2]["id"], lines[0]["id"]);
 }
-
 #[test]
 fn racing_reports_get_distinct_ids() {
     for _ in 0..3 {
@@ -1468,12 +1454,13 @@ fn commits_are_compared_by_resolved_hash() {
     );
     assert!(strings(&view["warnings"])
         .iter()
-        .any(|w| w.contains("is not known to git (or is ambiguous)")));
+        .any(|w| w.contains("is not a full commit hash")));
 }
 
 #[test]
 fn file_order_decides_whether_a_check_follows_a_fix() {
     let repo = Repo::new();
+    let fake_f00d = repo.commit("Alice", "2026-11-01T00:00:00Z", "commit f00d");
     // Same timestamp; the check is appended before the fix.
     let at = "2026-11-10T00:00:00Z";
     repo.log(&[
@@ -1494,7 +1481,7 @@ fn file_order_decides_whether_a_check_follows_a_fix() {
         "fixed",
         "bug.home-blank",
         "--commit",
-        "f00d",
+        &fake_f00d,
     ]);
     let view = repo.track_json();
     assert_eq!(
@@ -1588,13 +1575,15 @@ fn torn_line_inside_a_multibyte_character() {
 #[test]
 fn a_check_bound_to_an_earlier_fix_does_not_verify_a_newer_one() {
     let repo = Repo::new();
+    let fake_aaaa0001 = repo.commit("Alice", "2026-11-01T00:00:00Z", "commit aaaa0001");
+    let fake_bbbb0002 = repo.commit("Alice", "2026-11-01T00:00:00Z", "commit bbbb0002");
     repo.log(&[
         "--by",
         "alice",
         "fixed",
         "bug.home-blank",
         "--commit",
-        "aaaa0001",
+        &fake_aaaa0001,
     ]);
     // Bob's check is bound to the first fix, then a second fix lands.
     let mut check = concordance::log::Event::new(
@@ -1604,14 +1593,14 @@ fn a_check_bound_to_an_earlier_fix_does_not_verify_a_newer_one() {
         "bob",
     );
     check.evidence = vec!["ok".into()];
-    check.fix = Some("aaaa0001".into());
+    check.fix = Some(fake_aaaa0001.clone());
     repo.log(&[
         "--by",
         "alice",
         "fixed",
         "bug.home-blank",
         "--commit",
-        "bbbb0002",
+        &fake_bbbb0002,
     ]);
     // Appended after the second fix in the file, but bound to the first.
     append_line(&repo, &check.with_id().line().expect("line"));
@@ -1675,27 +1664,22 @@ fn ambiguous_names_are_unknown() {
     let second = repo.commit("Alice", "2026-11-11T00:00:00Z", "Second");
     repo.git(&["branch", "dup"], "Alice", "2026-11-11T00:00:00Z");
     assert_ne!(first, second);
-    // `dup` names a tag and a branch: never resolved, always unknown.
-    let output = repo.run(&["log", "fixed", "bug.home-blank", "--commit", "dup"]);
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    success(output);
-    assert!(
-        stderr.contains("does not resolve to exactly one commit"),
-        "{stderr}"
-    );
-    assert_eq!(repo.lines()[0]["commit"], "dup");
+    // `dup` names a tag and a branch: refused, never stored.
+    for args in [
+        vec!["log", "fixed", "bug.home-blank", "--commit", "dup"],
+        vec!["log", "released", "1.1.0", "--commit", "dup"],
+    ] {
+        let err = failure(repo.run(&args));
+        assert!(err.contains("does not name exactly one commit"), "{err}");
+    }
+    assert!(repo.lines().is_empty());
     let err = failure(repo.run(&["log", "scan-git", "--since", "dup"]));
     assert!(err.contains("does not name exactly one commit"), "{err}");
     // Full ref names and hashes are fine.
     let out = success(repo.run(&["log", "scan-git", "--since", "refs/tags/dup"]));
     assert!(out.starts_with("scan-git:"), "{out}");
     repo.log(&["released", "1.1.0", "--commit", "refs/tags/dup"]);
-    assert_eq!(repo.lines()[1]["commit"], first.as_str());
-    // The ambiguous fix commit makes shipping unknown, with a warning.
-    let view = repo.track_json();
-    assert!(strings(&view["warnings"])
-        .iter()
-        .any(|w| w.contains("commit dup is not known to git (or is ambiguous)")));
+    assert_eq!(repo.lines()[0]["commit"], first.as_str());
 }
 
 #[test]
@@ -1722,38 +1706,30 @@ fn issue_index_never_returns_the_wrong_issue() {
 #[test]
 fn non_ascii_refs_do_not_panic() {
     let repo = Repo::new();
-    repo.commit("Alice", "2026-11-10T00:00:00Z", "First");
+    let head = repo.commit("Alice", "2026-11-10T00:00:00Z", "First");
     // 13 bytes, 12 characters: a 12-byte cut would land inside the é.
     let reference = "feature/café";
-    repo.log(&[
-        "--by",
-        "alice",
-        "fixed",
-        "bug.home-blank",
-        "--commit",
-        reference,
-    ]);
-    repo.log(&[
-        "--by",
-        "bob",
-        "verified",
-        "bug.home-blank",
-        "--evidence",
-        "ok",
-        "--commit",
-        "feature/cafébabe",
-    ]);
-    repo.log(&["released", "1.1.0", "--commit", "HEAD"]);
+    let err = failure(repo.run(&["log", "fixed", "bug.home-blank", "--commit", reference]));
+    assert!(err.contains("feature/café"), "{err}");
+    // Stored by an older release: replay shortens it on a character boundary.
+    use concordance::log::EventKind as K;
+    let mut fix = event(K::Fixed, "bug.home-blank", "2026-11-10T01:00:00Z", "alice");
+    fix.commit = Some(reference.into());
+    append_event(&repo, fix);
+    let mut check = event(K::Verified, "bug.home-blank", "2026-11-10T02:00:00Z", "bob");
+    check.evidence = vec!["ok".into()];
+    check.commit = Some("feature/cafébabe".into());
+    append_event(&repo, check);
+    repo.log(&["released", "1.1.0", "--commit", &head]);
     let view = repo.track_json();
     let warnings = strings(&view["warnings"]);
     assert!(
         warnings
             .iter()
-            .any(|w| w.contains("commit feature/café is not known to git")),
+            .any(|w| w.contains("commit feature/café is not a full commit hash")),
         "{warnings:#?}"
     );
 }
-
 #[test]
 fn hex_looking_names_get_the_ambiguity_check() {
     let repo = Repo::new();
@@ -1766,14 +1742,9 @@ fn hex_looking_names_get_the_ambiguity_check() {
         "Alice",
         "2026-11-11T00:00:00Z",
     );
-    let output = repo.run(&["log", "fixed", "bug.home-blank", "--commit", abbreviation]);
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    success(output);
-    assert!(
-        stderr.contains("does not resolve to exactly one commit"),
-        "{stderr}"
-    );
-    assert_eq!(repo.lines()[0]["commit"], abbreviation);
+    let err = failure(repo.run(&["log", "fixed", "bug.home-blank", "--commit", abbreviation]));
+    assert!(err.contains("does not name exactly one commit"), "{err}");
+    assert!(repo.lines().is_empty());
     // A hex name that is both a tag and a branch.
     repo.git(&["tag", "beef", &first], "Alice", "2026-11-11T00:00:00Z");
     repo.git(
@@ -1807,7 +1778,7 @@ fn fixes_are_read_before_verifies_in_one_commit() {
         assert!(lines[1].get("fix").is_none());
         assert_eq!(
             lines[1]["key"],
-            format!("git:trailer:{sha}:Verifies:bug.home-blank")
+            format!("git:trailer:{sha}:Verifies:bug.home-blank:1")
         );
         let second = success(repo.run(&["log", "scan-git"]));
         assert_eq!(
@@ -1837,10 +1808,7 @@ fn catalog_paths_through_symlinks_are_refused() {
     repo.log(&["--catalog", "real-app", "report", "bug", "Fine"]);
     // Another checkout's catalog, named directly, is fine.
     let other = Repo::new();
-    let sibling = format!(
-        "../{}/spec/app",
-        other.0.file_name().and_then(|n| n.to_str()).expect("name")
-    );
+    let sibling = other.catalog().display().to_string();
     repo.log(&[
         "--catalog",
         &sibling,
@@ -1849,6 +1817,22 @@ fn catalog_paths_through_symlinks_are_refused() {
         "In the other checkout",
     ]);
     assert_eq!(other.lines().len(), 1);
+    // A path with `..` is refused outright.
+    let relative = format!(
+        "../{}/spec/app",
+        other.0.file_name().and_then(|n| n.to_str()).expect("name")
+    );
+    let err = failure(repo.run(&["log", "--catalog", &relative, "report", "bug", "Nope"]));
+    assert!(err.contains("must not contain `..`"), "{err}");
+    let err = failure(repo.run(&[
+        "log",
+        "--catalog",
+        "spec/../real-app",
+        "report",
+        "bug",
+        "Nope",
+    ]));
+    assert!(err.contains("must not contain `..`"), "{err}");
     // But /repo/spec as a symlink into the other checkout is refused: the path enters
     // that repository through a symlink.
     let third = Repo::new();
@@ -1950,7 +1934,8 @@ fn reopen_then_rescan_adds_nothing() {
 #[test]
 fn manual_verified_after_a_new_fix_counts() {
     let repo = Repo::new();
-    // Each at its own time: identical lines (same second, same content) are one line.
+    let fake_aaaa0001 = repo.commit("Alice", "2026-11-01T00:00:00Z", "commit aaaa0001");
+    // Each at its own time, as a person would record them.
     let at = |d: &str| format!("2026-11-{d}T00:00:00Z");
     repo.log(&[
         "--at",
@@ -1960,7 +1945,7 @@ fn manual_verified_after_a_new_fix_counts() {
         "fixed",
         "bug.home-blank",
         "--commit",
-        "aaaa0001",
+        &fake_aaaa0001,
     ]);
     repo.log(&[
         "--at",
@@ -1988,7 +1973,7 @@ fn manual_verified_after_a_new_fix_counts() {
         "fixed",
         "bug.home-blank",
         "--commit",
-        "aaaa0001",
+        &fake_aaaa0001,
     ]);
     let view = repo.track_json();
     assert_eq!(
@@ -2037,4 +2022,79 @@ fn key_is_refused_for_scan_git() {
     let repo = Repo::new();
     let err = failure(repo.run(&["log", "--key", "x", "scan-git"]));
     assert!(err.contains("sets its own source keys"), "{err}");
+}
+
+// ---------------------------------------------------------------------------------------
+// Sixth review: unique ids, keyed report retries, multiple Verifies per commit.
+
+#[test]
+fn identical_unkeyed_facts_are_separate_lines() {
+    let repo = Repo::new();
+    let at = "2026-11-10T00:00:00Z";
+    for step in [
+        vec!["--at", at, "released", "1.1.0"],
+        vec!["--at", at, "pulled", "1.1.0", "--reason", "crash"],
+        vec!["--at", at, "released", "1.1.0"],
+    ] {
+        assert!(repo.log(&step).starts_with("recorded"));
+    }
+    let lines = repo.lines();
+    assert_eq!(lines.len(), 3);
+    assert_ne!(lines[0]["id"], lines[2]["id"]);
+    assert_eq!(release_state(&repo, "1.1.0"), "released");
+    // A line written twice byte for byte still loads once.
+    let text = fs::read_to_string(repo.0.join(LOG)).expect("log");
+    let first = text.lines().next().expect("line").to_owned();
+    fs::write(repo.0.join(LOG), format!("{text}{first}\n")).expect("write");
+    let catalog = Catalog::load(repo.catalog()).expect("valid");
+    assert_eq!(catalog.tracker.log.len(), 3);
+}
+
+#[test]
+fn keyed_report_retry_returns_the_existing_issue() {
+    let repo = Repo::new();
+    let first = repo.log(&["--key", "intake:7", "report", "bug", "Crash on open"]);
+    assert!(
+        first.starts_with("recorded: reported bug.crash-on-open ("),
+        "{first}"
+    );
+    // A retry with a different title (edited upstream) still names the first issue.
+    let retry = repo.log(&["--key", "intake:7", "report", "bug", "Crash when opening"]);
+    assert!(
+        retry.starts_with("already recorded: reported bug.crash-on-open ("),
+        "{retry}"
+    );
+    assert_eq!(repo.lines().len(), 1);
+}
+
+#[test]
+fn several_verifies_for_one_issue_in_one_commit() {
+    let repo = Repo::new();
+    repo.commit(
+        "Alice",
+        "2026-11-10T00:00:00Z",
+        "Fix\n\nFixes: bug.home-blank\n",
+    );
+    let check = repo.commit(
+        "Bob",
+        "2026-11-11T00:00:00Z",
+        "Checks\n\nVerifies: bug.home-blank (unit 4/4)\nVerifies: bug.home-blank (journey 13/13)\n",
+    );
+    let first = success(repo.run(&["log", "scan-git"]));
+    assert!(
+        first.ends_with("scan-git: 3 recorded, 0 already recorded\n"),
+        "{first}"
+    );
+    let lines = repo.lines();
+    assert_eq!(
+        lines[1]["key"],
+        format!("git:trailer:{check}:Verifies:bug.home-blank:1")
+    );
+    assert_eq!(
+        lines[2]["key"],
+        format!("git:trailer:{check}:Verifies:bug.home-blank:2")
+    );
+    assert_eq!(strings(&lines[2]["evidence"]), vec!["journey 13/13"]);
+    let again = success(repo.run(&["log", "scan-git"]));
+    assert_eq!(again, "scan-git: 0 recorded, 3 already recorded\n");
 }

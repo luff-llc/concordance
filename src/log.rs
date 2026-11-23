@@ -149,69 +149,12 @@ impl Event {
             cycle: None,
         }
     }
-    /// Set the id from the line's content.
+    /// Give the event a fresh unique id. Ids never repeat across appends, so two unkeyed
+    /// facts with identical fields are two lines; a line duplicated byte for byte (a
+    /// repeated write) shares its id and still loads once.
     pub fn with_id(mut self) -> Self {
-        self.id = self.stable_id();
+        self.id = new_id(&self);
         self
-    }
-
-    /// FNV-1a 64 over the whole line (every field, `at` included) with `id` left empty:
-    /// unique per line, and the same for identical lines, so a line written twice is
-    /// recognised as one.
-    pub fn stable_id(&self) -> String {
-        let content = Self {
-            id: String::new(),
-            ..self.clone()
-        };
-        let text = serde_json::to_string(&content).unwrap_or_default();
-        format!("{:016x}", fnv1a(text.as_bytes()))
-    }
-
-    /// Ids earlier releases derived from a fact's distinguishing fields; still accepted so
-    /// old logs load.
-    pub fn older_ids(&self) -> [String; 2] {
-        [self.derive_id(false), self.derive_id(true)]
-    }
-
-    /// The id of the release before last (released without commit, verified without fix).
-    pub fn legacy_id(&self) -> String {
-        self.derive_id(true)
-    }
-
-    fn derive_id(&self, legacy: bool) -> String {
-        let mut parts: Vec<String> = vec![self.kind.as_str().into(), self.subject.clone()];
-        let opt = |v: &Option<String>| v.clone().unwrap_or_default();
-        match self.kind {
-            EventKind::Reported => {}
-            EventKind::Fixed => parts.push(opt(&self.commit)),
-            EventKind::Verified => {
-                parts.push(self.by.clone());
-                parts.push(self.evidence.join("\u{1e}"));
-                parts.push(opt(&self.commit));
-                if let (Some(fix), false) = (&self.fix, legacy) {
-                    parts.push(fix.clone());
-                }
-            }
-            EventKind::Reopened => {
-                parts.push(opt(&self.reason));
-                parts.push(self.at.clone());
-            }
-            EventKind::Uploaded => {
-                parts.push(opt(&self.platform));
-                parts.push(opt(&self.build));
-            }
-            EventKind::Released => {
-                parts.push(opt(&self.platform));
-                if !legacy {
-                    parts.push(opt(&self.commit));
-                }
-            }
-            EventKind::Pulled => parts.push(opt(&self.reason)),
-        }
-        if let (Some(cycle), false) = (self.cycle, legacy) {
-            parts.push(format!("cycle {cycle}"));
-        }
-        format!("{:016x}", fnv1a(parts.join("\u{1f}").as_bytes()))
     }
 
     /// The JSON line, without its newline.
@@ -306,16 +249,41 @@ impl Event {
                 errors.push(format!("date {date:?} is not a calendar date (YYYY-MM-DD)"));
             }
         }
-        if errors.is_empty() && self.id != self.stable_id() && !self.older_ids().contains(&self.id)
-        {
-            errors.push(format!(
-                "id {:?} does not match its content (expected {:?})",
-                self.id,
-                self.stable_id()
-            ));
+        let hex = self
+            .id
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c));
+        if self.id.len() != 16 || !hex {
+            errors.push(format!("id {:?} must be 16 lowercase hex digits", self.id));
         }
         errors
     }
+}
+
+/// 64 bits from /dev/urandom, mixed with the process id, the time, a per-process sequence
+/// number and the event's content (all of it, if /dev/urandom is unavailable).
+fn new_id(event: &Event) -> String {
+    use std::io::Read as _;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let mut random = [0u8; 8];
+    let _ = fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut random));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let content = serde_json::to_string(&Event {
+        id: String::new(),
+        ..event.clone()
+    })
+    .unwrap_or_default();
+    let seed = format!(
+        "{}\u{1f}{}\u{1f}{nanos}\u{1f}{}\u{1f}{content}",
+        u64::from_le_bytes(random),
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    format!("{:016x}", fnv1a(seed.as_bytes()))
 }
 
 fn fnv1a(bytes: &[u8]) -> u64 {
@@ -955,6 +923,15 @@ impl LogWriter {
             let event = match item {
                 Pending::Event(event) => event,
                 Pending::Report { kind, mut event } => {
+                    // A retried keyed report: the issue it already created, not a new one.
+                    if let Some(existing) = event
+                        .key
+                        .as_ref()
+                        .and_then(|key| recent.iter().find(|e| e.key.as_ref() == Some(key)))
+                    {
+                        results.push((existing.clone(), false));
+                        continue;
+                    }
                     let title = event.title.clone().unwrap_or_default();
                     event.subject = self.allocate_report_id(kind, &title, &recent, &subjects);
                     let event = event.with_id();
@@ -1006,17 +983,26 @@ pub fn announce(event: &Event, added: bool) {
 /// Resolve a commit to its full hash when git knows it; otherwise keep it as given.
 /// Ambiguous names (a branch and a tag of the same name, say) are kept as given, with a
 /// warning; the fold then treats them as unknown.
-fn resolve_commit(repo: &Path, commit: &str) -> String {
+fn resolve_commit(repo: &Path, commit: &str) -> Result<String> {
     match crate::scan_git::Ancestry::new(repo).resolve(commit) {
-        Ok(Some(full)) => full,
-        Ok(None) => {
-            eprintln!(
-                "warning: {commit} does not resolve to exactly one commit; recorded as given"
-            );
-            commit.to_owned()
-        }
-        Err(_) => commit.to_owned(),
+        Ok(Some(full)) => Ok(full),
+        Ok(None) => Err(format!(
+            "--commit {commit:?} does not name exactly one commit (unknown or ambiguous); give a full hash or a full ref such as refs/tags/{commit}"
+        )
+        .into()),
+        Err(error) => Err(format!("--commit {commit:?} cannot be checked: {error}").into()),
     }
+}
+
+/// Name an unknown issue before trying to resolve the command's commit.
+fn known_issue(writer: &LogWriter, kind: &str, issue: &str) -> Result<()> {
+    if writer.known_issue(issue) {
+        return Ok(());
+    }
+    Err(
+        format!("{kind} {issue}: {issue} is not an issue in issues.yaml or reported in the log")
+            .into(),
+    )
 }
 
 /// `path` made absolute against `cwd`, with `.` and `..` resolved lexically.
@@ -1043,6 +1029,16 @@ fn lexical_absolute(cwd: &Path, path: &Path) -> PathBuf {
 /// another checkout), or when any component at or below that counterpart, or below the
 /// current directory, is a symlink. Symlinks above both (such as macOS's /var) are fine.
 pub fn check_catalog_path(dir: &Path) -> Result<()> {
+    if dir
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        return Err(format!(
+            "catalog {} must not contain `..`; give a path inside the repository instead",
+            dir.display()
+        )
+        .into());
+    }
     let cwd = std::env::current_dir()?;
     let lexical = lexical_absolute(&cwd, dir);
     let canonical = fs::canonicalize(&lexical).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -1136,8 +1132,9 @@ pub fn run(args: LogArgs) -> Result<()> {
             return Ok(());
         }
         LogAction::Fixed { issue, commit } => {
+            known_issue(&writer, "fixed", &issue)?;
             let mut event = Event::new(EventKind::Fixed, &issue, &at, &by);
-            event.commit = Some(resolve_commit(&repo, &commit));
+            event.commit = Some(resolve_commit(&repo, &commit)?);
             event
         }
         LogAction::Verified {
@@ -1145,12 +1142,13 @@ pub fn run(args: LogArgs) -> Result<()> {
             evidence,
             commit,
         } => {
+            known_issue(&writer, "verified", &issue)?;
             if args.by.is_none() {
                 return Err("log verified needs --by: verification counts only when someone other than the fixer records it".into());
             }
             let mut event = Event::new(EventKind::Verified, &issue, &at, &by);
             event.evidence = evidence;
-            event.commit = commit.map(|c| resolve_commit(&repo, &c));
+            event.commit = commit.map(|c| resolve_commit(&repo, &c)).transpose()?;
             event
         }
         LogAction::Reopened { issue, reason } => {
@@ -1167,7 +1165,7 @@ pub fn run(args: LogArgs) -> Result<()> {
             let mut event = Event::new(EventKind::Uploaded, &release, &at, &by);
             event.platform = Some(platform);
             event.build = Some(build);
-            event.commit = commit.map(|c| resolve_commit(&repo, &c));
+            event.commit = commit.map(|c| resolve_commit(&repo, &c)).transpose()?;
             event
         }
         LogAction::Released {
@@ -1179,7 +1177,7 @@ pub fn run(args: LogArgs) -> Result<()> {
             let mut event = Event::new(EventKind::Released, &release, &at, &by);
             event.platform = platform;
             event.date = Some(date.unwrap_or_else(|| day(&at)));
-            event.commit = commit.map(|c| resolve_commit(&repo, &c));
+            event.commit = commit.map(|c| resolve_commit(&repo, &c)).transpose()?;
             event
         }
         LogAction::Pulled { release, reason } => {

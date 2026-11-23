@@ -40,6 +40,17 @@ impl GitAsk {
     /// A ref as a full commit hash, or `None` (with a warning) when git cannot resolve it
     /// unambiguously. Never guessed from a prefix.
     fn resolve(&mut self, reference: &str, context: &str) -> Option<String> {
+        // Recorded commits are full hashes; a stored name (older lines) is never
+        // re-resolved, since what it names may have moved.
+        let full =
+            matches!(reference.len(), 40 | 64) && reference.bytes().all(|c| c.is_ascii_hexdigit());
+        if !full {
+            self.warnings.push(format!(
+                "{context}: commit {} is not a full commit hash; treated as unknown",
+                short(reference)
+            ));
+            return None;
+        }
         if self.unavailable {
             return None;
         }
@@ -64,9 +75,6 @@ impl GitAsk {
     /// Whether two refs name the same commit: equal text, else both resolved to full
     /// hashes. `None` when git cannot resolve one.
     fn same(&mut self, a: &str, b: &str, context: &str) -> Option<bool> {
-        if a == b {
-            return Some(true);
-        }
         let a = self.resolve(a, context)?;
         let b = self.resolve(b, context)?;
         Some(a == b)

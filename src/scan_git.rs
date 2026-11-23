@@ -293,6 +293,8 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
             }
         }
         items.sort_by_key(|(rank, ..)| *rank);
+        // Each Verifies: item for an issue is its own fact: number them per issue.
+        let mut verifies_seen: BTreeMap<String, usize> = BTreeMap::new();
         {
             for (_, key, id, evidence) in items {
                 let Some(issue) = writer.catalog.tracker.issue(&id).cloned() else {
@@ -322,7 +324,13 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
                 };
                 // The source key: one fact per commit, trailer kind and issue, whatever
                 // the log says since (a pull or reopen never makes a rescan re-add it).
-                event.key = Some(format!("git:trailer:{sha}:{}:{id}", key_label(&key)));
+                event.key = Some(if key == "verifies" {
+                    let n = verifies_seen.entry(id.clone()).or_default();
+                    *n += 1;
+                    format!("git:trailer:{sha}:Verifies:{id}:{n}")
+                } else {
+                    format!("git:trailer:{sha}:{}:{id}", key_label(&key))
+                });
                 tally.add(writer, event)?;
             }
         }
