@@ -173,14 +173,16 @@ Choices where the proposal left room:
   `<module>/src/main/AndroidManifest.xml` for the nearest module above it. Globs are never
   broader than the scopes: a scope inside a glob's fixed prefix narrows it
   (`--scope apple/Fixture/Home` gives `Fixture/Home/**/*.swift`), and globs that match nothing
-  in the scopes are dropped. String-catalog globs are limited to the top-level folders that
-  hold them. The user-visible count `init` prints is computed exactly as `inventory` counts
-  files (matching `user_visible`, else `all`, and neither a string catalog nor a test), so the
-  two agree on the written catalog. Without `--scope`, `init` lists the apps
+  in the scopes are dropped. A scope that already contains a glob's literal folder anchors the
+  rest there (scope `web/src/i18n` with `**/i18n/**/*.json` gives `src/i18n/**/*.json`). String-catalog globs are limited to the top-level folders that
+  hold them. The user-visible count `init` prints comes from the same walk and classification
+  `inventory` uses on the platform root (same symbolic-link rules; matching `user_visible`,
+  else `all`, and neither a string catalog nor a test), so the two agree on the written
+  catalog. Without `--scope`, `init` lists the apps
   it finds when there is more than one: Apple application targets (from `project.pbxproj`,
   quoted or not, and XcodeGen `project.yml`) and Android modules applying
-  `com.android.application` (a declaration with `apply false`, as in a root build file, does
-  not count). Apps are grouped by name without platform suffixes (`TaupeWatch`
+  `com.android.application` (a declaration with `apply false`, matched with any whitespace, as in a root
+  build file, does not count; Gradle does not continue an `apply false` onto the next line). Apps are grouped by name without platform suffixes (`TaupeWatch`
   joins `Taupe`; an Android module called `app` takes the Gradle `rootProject.name`). Each
   target's scope is the source folder named after it, plus extension targets whose names start
   with it (`TaupeWidgets`); a project holding one app falls back to its own folder. `init` then
