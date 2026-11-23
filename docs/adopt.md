@@ -155,7 +155,7 @@ Choices where the proposal left room:
   under `src/`, `app/`, `pages/`, `components/` or `lib/`. `Cargo.toml`, `go.mod` and
   `pyproject.toml` each give a CLI platform (`cli`, or `cli-rust`/`cli-go`/`cli-python` when
   there are several). A Cargo workspace's `[workspace] members` (globs allowed, minus
-  `exclude`) give one `<member>/src/**/*.rs` glob per member crate, plus
+  `exclude`; patterns are normalized, so `./crates/*/` and `crates//tool` work) give one `<member>/src/**/*.rs` glob per member crate, plus
   `<member>/tests/**/*.rs`; a virtual workspace gets no root `src/` glob, and a scope inside a
   member keeps the platform because the workspace manifest above it still counts. A platform with no source files is dropped. Hidden directories,
   `node_modules`, `build`, `.build`, `DerivedData`, `target`, `Pods`, `.git` and `dist` are
@@ -229,8 +229,9 @@ Choices where the proposal left room:
   (after `[path_prefixes]`), identifiers by `accessibility.identifier`, strings by `copy` or
   a copy detail's text or key. External platforms without `--root` are listed as unchecked.
 - **`plan-audit`.** The output directory (default `tasks` in the canonical catalog directory)
-  must be inside the catalog's repository (or the catalog directory, when the catalog sits
-  outside the repository), may not contain `..`, and is checked and created with `init`'s
+  must be inside the catalog directory or the Git checkout that contains it (`repo_root` may
+  be a shared parent of several checkouts, so it is not a base, and a sibling checkout is
+  refused), may not contain `..`, and is checked and created with `init`'s
   rules, writing through exactly the checked path: no existing component may be a symbolic link and nothing is written
   through one. Briefs go to `DIR/tasks` (or `--out`) as `audit-<platform>-<area>.md`, or
   `parity-<baseline>-<target>-<area>.md` with `--target`, created exclusively; edited briefs

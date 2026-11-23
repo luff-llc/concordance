@@ -416,33 +416,37 @@ impl Catalog {
             }
             None => areas,
         };
-        // Same rules as init: inside the repository (or the catalog directory, which may
-        // sit outside it), never through a symbolic link.
-        let repo = roots
-            .repo
-            .clone()
-            .unwrap_or_else(|| self.directory.join(&self.config.repo_root));
+        // Same rules as init, never through a symbolic link. The allowed bases are the
+        // catalog directory and the Git checkout that contains it; repo_root may be a shared
+        // parent of several checkouts, so it is not a base.
+        let catalog_dir = self.directory.canonicalize()?;
+        let toplevel = git_toplevel(&catalog_dir);
         let safe = match out {
-            None => crate::adopt::SafeDir::child(&self.directory, "tasks")?,
-            Some(out) => match crate::adopt::SafeDir::new(&repo, out) {
-                Ok(safe) => safe,
-                Err(error) if error.to_string().contains("is not inside") => {
-                    match crate::adopt::SafeDir::new(&self.directory, out) {
-                        Ok(safe) => safe,
-                        Err(inner) if inner.to_string().contains("is not inside") => {
-                            return Err(format!(
-                                "--out {} must be inside the repository {} or the catalog directory {}",
-                                out.display(),
-                                repo.display(),
-                                self.directory.display()
-                            )
-                            .into())
+            None => crate::adopt::SafeDir::child(&catalog_dir, "tasks")?,
+            Some(out) => {
+                let mut chosen = None;
+                for base in toplevel.iter().chain(std::iter::once(&catalog_dir)) {
+                    match crate::adopt::SafeDir::new(base, out) {
+                        Ok(safe) => {
+                            chosen = Some(safe);
+                            break;
                         }
-                        Err(inner) => return Err(inner),
+                        Err(error) if error.to_string().contains("is not inside") => {}
+                        Err(error) => return Err(error),
                     }
                 }
-                Err(error) => return Err(error),
-            },
+                chosen.ok_or_else(|| {
+                    format!(
+                        "--out {} must be inside the catalog's Git checkout{} or the catalog directory {}",
+                        out.display(),
+                        toplevel
+                            .as_ref()
+                            .map(|t| format!(" {}", t.display()))
+                            .unwrap_or_default(),
+                        catalog_dir.display()
+                    )
+                })?
+            }
         };
         safe.create()?;
         let mut result = AuditResult::default();
@@ -472,6 +476,22 @@ impl Catalog {
         }
         Ok(result)
     }
+}
+
+/// The top level of the Git checkout containing `dir`, canonicalized.
+fn git_toplevel(dir: &Path) -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
+        .canonicalize()
+        .ok()
 }
 
 fn brief_name(platform: &str, target: Option<&str>, area: &str) -> String {
