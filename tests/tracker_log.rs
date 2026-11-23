@@ -2098,3 +2098,113 @@ fn several_verifies_for_one_issue_in_one_commit() {
     let again = success(repo.run(&["log", "scan-git"]));
     assert_eq!(again, "scan-git: 0 recorded, 3 already recorded\n");
 }
+
+// ---------------------------------------------------------------------------------------
+// Seventh review: user git config, repeated keys, keyed retries.
+
+#[test]
+fn scan_git_ignores_signature_and_colour_config() {
+    let repo = Repo::new();
+    // A stand-in gpg so commits are signed and `log.showSignature` prints extra lines.
+    let gpg = repo.0.join("fake-gpg.sh");
+    fs::write(
+        &gpg,
+        "#!/bin/sh\ncase \"$*\" in\n  *-bsau*) cat >/dev/null; echo '[GNUPG:] SIG_CREATED D 1 8 00 0 X' >&2; printf -- '-----BEGIN PGP SIGNATURE-----\\n\\nfake\\n-----END PGP SIGNATURE-----\\n';;\n  *--verify*) echo '[GNUPG:] GOODSIG ABCDEF fake'; echo 'gpg: Good signature from fake' >&2;;\nesac\n",
+    )
+    .expect("gpg script");
+    fs::set_permissions(&gpg, std::os::unix::fs::PermissionsExt::from_mode(0o755)).expect("chmod");
+    let gpg = gpg.display().to_string();
+    for (key, value) in [
+        ("gpg.program", gpg.as_str()),
+        ("user.signingkey", "X"),
+        ("log.showSignature", "true"),
+        ("color.ui", "always"),
+    ] {
+        repo.git(&["config", key, value], "x", "2026-11-01T00:00:00Z");
+    }
+    repo.git(
+        &[
+            "commit",
+            "--quiet",
+            "-S",
+            "--allow-empty",
+            "-m",
+            "Fix\n\nFixes: bug.home-blank\n",
+        ],
+        "Alice",
+        "2026-11-10T00:00:00Z",
+    );
+    repo.git(&["tag", "ios/v1.1.0"], "Alice", "2026-11-10T00:00:00Z");
+    let first = success(repo.run(&["log", "scan-git"]));
+    assert!(
+        first.ends_with("scan-git: 2 recorded, 0 already recorded\n"),
+        "{first}"
+    );
+    let lines = repo.lines();
+    let sha = lines[0]["commit"].as_str().unwrap_or_default().to_owned();
+    assert_eq!(sha.len(), 40, "{sha}");
+    assert!(sha.bytes().all(|c| c.is_ascii_hexdigit()));
+    assert_eq!(lines[1]["commit"], sha.as_str());
+    let again = success(repo.run(&["log", "scan-git"]));
+    assert_eq!(again, "scan-git: 0 recorded, 2 already recorded\n");
+}
+
+#[test]
+fn a_repeated_key_counts_once() {
+    let repo = Repo::new();
+    use concordance::log::EventKind as K;
+    // Two checkouts scanned the same tag and git merged both logs: the second line has
+    // the same key and a different id.
+    let line = |at: &str| {
+        let mut released = event(K::Released, "1.1.0", at, "rel");
+        released.date = Some("2026-11-10".into());
+        released.key = Some("git:tag:refs/tags/ios/v1.1.0:abc".into());
+        released
+    };
+    append_event(&repo, line("2026-11-10T00:00:00Z"));
+    let mut pulled = event(K::Pulled, "1.1.0", "2026-11-11T00:00:00Z", "rel");
+    pulled.reason = Some("crash".into());
+    append_event(&repo, pulled);
+    append_event(&repo, line("2026-11-12T00:00:00Z"));
+    let catalog = Catalog::load(repo.catalog()).expect("valid");
+    assert_eq!(catalog.tracker.log.len(), 2);
+    assert_eq!(release_state(&repo, "1.1.0"), "pulled");
+    let view = repo.track_json();
+    assert!(
+        strings(&view["warnings"]).iter().any(|w| w
+            == "tracker/log.jsonl:3: key git:tag:refs/tags/ios/v1.1.0:abc repeated on line 3 (first on line 1); ignored"),
+        "{view:#}"
+    );
+}
+
+#[test]
+fn keyed_retry_reports_the_recorded_event() {
+    let repo = Repo::new();
+    let first = repo.log(&[
+        "--key",
+        "release-taupe:9",
+        "--at",
+        "2026-11-10",
+        "released",
+        "1.1.0",
+    ]);
+    let id = repo.lines()[0]["id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(first.contains(&format!("({id})")), "{first}");
+    let retry = repo.log(&["--key", "release-taupe:9", "released", "1.1.0"]);
+    assert_eq!(retry, format!("already recorded: released 1.1.0 ({id})\n"));
+    // A retried keyed report names the recorded issue and id.
+    let report = repo.log(&["--key", "intake:3", "report", "bug", "Crash"]);
+    let report_id = repo.lines()[1]["id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(report.contains(&report_id), "{report}");
+    let retry = repo.log(&["--key", "intake:3", "report", "bug", "Crash again"]);
+    assert_eq!(
+        retry,
+        format!("already recorded: reported bug.crash ({report_id})\n")
+    );
+}

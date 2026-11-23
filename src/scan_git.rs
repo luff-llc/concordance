@@ -7,11 +7,25 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Run git in `repo` and return stdout. Errors name git's stderr, or say git is unavailable.
-pub(crate) fn git(repo: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
+/// Git in `repo`, with user configuration that changes output turned off: signatures
+/// shown by `git log`, and colour.
+fn git_command(repo: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
         .arg("-C")
         .arg(repo)
+        .args(["-c", "log.showSignature=false", "-c", "color.ui=false"]);
+    command
+}
+
+/// A full 40- or 64-digit commit hash.
+pub(crate) fn is_full_hash(text: &str) -> bool {
+    matches!(text.len(), 40 | 64) && text.bytes().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Run git in `repo` and return stdout. Errors name git's stderr, or say git is unavailable.
+pub(crate) fn git(repo: &Path, args: &[&str]) -> Result<String> {
+    let output = git_command(repo)
         .args(args)
         .output()
         .map_err(|e| format!("git unavailable: {e}"))?;
@@ -29,9 +43,7 @@ pub(crate) fn git(repo: &Path, args: &[&str]) -> Result<String> {
 /// Whether `ancestor` is contained in `descendant`. Errors when git cannot answer
 /// (git missing, not a repository, unknown commit).
 pub(crate) fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Result<bool> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
+    let output = git_command(repo)
         .args(["merge-base", "--is-ancestor", ancestor, descendant])
         .output()
         .map_err(|e| format!("git unavailable: {e}"))?;
@@ -73,15 +85,13 @@ impl Ancestry {
             self.resolved.insert(reference.to_owned(), None);
             return Ok(None);
         }
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.repo)
+        let output = git_command(&self.repo)
             .args(["rev-parse", "--verify", "--quiet", "--end-of-options"])
             .arg(format!("{reference}^{{commit}}"))
             .output()
             .map_err(|e| format!("git unavailable: {e}"))?;
         let full = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        let answer = (output.status.success() && !full.is_empty()).then_some(full);
+        let answer = (output.status.success() && is_full_hash(&full)).then_some(full);
         self.resolved.insert(reference.to_owned(), answer.clone());
         Ok(answer)
     }
@@ -107,9 +117,7 @@ impl Ancestry {
             format!("refs/tags/{base}"),
             format!("refs/remotes/{base}"),
         ];
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.repo)
+        let output = git_command(&self.repo)
             .args(["for-each-ref", "--format=%(refname)"])
             .args(&candidates)
             .output()
@@ -121,9 +129,7 @@ impl Ancestry {
             .count();
         if hex && found > 0 && base.len() >= 4 {
             // Objects this name abbreviates, besides the refs it names.
-            let objects = Command::new("git")
-                .arg("-C")
-                .arg(&self.repo)
+            let objects = git_command(&self.repo)
                 .arg("rev-parse")
                 .arg(format!("--disambiguate={base}"))
                 .output()
@@ -256,6 +262,8 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
     let range = since.as_ref().map(|s| format!("{s}..HEAD"));
     let mut args = vec![
         "log",
+        "--no-show-signature",
+        "--no-color",
         "--reverse",
         "--format=%H%x1f%an%x1f%ct%x1f%(trailers:only,unfold)%x1e",
     ];
@@ -272,6 +280,13 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
         let [sha, author, time, trailers] = fields[..] else {
             continue;
         };
+        if !is_full_hash(sha) {
+            tally.warnings.push(format!(
+                "git log printed {:?} where a commit hash belongs; skipped",
+                crate::log::prefix(sha, 40)
+            ));
+            continue;
+        }
         let at = timestamp_from_unix(time.trim().parse().unwrap_or(0));
         let short = crate::log::prefix(sha, 12);
         // Every Fixes: in a commit before its Verifies:, whatever the trailer order, so in

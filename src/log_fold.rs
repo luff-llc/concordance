@@ -42,8 +42,7 @@ impl GitAsk {
     fn resolve(&mut self, reference: &str, context: &str) -> Option<String> {
         // Recorded commits are full hashes; a stored name (older lines) is never
         // re-resolved, since what it names may have moved.
-        let full =
-            matches!(reference.len(), 40 | 64) && reference.bytes().all(|c| c.is_ascii_hexdigit());
+        let full = crate::scan_git::is_full_hash(reference);
         if !full {
             self.warnings.push(format!(
                 "{context}: commit {} is not a full commit hash; treated as unknown",

@@ -130,9 +130,15 @@ for byte shares its id and loads once. Ids from earlier releases are accepted as
 are, as are the older fields `fix` (a verification's bound fix) and `cycle` (ignored);
 neither is written any more.
 
-**Upgrading a pre-key log.** Automated facts written before source keys have no `key`,
-so a rescan would add them again. Delete `tracker/log.jsonl` (or the scan-git lines) and
-run `scan-git` from scratch; re-record any manual facts.
+A key counts once on replay: when two lines carry the same key (two checkouts scanned
+the same tag and git merged both logs), the first in file order counts and later ones
+are ignored with a warning (`key K repeated on line N`). A retried keyed command prints
+the recorded event's id and subject.
+
+**Upgrading a log from a pre-release build.** Automated facts written before source keys
+have no `key`, and `Verifies:` keys gained their `:<n>` suffix in this release, so a
+rescan would add those facts again. Delete `tracker/log.jsonl` (or its scan-git lines)
+and run `scan-git` from scratch; re-record any manual facts.
 
 Parsing is strict: unknown fields, missing or forbidden fields for the kind, malformed
 times and dates, a malformed `id`, and references to unknown
@@ -199,7 +205,10 @@ existing issue of the same kind already has reuses that issue's id.
 
 ### `scan-git`
 
-Reads commits (oldest first; with `--since`, `REF..HEAD`, REF resolved to exactly one
+Git runs with `-c log.showSignature=false -c color.ui=false` (and `git log
+--no-show-signature --no-color` with an explicit `--format`), so user configuration
+cannot change what is parsed, and every hash read back must be a full 40- or 64-digit
+hash. It reads commits (oldest first; with `--since`, `REF..HEAD`, REF resolved to exactly one
 commit and option-shaped refs refused) in the catalog's `repo_root` (or `--repo`) and
 appends what their trailers state, with the commit's author as `by` and its commit time as
 `at`:

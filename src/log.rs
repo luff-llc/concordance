@@ -436,6 +436,7 @@ pub fn parse_bytes(bytes: &[u8]) -> ParsedLog {
     let mut parsed = ParsedLog::default();
     let mut seen: std::collections::BTreeMap<String, (usize, Event)> =
         std::collections::BTreeMap::new();
+    let mut keys: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let lines: Vec<&[u8]> = bytes.split(|b| *b == b'\n').collect();
     let last = lines.len() - 1;
     let mut offset = 0;
@@ -496,6 +497,18 @@ pub fn parse_bytes(bytes: &[u8]) -> ParsedLog {
                 ));
             }
             continue;
+        }
+        // Replay counts a source key once: the first line in file order (two checkouts
+        // that scanned the same tag, merged by git, give two lines).
+        if let Some(key) = &event.key {
+            if let Some(first) = keys.get(key) {
+                parsed.warnings.push((
+                    number,
+                    format!("key {key} repeated on line {number} (first on line {first}); ignored"),
+                ));
+                continue;
+            }
+            keys.insert(key.clone(), number);
         }
         seen.insert(event.id.clone(), (number, event.clone()));
         parsed.events.push((number, event));
@@ -819,6 +832,18 @@ impl LogWriter {
         Ok(true)
     }
 
+    /// The recorded event carrying `event`'s source key (for "already recorded" output),
+    /// or `event` itself when none is found.
+    pub fn recorded_with_key(&self, event: &Event) -> Event {
+        self.catalog
+            .tracker
+            .log
+            .iter()
+            .find(|e| e.key.is_some() && e.key == event.key)
+            .cloned()
+            .unwrap_or_else(|| event.clone())
+    }
+
     /// Queue a report. Its subject is ignored: the issue id is allocated in `flush`,
     /// under the lock, after re-reading the log.
     pub fn report(&mut self, kind: IssueKind, event: Event) -> Result<()> {
@@ -945,12 +970,21 @@ impl LogWriter {
                 .key
                 .as_ref()
                 .is_none_or(|key| keys.insert(key.clone()));
-            if added {
-                subjects.insert(event.subject.clone());
-                text.push_str(&event.line()?);
-                text.push('\n');
-                recent.push(event.clone());
+            if !added {
+                // Already recorded: report the recorded event (its id and subject), never
+                // the queued copy with its fresh id.
+                let existing = recent
+                    .iter()
+                    .find(|e| e.key.is_some() && e.key == event.key)
+                    .cloned()
+                    .unwrap_or(event);
+                results.push((existing, false));
+                continue;
             }
+            subjects.insert(event.subject.clone());
+            text.push_str(&event.line()?);
+            text.push('\n');
+            recent.push(event.clone());
             results.push((event, added));
         }
         if results.iter().any(|(_, added)| *added) {
@@ -1189,7 +1223,7 @@ pub fn run(args: LogArgs) -> Result<()> {
     event.key = key;
     let event = event.with_id();
     if !writer.append(&event)? {
-        announce(&event, false);
+        announce(&writer.recorded_with_key(&event), false);
         return Ok(());
     }
     for (event, added) in writer.flush()? {
