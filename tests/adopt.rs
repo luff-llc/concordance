@@ -773,3 +773,101 @@ fn explicit_empty_strings_mean_none() {
         )]
     );
 }
+
+#[test]
+fn parent_components_are_refused() {
+    let temp = Temp::new();
+    let repo = temp.repo();
+    for args in [
+        vec!["init", "--app", "x", "--out", "spec/../spec/x", "--dry-run"],
+        vec![
+            "init",
+            "--app",
+            "x",
+            "--scope",
+            "apple/../android",
+            "--dry-run",
+        ],
+    ] {
+        let out = run_in(&repo, &args);
+        assert!(!out.status.success(), "{args:?}");
+        let message = String::from_utf8_lossy(&out.stderr);
+        assert!(message.contains("must not contain `..`"), "{message}");
+    }
+    let audit = run_in(
+        &temp.0,
+        &[
+            "plan-audit",
+            "spec/fixture",
+            "--out",
+            "spec/fixture/../fixture/tasks",
+        ],
+    );
+    assert!(!audit.status.success());
+    assert!(String::from_utf8_lossy(&audit.stderr).contains("must not contain `..`"));
+    assert!(!temp.0.join("spec/fixture/tasks").exists());
+    // The default output directory is fine even when DIR itself has `..` in it.
+    let fine = run_in(
+        &temp.0,
+        &["plan-audit", "repo/../spec/fixture", "--area", "home"],
+    );
+    assert!(stdout(&fine).starts_with("1 created;"));
+    assert!(temp
+        .0
+        .join("spec/fixture/tasks/audit-ios-home.md")
+        .is_file());
+}
+
+/// A Cargo virtual workspace: no root `src/`, members under `crates/*`.
+fn cargo_workspace(dir: &Path) {
+    let write = |path: &str, text: &str| {
+        let path = dir.join(path);
+        fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        fs::write(path, text).expect("write");
+    };
+    write(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/*\"]\nresolver = \"2\"\n",
+    );
+    write("crates/tool/Cargo.toml", "[package]\nname = \"tool\"\n");
+    write("crates/tool/src/main.rs", "fn main() {}\n");
+    write("crates/core/Cargo.toml", "[package]\nname = \"core\"\n");
+    write("crates/core/src/lib.rs", "pub fn f() {}\n");
+    write("crates/core/tests/it.rs", "#[test]\nfn t() {}\n");
+}
+
+#[test]
+fn cargo_virtual_workspaces_get_member_globs() {
+    let temp = Temp::new();
+    let ws = temp.0.join("ws");
+    cargo_workspace(&ws);
+    let plan = stdout(&run_in(&ws, &["init", "--app", "ws", "--dry-run"]));
+    assert!(
+        plan.contains("    all = [\"crates/core/src/**/*.rs\", \"crates/tool/src/**/*.rs\"]"),
+        "{plan}"
+    );
+    assert!(
+        plan.contains("    tests = [\"crates/core/tests/**/*.rs\"]"),
+        "{plan}"
+    );
+    assert_eq!(planned_counts(&plan), vec![("cli".to_owned(), 2)], "{plan}");
+
+    // A scope inside one member keeps the Rust platform, narrowed to it.
+    let scoped = stdout(&run_in(
+        &ws,
+        &["init", "--app", "ws", "--scope", "crates/tool/src"],
+    ));
+    assert_eq!(
+        planned_counts(&scoped),
+        vec![("cli".to_owned(), 1)],
+        "{scoped}"
+    );
+    let toml = fs::read_to_string(ws.join("spec/ws/catalog.toml")).expect("catalog");
+    assert!(
+        toml.contains("all = [\"crates/tool/src/**/*.rs\"]"),
+        "{toml}"
+    );
+    let json = stdout(&run_in(&ws, &["inventory", "spec/ws", "--format", "json"]));
+    let value: serde_json::Value = serde_json::from_str(&json).expect("json");
+    assert_eq!(value["platforms"][0]["summary"]["files"], 1, "{json}");
+}

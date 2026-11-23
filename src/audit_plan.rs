@@ -367,12 +367,13 @@ impl Catalog {
         out.join("\n") + "\n"
     }
 
-    /// Write one brief per candidate area into `out`, never overwriting a file.
+    /// Write one brief per candidate area into `out` (default: `tasks` in the catalog
+    /// directory), never overwriting a file.
     pub fn plan_audit(
         &self,
         roots: &RootOptions,
         options: &AuditOptions,
-        out: &Path,
+        out: Option<&Path>,
     ) -> Result<AuditResult> {
         let platform = options
             .platform
@@ -421,32 +422,35 @@ impl Catalog {
             .repo
             .clone()
             .unwrap_or_else(|| self.directory.join(&self.config.repo_root));
-        let safe = match crate::adopt::SafeDir::new(&repo, out) {
-            Ok(safe) => safe,
-            Err(error) if error.to_string().contains("is not inside") => {
-                match crate::adopt::SafeDir::new(&self.directory, out) {
-                    Ok(safe) => safe,
-                    Err(inner) if inner.to_string().contains("is not inside") => {
-                        return Err(format!(
-                            "--out {} must be inside the repository {} or the catalog directory {}",
-                            out.display(),
-                            repo.display(),
-                            self.directory.display()
-                        )
-                        .into())
+        let safe = match out {
+            None => crate::adopt::SafeDir::child(&self.directory, "tasks")?,
+            Some(out) => match crate::adopt::SafeDir::new(&repo, out) {
+                Ok(safe) => safe,
+                Err(error) if error.to_string().contains("is not inside") => {
+                    match crate::adopt::SafeDir::new(&self.directory, out) {
+                        Ok(safe) => safe,
+                        Err(inner) if inner.to_string().contains("is not inside") => {
+                            return Err(format!(
+                                "--out {} must be inside the repository {} or the catalog directory {}",
+                                out.display(),
+                                repo.display(),
+                                self.directory.display()
+                            )
+                            .into())
+                        }
+                        Err(inner) => return Err(inner),
                     }
-                    Err(inner) => return Err(inner),
                 }
-            }
-            Err(error) => return Err(error),
+                Err(error) => return Err(error),
+            },
         };
         safe.create()?;
         let mut result = AuditResult::default();
         for area in selected {
             let text = self.audit_brief(options, &base, target.as_ref(), area);
             let name = brief_name(&platform, options.target.as_deref(), area);
-            safe.file(&name)?;
-            let path = out.join(name);
+            // Write through exactly the checked path.
+            let path = safe.file(&name)?;
             match fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
