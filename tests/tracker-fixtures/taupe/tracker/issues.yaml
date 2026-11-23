@@ -54,4 +54,16 @@
   entries: [sync.join-by-qr]
 - id: request.no-impact
   kind: request
-  title: Unrated request
+  title: Unrated request | with pipe
+- id: bug.carried-fix
+  kind: bug
+  title: Fixed in a shipped release without a release field
+  state: fixed
+  impact: low
+  evidence: ["unit 2/2"]
+- id: bug.pulled-fix
+  kind: bug
+  title: Fixed only in a pulled release
+  state: fixed
+  impact: low
+  evidence: ["unit 1/1"]

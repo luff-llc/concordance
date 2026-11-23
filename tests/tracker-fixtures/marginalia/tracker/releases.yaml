@@ -2,3 +2,11 @@
   state: planned
   title: Reading room
   window: { from: 2027-04-20, to: 2027-05-30 }
+- id: "4.9"
+  state: planned
+  title: Lead-up edge
+  window: { from: 2027-04-01, to: 2027-04-08 }
+- id: "5.1"
+  state: planned
+  title: Starts on the beat
+  window: { from: 2027-06-07, to: 2027-06-20 }

@@ -518,6 +518,13 @@ impl TrackFormatArg {
             Self::Json => TrackFormat::Json,
         }
     }
+    /// The `--format` argument to repeat in a regenerate hint.
+    fn flag(self) -> &'static str {
+        match self {
+            Self::Markdown => "",
+            Self::Json => " --format json",
+        }
+    }
     fn extension(self) -> &'static str {
         match self {
             Self::Markdown => "md",
@@ -526,12 +533,18 @@ impl TrackFormatArg {
     }
 }
 /// Write generated output, or with `check` compare it exactly and fail when stale.
-fn write_or_check(out: &std::path::Path, content: &str, check: bool, command: &str) -> Result<()> {
+/// `regenerate` is the runnable command that rewrites `out`.
+fn write_or_check(
+    out: &std::path::Path,
+    content: &str,
+    check: bool,
+    command: &str,
+    regenerate: &str,
+) -> Result<()> {
     if check {
         if fs::read_to_string(out).ok().as_deref() != Some(content) {
             return Err(format!(
-                "stale {command} output: {}; regenerate with {command} --out {}",
-                out.display(),
+                "stale {command} output: {}; regenerate with: {regenerate}",
                 out.display()
             )
             .into());
@@ -667,7 +680,17 @@ fn run(cli: Cli) -> Result<()> {
             let catalog = Catalog::load(&dir)?;
             let content = catalog.track(today.as_deref())?.render(format.format())?;
             let out = out.unwrap_or_else(|| dir.join(format!("tracker.{}", format.extension())));
-            write_or_check(&out, &content, check, "track")?;
+            let regenerate = format!(
+                "concordance track {}{}{} --out {}",
+                shell_word(&dir.display().to_string()),
+                format.flag(),
+                today
+                    .as_deref()
+                    .map(|t| format!(" --today {}", shell_word(t)))
+                    .unwrap_or_default(),
+                shell_word(&out.display().to_string())
+            );
+            write_or_check(&out, &content, check, "track", &regenerate)?;
         }
         Command::Suite {
             suite,
@@ -683,7 +706,17 @@ fn run(cli: Cli) -> Result<()> {
                     .directory
                     .join(format!("suite.{}", format.extension()))
             });
-            write_or_check(&out, &content, check, "suite")?;
+            let regenerate = format!(
+                "concordance suite {}{}{} --out {}",
+                shell_word(&suite.display().to_string()),
+                format.flag(),
+                today
+                    .as_deref()
+                    .map(|t| format!(" --today {}", shell_word(t)))
+                    .unwrap_or_default(),
+                shell_word(&out.display().to_string())
+            );
+            write_or_check(&out, &content, check, "suite", &regenerate)?;
         }
         Command::Tokens { dir, platform, out } => {
             Catalog::load(&dir)?;
@@ -1359,6 +1392,18 @@ fn print_generation(result: concordance::JourneyResult) {
     );
     for path in result.preserved {
         eprintln!("Preserved: {}", path.display());
+    }
+}
+/// Quote a path for a copy-pasteable shell command when it needs quoting.
+fn shell_word(text: &str) -> String {
+    if !text.is_empty()
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-+=:,@".contains(&b))
+    {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
     }
 }
 fn main() {

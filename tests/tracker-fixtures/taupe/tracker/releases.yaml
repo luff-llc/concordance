@@ -26,11 +26,12 @@
   window: { from: 2026-09-20, to: 2026-10-05 }
   released: 2026-10-02
   builds: { ios: "40" }
-  carries: [player.skip-forward, bug.old-thing]
+  carries: [player.skip-forward, bug.old-thing, bug.carried-fix]
 - id: "1.0.0"
   state: released
   released: 2026-08-01
 - id: "0.9.0"
   state: pulled
   released: 2026-07-01
+  carries: [bug.pulled-fix]
   notes: [Pulled for a crash at launch.]

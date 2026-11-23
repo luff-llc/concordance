@@ -158,7 +158,11 @@ pub struct PlatformGaps {
     pub missing: usize,
     pub partial: usize,
     pub stale: usize,
-    /// The first entries in work-queue order.
+    /// `work-queue` (dependency order) or `impact` when the work queue could not be built.
+    pub order: String,
+    /// Why the impact-order fallback was used.
+    pub order_note: Option<String>,
+    /// The first entries in `order`.
     pub next: Vec<GapItem>,
 }
 
@@ -346,13 +350,20 @@ impl Catalog {
             if issue.evidence.is_empty() {
                 reasons.push("fixed without evidence".to_owned());
             }
-            if let Some(release) = issue
-                .release
-                .as_deref()
-                .and_then(|r| self.tracker.release(r))
+            // The issue's own release and every released release that carries it; pulled
+            // releases do not count.
+            let shipped: std::collections::BTreeSet<&str> = self
+                .tracker
+                .releases
+                .iter()
                 .filter(|r| r.state == ReleaseState::Released)
-            {
-                reasons.push(format!("release {} has shipped", release.id));
+                .filter(|r| {
+                    issue.release.as_deref() == Some(r.id.as_str()) || r.carries.contains(&issue.id)
+                })
+                .map(|r| r.id.as_str())
+                .collect();
+            for release in shipped {
+                reasons.push(format!("release {release} has shipped"));
             }
             if !reasons.is_empty() {
                 out.push(Unverified {
@@ -380,19 +391,19 @@ impl Catalog {
         counts
     }
 
-    /// Gaps on a platform in work-queue order (blocked work included). Falls back to
-    /// impact order when the queue cannot be built.
-    fn gap_queue(&self, platform: &str) -> Vec<&Entry> {
+    /// Gaps on a platform in work-queue order (blocked work included). When the queue cannot
+    /// be built, impact order with the queue error.
+    fn gap_queue(&self, platform: &str) -> (Vec<&Entry>, Option<String>) {
         match self.next_filtered(platform, None, usize::MAX, false, true) {
-            Ok(queue) => queue,
-            Err(_) => {
+            Ok(queue) => (queue, None),
+            Err(error) => {
                 let mut gaps: Vec<&Entry> = self
                     .entries
                     .values()
                     .filter(|e| e.platforms.get(platform).is_some_and(|r| r.status.is_gap()))
                     .collect();
                 gaps.sort_by_key(|e| self.gap_key(e));
-                gaps
+                (gaps, Some(error.to_string()))
             }
         }
     }
@@ -487,14 +498,21 @@ impl Catalog {
             .keys()
             .map(|platform| {
                 let counts = self.gap_counts(platform);
+                let (queue, order_note) = self.gap_queue(platform);
                 PlatformGaps {
+                    order: if order_note.is_some() {
+                        "impact"
+                    } else {
+                        "work-queue"
+                    }
+                    .into(),
+                    order_note,
                     platform: platform.clone(),
                     label: self.config.report.label(platform).to_owned(),
                     missing: counts.missing,
                     partial: counts.partial,
                     stale: counts.stale,
-                    next: self
-                        .gap_queue(platform)
+                    next: queue
                         .into_iter()
                         .take(GAP_PREVIEW)
                         .map(|e| GapItem {
@@ -569,8 +587,14 @@ pub(crate) fn release_text(release: Option<&ReleaseRef>) -> String {
         }
     }
 }
+/// Table cell text: pipes escaped, line breaks flattened.
 pub(crate) fn cell(text: &str) -> String {
-    text.replace('|', "\\|").replace('\n', " ")
+    text.replace('|', "\\|").replace(['\r', '\n'], " ")
+}
+/// One Markdown table row; every cell is escaped.
+pub(crate) fn row<S: AsRef<str>>(cells: &[S]) -> String {
+    let cells: Vec<String> = cells.iter().map(|c| cell(c.as_ref())).collect();
+    format!("| {} |", cells.join(" | "))
 }
 fn statuses_text(statuses: &BTreeMap<String, String>) -> String {
     statuses
@@ -702,14 +726,12 @@ impl TrackView {
                         Some(state) => state.clone(),
                         None => statuses_text(&c.statuses),
                     };
-                    out.push(format!(
-                        "| `{}` {} | {} | {} | {} |",
-                        c.id,
-                        cell(&c.title),
-                        c.kind,
-                        cell(&status),
-                        if c.ready { "yes" } else { "no" }
-                    ));
+                    out.push(row(&[
+                        format!("`{}` {}", c.id, c.title),
+                        c.kind.clone(),
+                        status,
+                        if c.ready { "yes" } else { "no" }.into(),
+                    ]));
                 }
             }
         }
@@ -740,13 +762,11 @@ impl TrackView {
             );
             out.push("| --- | --- | --- | --- | --- | --- | --- |".into());
             for i in issues {
-                out.push(format!(
-                    "| `{}` {} | {} | {} | {} | {} | {} | {} |",
-                    i.id,
-                    cell(&i.title),
-                    i.impact.as_deref().unwrap_or("—"),
-                    i.state,
-                    i.reported.as_deref().unwrap_or("—"),
+                out.push(row(&[
+                    format!("`{}` {}", i.id, i.title),
+                    i.impact.as_deref().unwrap_or("—").into(),
+                    i.state.clone(),
+                    i.reported.as_deref().unwrap_or("—").into(),
                     if i.platforms.is_empty() {
                         "—".into()
                     } else {
@@ -765,7 +785,7 @@ impl TrackView {
                         .as_deref()
                         .map(|r| format!("`{r}`"))
                         .unwrap_or_else(|| "—".into()),
-                ));
+                ]));
             }
         }
 
@@ -789,6 +809,12 @@ impl TrackView {
                 "### {}: {} missing, {} partial, {} stale",
                 g.label, g.missing, g.partial, g.stale
             ));
+            if let Some(note) = &g.order_note {
+                out.push(String::new());
+                out.push(format!(
+                    "In impact order: the work queue could not be built ({note})."
+                ));
+            }
             if !g.next.is_empty() {
                 out.push(String::new());
             }
@@ -811,17 +837,15 @@ impl TrackView {
             out.push("| Entry | Shared with | Status |".into());
             out.push("| --- | --- | --- |".into());
             for s in &self.shared {
-                out.push(format!(
-                    "| `{}` {} | {} | {} |",
-                    s.id,
-                    cell(&s.title),
+                out.push(row(&[
+                    format!("`{}` {}", s.id, s.title),
                     s.shared_with
                         .iter()
                         .map(|x| format!("`{x}`"))
                         .collect::<Vec<_>>()
                         .join(", "),
-                    statuses_text(&s.statuses)
-                ));
+                    statuses_text(&s.statuses),
+                ]));
             }
         }
         out.join("\n") + "\n"

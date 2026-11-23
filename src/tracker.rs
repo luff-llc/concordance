@@ -234,6 +234,7 @@ pub fn valid_shared_ref(value: &str) -> bool {
 fn load_items<T: serde::de::DeserializeOwned>(
     path: &Path,
     file: &str,
+    collections: &[&str],
     report: &mut ValidationReport,
 ) -> Vec<T> {
     let text = match fs::read_to_string(path) {
@@ -269,6 +270,25 @@ fn load_items<T: serde::de::DeserializeOwned>(
             .get("id")
             .and_then(serde_yaml::Value::as_str)
             .unwrap_or("");
+        // serde would read an explicit null list or map as its empty default; strict types
+        // reject it instead.
+        let nulls: Vec<&str> = collections
+            .iter()
+            .copied()
+            .filter(|field| item.get(*field).is_some_and(serde_yaml::Value::is_null))
+            .collect();
+        for field in &nulls {
+            report.error(
+                "tracker",
+                id,
+                "",
+                &format!("{file}[{index}]"),
+                &format!("{field} must be a list or map, not null; omit it or write []/{{}}"),
+            );
+        }
+        if !nulls.is_empty() {
+            continue;
+        }
         match serde_yaml::from_value::<T>(item.clone()) {
             Ok(parsed) => out.push(parsed),
             Err(error) => report.error(
@@ -289,10 +309,20 @@ impl Catalog {
         let releases_path = self.directory.join(RELEASES_FILE);
         let issues_path = self.directory.join(ISSUES_FILE);
         if releases_path.exists() {
-            self.tracker.releases = load_items(&releases_path, RELEASES_FILE, report);
+            self.tracker.releases = load_items(
+                &releases_path,
+                RELEASES_FILE,
+                &["window", "builds", "carries", "notes"],
+                report,
+            );
         }
         if issues_path.exists() {
-            self.tracker.issues = load_items(&issues_path, ISSUES_FILE, report);
+            self.tracker.issues = load_items(
+                &issues_path,
+                ISSUES_FILE,
+                &["source", "platforms", "entries", "evidence", "notes"],
+                report,
+            );
         }
         self.check_tracker(report);
     }

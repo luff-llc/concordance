@@ -92,7 +92,7 @@ fn valid_tracker_loads() {
     let fixture = Fixture::new();
     let catalog = Catalog::load(fixture.taupe()).expect("valid tracker fixture");
     assert_eq!(catalog.tracker.releases.len(), 7);
-    assert_eq!(catalog.tracker.issues.len(), 8);
+    assert_eq!(catalog.tracker.issues.len(), 10);
     let validate = success(fixture.run(&["validate", "taupe"]));
     assert!(validate.contains("Valid: 5 entries"));
     Catalog::load(fixture.0.join("marginalia")).expect("valid second app");
@@ -429,10 +429,10 @@ fn track_json_shape() {
     assert_eq!(value.as_object().map(serde_json::Map::len), Some(8));
     assert_eq!(value["summary"]["last_release"]["id"], "1.1.0");
     assert_eq!(value["summary"]["next_release"]["id"], "1.2.1");
-    assert_eq!(value["summary"]["open_bugs"]["total"], 4);
+    assert_eq!(value["summary"]["open_bugs"]["total"], 6);
     assert_eq!(value["summary"]["open_bugs"]["critical"], 1);
     assert_eq!(value["summary"]["open_requests"], 2);
-    assert_eq!(value["summary"]["unverified"], 2);
+    assert_eq!(value["summary"]["unverified"], 3);
     assert_eq!(value["summary"]["gaps"]["android"]["stale"], 1);
     let releases: Vec<&str> = value["releases"]
         .as_array()
@@ -462,11 +462,31 @@ fn track_json_shape() {
             "bug.crash-on-open",
             "bug.small-glitch",
             "bug.home-recovery-blank",
-            "bug.old-thing"
+            "bug.old-thing",
+            "bug.carried-fix",
+            "bug.pulled-fix"
         ]
     );
     assert_eq!(value["gaps"][0]["platform"], "android");
     assert_eq!(value["gaps"][0]["next"][0]["id"], "home.show-library");
+    assert_eq!(value["gaps"][0]["order"], "work-queue");
+    assert!(value["gaps"][0]["order_note"].is_null());
+    // A fixed issue carried by a released release is unverified even without its own
+    // release field; one carried only by a pulled release is not.
+    let unverified: Vec<(&str, &str)> = value["unverified"]
+        .as_array()
+        .expect("unverified")
+        .iter()
+        .filter_map(|u| Some((u["id"].as_str()?, u["reasons"][0].as_str()?)))
+        .collect();
+    assert_eq!(
+        unverified,
+        [
+            ("bug.carried-fix", "release 1.1.0 has shipped"),
+            ("bug.home-recovery-blank", "fixed without evidence"),
+            ("bug.old-thing", "release 1.1.0 has shipped"),
+        ]
+    );
     assert!(value.get("today").is_none());
     assert!(value["releases"][0].get("overdue").is_none());
     // JSON default output path sits beside catalog.toml.
@@ -549,7 +569,15 @@ fn suite_joins_apps_and_resolves_shared_features() {
     let beats = value["beats"].as_array().expect("beats");
     assert_eq!(beats.len(), 1, "past beats are hidden with --today");
     assert_eq!(beats[0]["title"], "WWDC 2027");
-    assert_eq!(beats[0]["releases"][0]["release"], "5.0");
+    // A window counts when at least one day falls strictly before the beat and its end is
+    // within the 60 days before it: 4.9 ends exactly 60 days before; 5.1 starts on the beat.
+    let beat_releases: Vec<&str> = beats[0]["releases"]
+        .as_array()
+        .expect("beat releases")
+        .iter()
+        .filter_map(|r| r["release"].as_str())
+        .collect();
+    assert_eq!(beat_releases, ["4.9", "5.0"]);
     let shared = value["shared"].as_array().expect("shared");
     assert_eq!(shared.len(), 2);
     assert_eq!(shared[0]["unresolved"].as_array().map(Vec::len), Some(0));
@@ -625,4 +653,217 @@ fn readiness_without_builds_uses_report_baseline_and_target() {
     assert!(
         markdown.contains("- Gaps: android 2 missing · 1 partial · 1 stale; eink none; ios none")
     );
+}
+
+#[test]
+fn explicit_null_collections_are_rejected() {
+    let r = "tracker/releases.yaml";
+    let i = "tracker/issues.yaml";
+    for (file, from, to, id, field) in [
+        (
+            r,
+            "builds: { android: \"127\" }",
+            "builds: null",
+            "1.2.1",
+            "builds",
+        ),
+        (
+            r,
+            "carries: [player.speed]",
+            "carries: null",
+            "1.3.0",
+            "carries",
+        ),
+        (r, "notes: []", "notes: ~", "1.2.0", "notes"),
+        (
+            r,
+            "window: { from: 2027-01-10, to: 2027-02-01 }",
+            "window: null",
+            "1.3.0",
+            "window",
+        ),
+        (
+            i,
+            "entries: [home.show-library]",
+            "entries: null",
+            "bug.home-recovery-blank",
+            "entries",
+        ),
+        (
+            i,
+            "evidence: [\"journey-7\"]",
+            "evidence: null",
+            "bug.verified-one",
+            "evidence",
+        ),
+        (
+            i,
+            "source: [device]",
+            "source: null",
+            "bug.home-recovery-blank",
+            "source",
+        ),
+        (
+            i,
+            "platforms: [android]",
+            "platforms: null",
+            "bug.crash-on-open",
+            "platforms",
+        ),
+    ] {
+        let fixture = Fixture::new();
+        fixture.edit(file, from, to);
+        expect_error(
+            &fixture,
+            id,
+            file,
+            &format!("{field} must be a list or map, not null"),
+        );
+    }
+    // A null optional scalar stays allowed, as in the spec's example.
+    let fixture = Fixture::new();
+    let errors = fixture.errors();
+    assert!(errors.is_empty(), "{errors:#?}");
+}
+
+#[test]
+fn gaps_fall_back_to_impact_order_visibly() {
+    let fixture = Fixture::new();
+    // library.search depends on home.show-library, which then has no android record, so
+    // the dependency-ordered work queue cannot be built for android.
+    fixture.edit(
+        "catalog/home.yaml",
+        "    android: { status: stale, previous_status: implemented, since_commit: abcdef1 }\n",
+        "",
+    );
+    let catalog = Catalog::load(fixture.taupe()).expect("catalog");
+    let view = catalog.track(None).expect("view");
+    let android = view
+        .gaps
+        .iter()
+        .find(|g| g.platform == "android")
+        .expect("android gaps");
+    assert_eq!(android.order, "impact");
+    let note = android.order_note.as_deref().expect("order note");
+    assert!(note.contains("home.show-library"), "{note}");
+    let ids: Vec<&str> = android.next.iter().map(|g| g.id.as_str()).collect();
+    assert_eq!(ids, ["sync.join-by-qr", "player.speed", "library.search"]);
+    let ios = view.gaps.iter().find(|g| g.platform == "ios").expect("ios");
+    assert_eq!(ios.order, "work-queue");
+    let markdown = view.markdown();
+    assert!(markdown.contains("In impact order: the work queue could not be built ("));
+    let json: Value =
+        serde_json::from_str(&view.render(concordance::TrackFormat::Json).expect("json"))
+            .expect("valid json");
+    assert_eq!(json["gaps"][0]["order"], "impact");
+    assert!(json["gaps"][0]["order_note"].is_string());
+}
+
+#[test]
+fn table_cells_escape_pipes_and_line_breaks() {
+    let fixture = Fixture::new();
+    let golden = include_str!("tracker-fixtures/taupe/tracker.md");
+    assert!(golden.contains("`request.no-impact` Unrated request \\| with pipe |"));
+    fixture.edit(
+        "tracker/issues.yaml",
+        "title: Small glitch",
+        "title: \"Small | glitch\\non two lines\"",
+    );
+    let catalog = Catalog::load(fixture.taupe()).expect("catalog");
+    let markdown = catalog.track(None).expect("view").markdown();
+    let line = markdown
+        .lines()
+        .find(|l| l.contains("bug.small-glitch"))
+        .expect("bug row");
+    assert_eq!(line.matches(" | ").count(), 6, "{line}");
+    assert!(line.contains("Small \\| glitch on two lines"), "{line}");
+    // Suite rows are escaped too: a label with a pipe stays in one cell.
+    let suite = fixture.0.join("suite.toml");
+    let text = fs::read_to_string(&suite).expect("suite");
+    fs::write(
+        &suite,
+        text.replacen("label = \"Taupe\"", "label = \"Taupe | iOS\"", 1),
+    )
+    .expect("edit suite");
+    let out = success(fixture.run(&["suite", "suite.toml", "--out", "/dev/stdout"]));
+    let row = out
+        .lines()
+        .find(|l| l.starts_with("| Taupe"))
+        .expect("taupe row");
+    assert!(row.starts_with("| Taupe \\| iOS | "), "{row}");
+}
+
+#[test]
+fn stale_hint_is_a_runnable_command() {
+    let fixture = Fixture::new();
+    success(fixture.run(&[
+        "track",
+        "taupe",
+        "--format",
+        "json",
+        "--today",
+        "2026-11-22",
+    ]));
+    fixture.edit(
+        "tracker/issues.yaml",
+        "title: Small glitch",
+        "title: Tiny glitch",
+    );
+    let output = fixture.run(&[
+        "track",
+        "taupe",
+        "--format",
+        "json",
+        "--today",
+        "2026-11-22",
+        "--check",
+    ]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "regenerate with: concordance track taupe --format json --today 2026-11-22 --out taupe/tracker.json"
+        ),
+        "{stderr}"
+    );
+    fixture.edit(
+        "tracker/releases.yaml",
+        "title: Crash fix",
+        "title: Crash fixes",
+    );
+    let output = fixture.run(&["suite", "suite.toml", "--check"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("regenerate with: concordance suite suite.toml --out suite.md"),
+        "{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn suite_catalogs_resolve_from_the_real_suite_location() {
+    let fixture = Fixture::new();
+    // A symlinked suite.toml elsewhere still finds taupe/ and marginalia/ beside its target.
+    let elsewhere = fixture.0.join("elsewhere");
+    fs::create_dir(&elsewhere).expect("mkdir");
+    std::os::unix::fs::symlink(fixture.0.join("suite.toml"), elsewhere.join("suite.toml"))
+        .expect("symlink");
+    let out = success(fixture.run(&["suite", "elsewhere/suite.toml"]));
+    assert!(out.contains("elsewhere/suite.md"), "{out}");
+    assert_eq!(
+        fs::read_to_string(elsewhere.join("suite.md")).expect("written beside the link"),
+        include_str!("tracker-fixtures/suite.md")
+    );
+    // `..` and absolute catalog paths are allowed.
+    let nested = fixture.0.join("nested");
+    fs::create_dir(&nested).expect("mkdir");
+    let absolute = fixture.0.join("marginalia").display().to_string();
+    fs::write(
+        nested.join("suite.toml"),
+        format!(
+            "title = \"Nested\"\n[apps.taupe]\ncatalog = \"../taupe\"\n[apps.marginalia]\ncatalog = \"{absolute}\"\n"
+        ),
+    )
+    .expect("nested suite");
+    success(fixture.run(&["suite", "nested/suite.toml", "--out", "/dev/null"]));
 }

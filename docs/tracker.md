@@ -23,7 +23,10 @@ spec/product/
 ```
 
 Both files are nonempty arrays, parsed with the same strict rules as area files
-(unknown fields, duplicate keys and invalid types are errors). A catalog without a
+(unknown fields, duplicate keys and invalid types are errors). A list or map field
+written as `null` (for example `carries: null` or `builds: ~`) is an invalid type: omit
+the field or write `[]` or `{}`. Optional scalars such as `duplicate_of` may be `null`.
+A catalog without a
 `tracker/` directory is valid and `track` reports only gaps and shared features.
 
 ### Releases
@@ -88,8 +91,11 @@ concordance track spec/product [--out tracker.md] [--check] [--format markdown|j
 concordance suite suite.toml   [--out suite.md]   [--check] [--format markdown|json] [--today YYYY-MM-DD]
 ```
 
-`track` writes `<dir>/tracker.md` by default; `--check` compares exactly and never
-writes, like `report --check`. Output contains no relative time unless `--today` is
+`track` writes `<dir>/tracker.md` by default (`<dir>/tracker.json` with
+`--format json`); `--check` compares exactly and never writes, like `report --check`, and
+when the file is stale prints the command that regenerates it, with the same catalog
+directory, `--format` and `--today`. Every Markdown table cell escapes `|` and flattens
+line breaks. Output contains no relative time unless `--today` is
 given, so a checked file does not go stale by itself. With `--today`, releases whose
 window has ended without release are marked overdue and upcoming beats are listed.
 
@@ -109,9 +115,13 @@ window has ended without release are marked overdue and upcoming beats are liste
 3. **Bugs** and **Requests**: open ones (not verified, closed, wont-fix or duplicate),
    ordered by impact, then reported date, then ID.
 4. **Unverified**: issues marked `fixed` without evidence, and fixed issues whose
-   release has shipped while they stay unverified.
-5. **Gaps**: for each platform, counts of missing and partial entries and the first five
-   in work-queue order.
+   release has shipped while they stay unverified. A shipped release is the issue's own
+   `release` or any `released` release that carries it; pulled releases do not count.
+5. **Gaps**: for each platform, counts of missing, partial and stale entries and the
+   first five in work-queue order. When the dependency-ordered work queue cannot be
+   built (for example a dependency has no record on that platform), the list falls back
+   to impact order and says so with the reason; JSON carries `order` (`work-queue` or
+   `impact`) and `order_note`.
 6. **Shared**: entries with `shared_with`.
 
 `--format json` emits the same content as one object (stable key order) for boards and
@@ -123,7 +133,7 @@ other tools; Galley reads this.
 title = "LUFF suite"
 
 [apps.taupe]
-catalog = "Marginalia/spec/taupe"    # relative to this file
+catalog = "../Marginalia/spec/taupe" # relative to this file's real location
 label = "Taupe"
 
 [apps.chase]
@@ -135,11 +145,18 @@ title = "WWDC 2027"
 why = "New OS features announced; plan adoption for September."
 ```
 
+Catalog paths are relative to the suite file's real location: a symlinked `suite.toml`
+resolves them from its target. `..` and absolute paths are allowed, since apps usually
+live in sibling repositories. The default output (`suite.md`, or `suite.json` with
+`--format json`) is written beside the suite path as given.
+
 `suite` loads every catalog (structural validation only; no evidence checks), then
 writes: one row per app (last release, next release and window, open bugs with
 critical/high counts, open requests, unverified, gaps per platform in the same compact
 form as the track summary); upcoming beats with
-the releases whose window falls within 60 days before each beat (needs `--today` to
+the releases whose window has at least one day in the 60 days before each beat, strictly
+before it (`window.from` earlier than the beat and `window.to` no earlier than 60 days
+before it; needs `--today` to
 filter past beats; otherwise all beats are listed); and a shared-features table showing,
 for each shared feature, every app's entry and its baseline status, with unresolved
 references flagged.

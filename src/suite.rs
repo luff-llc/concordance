@@ -1,6 +1,6 @@
 //! `concordance suite`: several app catalogs joined into one view of releases, beats and
 //! shared features.
-use crate::track::{cell, gaps_text, release_text, window_text, Format, Summary};
+use crate::track::{gaps_text, release_text, row, window_text, Format, Summary};
 use crate::tracker::calendar_day;
 use crate::{Catalog, Result};
 use serde::{Deserialize, Serialize};
@@ -114,7 +114,11 @@ impl Suite {
         let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let file: SuiteFile =
             toml::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        // Output defaults beside the path as given; catalogs resolve from the suite file's
+        // real location, so a symlinked suite.toml reads its target's neighbours.
         let directory = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let real = fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let base = real.parent().unwrap_or(Path::new(".")).to_path_buf();
         let mut apps = BTreeMap::new();
         for (key, app) in file.apps {
             if !crate::schema::valid_slug(&key) {
@@ -124,7 +128,8 @@ impl Suite {
                 )
                 .into());
             }
-            let dir = directory.join(&app.catalog);
+            // `..` and absolute paths are allowed: apps live in sibling repositories.
+            let dir = base.join(&app.catalog);
             let catalog =
                 Catalog::load(&dir).map_err(|e| format!("app {key} ({}): {e}", dir.display()))?;
             apps.insert(key.clone(), (app.label.unwrap_or(key), catalog));
@@ -198,7 +203,8 @@ impl Suite {
                         else {
                             continue;
                         };
-                        if from <= day && to >= day - BEAT_LEAD_DAYS {
+                        // At least one window day falls in the lead-up, strictly before the beat.
+                        if from < day && to >= day - BEAT_LEAD_DAYS {
                             releases.push(BeatRelease {
                                 app: key.clone(),
                                 release: release.id.clone(),
@@ -330,24 +336,24 @@ impl SuiteView {
                 .into(),
         );
         out.push("| --- | --- | --- | --- | --- | --- | --- | --- |".into());
-        for row in &self.apps {
-            let s = &row.summary;
-            out.push(format!(
-                "| {} | {} | {} | {} | {} ({}/{}) | {} | {} | {} |",
-                cell(&row.label),
-                cell(&release_text(s.last_release.as_ref())),
-                cell(&release_text(s.next_release.as_ref())),
+        for app in &self.apps {
+            let s = &app.summary;
+            out.push(row(&[
+                app.label.clone(),
+                release_text(s.last_release.as_ref()),
+                release_text(s.next_release.as_ref()),
                 s.next_release
                     .as_ref()
                     .map(|r| window_text(r.window.as_ref()))
                     .unwrap_or_else(|| "—".into()),
-                s.open_bugs.total,
-                s.open_bugs.critical,
-                s.open_bugs.high,
-                s.open_requests,
-                s.unverified,
-                cell(&gaps_text(&s.gaps)),
-            ));
+                format!(
+                    "{} ({}/{})",
+                    s.open_bugs.total, s.open_bugs.critical, s.open_bugs.high
+                ),
+                s.open_requests.to_string(),
+                s.unverified.to_string(),
+                gaps_text(&s.gaps),
+            ]));
         }
         out.extend(["".into(), "## Beats".into()]);
         if self.beats.is_empty() {
@@ -401,12 +407,11 @@ impl SuiteView {
                         .collect::<Vec<_>>()
                         .join(", ")
                 };
-                out.push(format!(
-                    "| `{}` | {} | {} |",
-                    feature.feature,
-                    cell(&members),
-                    unresolved
-                ));
+                out.push(row(&[
+                    format!("`{}`", feature.feature),
+                    members,
+                    unresolved,
+                ]));
             }
         }
         out.join("\n") + "\n"
