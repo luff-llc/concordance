@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use concordance::{
     ui::{Tokens, UiCatalog},
-    Catalog, Language, Result, RootOptions,
+    Catalog, Language, Result, RootOptions, Suite, TrackFormat,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -38,6 +38,36 @@ enum Command {
         out: Option<PathBuf>,
         #[arg(long)]
         check: bool,
+    },
+    /// Releases, open bugs and requests, unverified fixes, gaps and shared features
+    /// (tracker/releases.yaml and tracker/issues.yaml beside catalog.toml; see docs/tracker.md).
+    Track {
+        dir: PathBuf,
+        /// Default: DIR/tracker.md (DIR/tracker.json with --format json).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Compare with the existing file and fail when it differs; never writes.
+        #[arg(long)]
+        check: bool,
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: TrackFormatArg,
+        /// YYYY-MM-DD; marks overdue releases and lists upcoming windows.
+        #[arg(long)]
+        today: Option<String>,
+    },
+    /// Join several app catalogs (suite.toml) into one view of releases, beats and shared features.
+    Suite {
+        suite: PathBuf,
+        /// Default: suite.md (suite.json with --format json) beside the suite file.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        check: bool,
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: TrackFormatArg,
+        /// YYYY-MM-DD; hides beats before this date.
+        #[arg(long)]
+        today: Option<String>,
     },
     /// Generate design tokens (swift, kotlin or css), preserving every existing file.
     Tokens {
@@ -477,6 +507,43 @@ enum DriftFormat {
     Json,
 }
 #[derive(Clone, Copy, ValueEnum)]
+enum TrackFormatArg {
+    Markdown,
+    Json,
+}
+impl TrackFormatArg {
+    fn format(self) -> TrackFormat {
+        match self {
+            Self::Markdown => TrackFormat::Markdown,
+            Self::Json => TrackFormat::Json,
+        }
+    }
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Markdown => "md",
+            Self::Json => "json",
+        }
+    }
+}
+/// Write generated output, or with `check` compare it exactly and fail when stale.
+fn write_or_check(out: &std::path::Path, content: &str, check: bool, command: &str) -> Result<()> {
+    if check {
+        if fs::read_to_string(out).ok().as_deref() != Some(content) {
+            return Err(format!(
+                "stale {command} output: {}; regenerate with {command} --out {}",
+                out.display(),
+                out.display()
+            )
+            .into());
+        }
+        println!("Current: {}", out.display());
+    } else {
+        fs::write(out, content)?;
+        println!("Wrote {}", out.display());
+    }
+    Ok(())
+}
+#[derive(Clone, Copy, ValueEnum)]
 enum Format {
     Yaml,
     Json,
@@ -589,6 +656,34 @@ fn run(cli: Cli) -> Result<()> {
                 fs::write(&out, report)?;
                 println!("Wrote {}", out.display());
             }
+        }
+        Command::Track {
+            dir,
+            out,
+            check,
+            format,
+            today,
+        } => {
+            let catalog = Catalog::load(&dir)?;
+            let content = catalog.track(today.as_deref())?.render(format.format())?;
+            let out = out.unwrap_or_else(|| dir.join(format!("tracker.{}", format.extension())));
+            write_or_check(&out, &content, check, "track")?;
+        }
+        Command::Suite {
+            suite,
+            out,
+            check,
+            format,
+            today,
+        } => {
+            let loaded = Suite::load(&suite)?;
+            let content = loaded.view(today.as_deref())?.render(format.format())?;
+            let out = out.unwrap_or_else(|| {
+                loaded
+                    .directory
+                    .join(format!("suite.{}", format.extension()))
+            });
+            write_or_check(&out, &content, check, "suite")?;
         }
         Command::Tokens { dir, platform, out } => {
             Catalog::load(&dir)?;

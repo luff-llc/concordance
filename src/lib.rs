@@ -11,9 +11,13 @@ pub use continuous::{
 };
 pub use version::{VersionReport, VersionResult};
 mod set;
+mod suite;
+mod track;
 pub mod tracker;
 pub use rebase::{AnchorFate, AnchorMove, AnchorSuggestion, RebaseReport};
 pub use set::{SetOutcome, SetRequest, CLEARABLE};
+pub use suite::{Suite, SuiteView};
+pub use track::{Format as TrackFormat, TrackView};
 pub use tracker::{calendar_day, Tracker};
 mod evidence;
 mod generate;
