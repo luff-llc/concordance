@@ -47,6 +47,12 @@ concordance track path/to/catalog --format json --today 2026-11-22 --out tracker
 concordance suite suite.toml --out suite.md
 ```
 
+To adopt Concordance in a repository, run `concordance init` (it detects platforms and
+writes `spec/<app>/` with `catalog.toml`, an empty `catalog/`, `tracker/` and an agent kit),
+then `concordance inventory spec/<app> --uncatalogued` and `concordance plan-audit
+spec/<app>` for per-area audit briefs; `concordance guide spec/<app>` prints the agent kit.
+See [Adopting](docs/adopt.md).
+
 Validation collects schema, identity, dependency, retirement, and evidence problems in
 one sorted report. External checkouts can be supplied with repeatable
 `--root platform=path` options or `CONCORDANCE_ROOT_<PLATFORM>` environment variables.

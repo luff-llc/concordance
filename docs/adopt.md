@@ -1,6 +1,6 @@
 # Bring Concordance into a repo
 
-Status: proposal, being built (Nov 2026). The first adopter is Taupe in Marginalia.
+Status: being built (Nov 2026); steps 3 and 4 are done. The first adopter is Taupe in Marginalia.
 
 Concordance should be something you add to any repository, not something hand-built for one
 app. You run one command, it scans the repo, and from then on agents keep the product state
@@ -132,7 +132,61 @@ The repo's agent guide carries one line: *product state is kept by Concordance; 
 
 1. Event log, `log` commands, fold into `track` (derived states, warnings).
 2. `scan-git`: trailers and tags.
-3. `init` and `inventory` (detection, globs, strings, identifiers, coverage).
-4. `plan-audit` and `guide`.
+3. `init` and `inventory` (detection, globs, strings, identifiers, coverage). Done.
+4. `plan-audit` and `guide`. Done.
 5. Adopt on Taupe: log events from today's facts, trailers in the agent guide, release tooling
    calls `log`. Then try `init` on a repo with no catalog.
+
+## As built: `init`, `inventory`, `plan-audit`, `guide`
+
+Choices where the proposal left room:
+
+- **`init` paths.** `--out` is relative to `--repo` and must be inside it; `repo_root` is
+  derived from its depth. Platform roots: Apple is the common ancestor of every
+  `Package.swift`, `project.yml` and `*.xcodeproj`; it is named `ios` or `macos` only when
+  the project files mention exactly one of them, else `apple`. Android is the deepest
+  `settings.gradle(.kts)` directory containing every module that has a `build.gradle(.kts)`
+  above an `AndroidManifest.xml`. Web is the `package.json` directory with the most sources
+  under `src/`, `app/`, `pages/`, `components/` or `lib/`. `Cargo.toml`, `go.mod` and
+  `pyproject.toml` each give a CLI platform (`cli`, or `cli-rust`/`cli-go`/`cli-python` when
+  there are several). A platform with no source files is dropped. Hidden directories,
+  `node_modules`, `build`, `.build`, `DerivedData`, `target`, `Pods`, `.git` and `dist` are
+  skipped.
+- **Globs.** One `all` glob per top-level source directory (per module source set on
+  Android). `user_visible` keeps the directories whose files import a UI framework
+  (SwiftUI, UIKit, AppKit, WidgetKit; Compose or `android.view`/`android.widget`; `.tsx`,
+  `.jsx`, `.vue`, `.svelte` on the web). A new `tests` key in `[source_globs.<platform>]`
+  names test files for `inventory`; files matching `all` that look like tests by path
+  convention count as tests too.
+- **Releases.** Tags are read only when `--repo` is the top level of its Git repository. The
+  pattern is the most common text before the version, escaped, followed by a version capture
+  (`^ios/v(\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.]+)?)$`). Without version tags, `[tracker]` is a
+  commented example. `init` does not append `released` facts itself; `log scan-git` does that
+  from the saved pattern.
+- **Rerunning.** When `catalog.toml` exists, `init` writes nothing, not even missing kit files;
+  it lists what it would add (missing files, newly detected platforms, missing
+  `[source_globs]`, a tag pattern). In a fresh catalog directory, files that already exist are
+  kept and the rest are created. `tracker/` is created empty.
+- **Empty catalogs.** A catalog with a `catalog/` directory and no area files is valid
+  (`validate`, `track`); a flat catalog still needs at least one area file.
+- **Inventory.** Files are the user-visible sources (`user_visible`, else `all`; with no
+  `[source_globs]`, common source extensions). A candidate area is the first non-generic
+  folder below the matched glob's fixed prefix (`src`, `main`, `kotlin`, `java`, `sources`,
+  `views`, `screens`, `features` and similar are skipped); in Kotlin and Java the package
+  directories every file shares are stripped first. Files at that root are `app` for the
+  largest group and named after the glob's folder otherwise (`TaupeWidgets` →
+  `taupe-widgets`). Tests named after an area (`HomeUITests.swift`) join it. Strings come
+  from the source language only (`.xcstrings` minus stale keys, `en`/`Base` `.strings`,
+  `res/values/strings.xml`, `en` or unlocalized i18n JSON); a string's areas are the areas
+  whose source uses its key, matching `%@`/`%lld` placeholders to interpolations, or
+  `R.string.<name>`. Identifiers with interpolation or `+` concatenation are shown with `*`
+  and match entry identifiers as a glob. Citations: files by entry evidence on that platform
+  (after `[path_prefixes]`), identifiers by `accessibility.identifier`, strings by `copy` or
+  a copy detail's text or key. External platforms without `--root` are listed as unchecked.
+- **`plan-audit`.** Briefs go to `DIR/tasks` (or `--out`) as `audit-<platform>-<area>.md`, or
+  `parity-<baseline>-<target>-<area>.md` with `--target`, created exclusively; edited briefs
+  are preserved. `--platform` defaults to `[report].baseline`. The parity findings file is
+  named `<brief>-findings.md`.
+- **`guide`.** Paths are printed as passed to `guide`. Release tag patterns are read from the
+  raw `[tracker] tag_pattern` (a string or a list). `log` commands are shown with
+  `--catalog DIR`.
