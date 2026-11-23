@@ -50,7 +50,7 @@ catalog.toml:
 
     # Git tags that mark releases; `concordance log scan-git` records matching tags as released.
     # [tracker]
-    # tag_pattern = "^v(\\d+\\.\\d+\\.\\d+)$"
+    # tag_pattern = "v{version}"
 
 Dry run: nothing written.
 

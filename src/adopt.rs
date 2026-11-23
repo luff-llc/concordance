@@ -527,7 +527,8 @@ pub fn detect(repo: &Path) -> Result<Vec<DetectedPlatform>> {
     Ok(platforms)
 }
 
-/// A release-tag regex from existing tags: the most common text before the version.
+/// A release-tag glob (`<prefix>{version}`, as `log scan-git` reads it) from existing tags:
+/// the most common text before the version.
 pub fn guess_tag_pattern(tags: &[String]) -> Option<(String, usize)> {
     let version = regex::Regex::new(r"\d+\.\d+(?:\.\d+)?").ok()?;
     let mut prefixes: BTreeMap<String, usize> = BTreeMap::new();
@@ -543,10 +544,7 @@ pub fn guess_tag_pattern(tags: &[String]) -> Option<(String, usize)> {
             .then_with(|| b.0.cmp(&a.0))
     })?;
     Some((
-        format!(
-            r"^{}(\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.]+)?)$",
-            regex::escape(&prefix)
-        ),
+        format!("{prefix}{{version}}"),
         total,
     ))
 }
@@ -701,28 +699,21 @@ fn catalog_toml(
         }
         None => {
             out.push("# [tracker]".into());
-            out.push("# tag_pattern = \"^v(\\\\d+\\\\.\\\\d+\\\\.\\\\d+)$\"".into());
+            out.push("# tag_pattern = \"v{version}\"".into());
         }
     }
     out.join("\n") + "\n"
 }
 
-/// Parse catalog.toml text into `Config` plus its `[tracker] tag_pattern` (a string or a
-/// list). `[tracker]` is read here from the raw TOML so this module does not depend on how
-/// the tracker log types it.
+/// Parse catalog.toml text into `Config` plus its `[tracker] tag_pattern` globs.
 pub fn parse_config(text: &str) -> Result<(Config, Vec<String>)> {
-    let mut table: toml::Table = toml::from_str(text)?;
-    let mut patterns = Vec::new();
-    if let Some(toml::Value::Table(tracker)) = table.remove("tracker") {
-        match tracker.get("tag_pattern") {
-            Some(toml::Value::String(one)) => patterns.push(one.clone()),
-            Some(toml::Value::Array(many)) => {
-                patterns.extend(many.iter().filter_map(|v| v.as_str().map(str::to_owned)))
-            }
-            _ => {}
-        }
-    }
-    Ok((table.try_into()?, patterns))
+    let config: Config = toml::from_str(text)?;
+    let patterns = config
+        .tracker
+        .as_ref()
+        .map(|t| t.tag_pattern.patterns().to_vec())
+        .unwrap_or_default();
+    Ok((config, patterns))
 }
 
 /// The line for the repository's own agent guide (printed, never written).
@@ -1169,10 +1160,11 @@ mod tests {
             .map(|s| (*s).to_owned())
             .collect();
         let (pattern, count) = guess_tag_pattern(&tags).expect("pattern");
-        assert_eq!(pattern, r"^ios/v(\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z.]+)?)$");
+        assert_eq!(pattern, "ios/v{version}");
         assert_eq!(count, 2);
-        let re = regex::Regex::new(&pattern).expect("valid");
+        let re = crate::scan_git::tag_regex(&pattern).expect("valid");
         assert!(re.is_match("ios/v1.2.0"));
+        assert!(!re.is_match("android/v1.2.0"));
         assert!(guess_tag_pattern(&["main".to_owned()]).is_none());
     }
     #[test]

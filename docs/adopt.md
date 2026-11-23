@@ -39,8 +39,9 @@ Scans the repository and writes a starting catalog directory:
   `go.mod`, `pyproject.toml` (CLI or service). Each one becomes a `[platforms]` root.
 - **Source globs.** Defines `all`, `user_visible` and `strings` globs per platform, from the
   layout it finds (for example `**/*.swift` under app targets; `res/values*/strings.xml`).
-- **Releases.** Git tags matching a version (`v1.2.0`, `ios/v1.2.0`, `taupe-1.2.0`) are recorded
-  as `released` facts dated by the tag. The tag pattern is saved in `catalog.toml` for later scans.
+- **Releases.** From existing tags with a version (`v1.2.0`, `ios/v1.2.0`, `taupe-1.2.0`), init
+  saves the most common form as `[tracker] tag_pattern` (for example `ios/v{version}`).
+  `concordance log scan-git` then records each matching tag as a `released` fact dated by the tag.
 - **Agent kit.** Writes `AGENTS.md` beside the catalog, plus a one-line pointer for the repo's
   own agent guide (printed, never written into it). The kit says how to use `next`, `entry`,
   `inventory`, `log` and commit trailers.
@@ -188,6 +189,6 @@ Choices where the proposal left room:
   `parity-<baseline>-<target>-<area>.md` with `--target`, created exclusively; edited briefs
   are preserved. `--platform` defaults to `[report].baseline`. The parity findings file is
   named `<brief>-findings.md`.
-- **`guide`.** Paths are printed as passed to `guide`. Release tag patterns are read from the
-  raw `[tracker] tag_pattern` (a string or a list). `log` commands are shown with
+- **`guide`.** Paths are printed as passed to `guide`. Release tag patterns come from
+  `[tracker] tag_pattern` (a `{version}` glob, or a list of them), the same setting `scan-git` reads. `log` commands are shown with
   `--catalog DIR`.
