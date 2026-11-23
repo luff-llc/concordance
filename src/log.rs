@@ -5,7 +5,7 @@
 use crate::tracker::{calendar_day, valid_issue_id, IssueKind};
 use crate::{Catalog, Impact, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -87,6 +87,11 @@ pub struct Event {
     /// UTC, `YYYY-MM-DDTHH:MM:SSZ`.
     pub at: String,
     pub by: String,
+    /// A stable source key set by automated sources (`git:trailer:…`, `git:tag:…`, or a
+    /// tool's `--key`). An event whose key is already in the log is already recorded;
+    /// events without a key are always appended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -99,7 +104,8 @@ pub struct Event {
     pub source: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
-    /// The fix commit a verification is bound to: the issue's current fix when recorded.
+    /// Older logs only: the fix commit a verification was bound to when recorded. Still
+    /// read (a check bound to an earlier fix does not verify a newer one); never written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fix: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -113,9 +119,7 @@ pub struct Event {
     pub date: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// How many earlier pulls (for `released`) or reopens (for `fixed` and `verified`) of
-    /// the subject precede this fact; omitted when none. A release after a pull, or a fix
-    /// or check after a reopen, is then a new fact even with the same commit.
+    /// Older logs only; read and ignored, never written.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cycle: Option<u32>,
 }
@@ -129,6 +133,7 @@ impl Event {
             subject: subject.into(),
             at: at.into(),
             by: by.into(),
+            key: None,
             title: None,
             entries: vec![],
             platforms: vec![],
@@ -144,36 +149,33 @@ impl Event {
             cycle: None,
         }
     }
-    /// Set the id from the fact's distinguishing fields.
+    /// Set the id from the line's content.
     pub fn with_id(mut self) -> Self {
         self.id = self.stable_id();
         self
     }
 
-    /// FNV-1a 64 over the kind, the subject and the fields that make this fact distinct:
-    /// the commit of a fix; who verified, the evidence, commit and bound fix of a
-    /// verification; the
-    /// reason and time of a reopen; platform and build of an upload; the platform and
-    /// commit (or its absence) of a release; the reason for a pull. A report is one per
-    /// issue.
+    /// FNV-1a 64 over the whole line (every field, `at` included) with `id` left empty:
+    /// unique per line, and the same for identical lines, so a line written twice is
+    /// recognised as one.
     pub fn stable_id(&self) -> String {
-        self.derive_id(false)
+        let content = Self {
+            id: String::new(),
+            ..self.clone()
+        };
+        let text = serde_json::to_string(&content).unwrap_or_default();
+        format!("{:016x}", fnv1a(text.as_bytes()))
     }
 
-    /// The id the previous release of Concordance derived: released ids without the
-    /// commit, verified ids without the bound fix. Logs written then still load.
+    /// Ids earlier releases derived from a fact's distinguishing fields; still accepted so
+    /// old logs load.
+    pub fn older_ids(&self) -> [String; 2] {
+        [self.derive_id(false), self.derive_id(true)]
+    }
+
+    /// The id of the release before last (released without commit, verified without fix).
     pub fn legacy_id(&self) -> String {
         self.derive_id(true)
-    }
-
-    /// Every id this event may be recorded under (current first).
-    pub fn ids(&self) -> Vec<String> {
-        let (current, legacy) = (self.stable_id(), self.legacy_id());
-        if current == legacy {
-            vec![current]
-        } else {
-            vec![current, legacy]
-        }
     }
 
     fn derive_id(&self, legacy: bool) -> String {
@@ -270,6 +272,7 @@ impl Event {
             EventKind::Uploaded => (&["platform", "build"], &["commit"]),
             EventKind::Released => (&["date"], &["platform", "commit", "cycle"]),
             EventKind::Pulled => (&["reason"], &[]),
+            // `key` may be on any kind; it is checked below.
         };
         for (field, is_present) in present {
             if required.contains(&field) && !is_present {
@@ -286,6 +289,7 @@ impl Event {
             ("platform", &self.platform),
             ("build", &self.build),
             ("reason", &self.reason),
+            ("key", &self.key),
         ] {
             if blank(value) {
                 errors.push(format!("{field} must not be empty"));
@@ -302,7 +306,8 @@ impl Event {
                 errors.push(format!("date {date:?} is not a calendar date (YYYY-MM-DD)"));
             }
         }
-        if errors.is_empty() && self.id != self.stable_id() && self.id != self.legacy_id() {
+        if errors.is_empty() && self.id != self.stable_id() && !self.older_ids().contains(&self.id)
+        {
             errors.push(format!(
                 "id {:?} does not match its content (expected {:?})",
                 self.id,
@@ -546,6 +551,11 @@ pub struct LogArgs {
     /// When, UTC: YYYY-MM-DDTHH:MM:SSZ or YYYY-MM-DD (default: now).
     #[arg(long, global = true)]
     pub at: Option<String>,
+    /// A stable source key for tools (for example `release-taupe:<upload id>`): a second
+    /// event with the same key is already recorded. People leave it out. Not for scan-git,
+    /// which sets its own.
+    #[arg(long, global = true)]
+    pub key: Option<String>,
     #[command(subcommand)]
     pub action: LogAction,
 }
@@ -704,71 +714,7 @@ pub const LOCK_FILE: &str = "tracker/log.jsonl.lock";
 /// lock.
 enum Pending {
     Event(Event),
-    Report {
-        kind: IssueKind,
-        event: Event,
-    },
-    /// A verification whose `fix` is bound under the lock to the issue's current fix.
-    Verify(Event),
-}
-
-/// Whether `event` is already in `recorded` (id -> event): under its current id, or under
-/// its legacy id when it adds nothing the legacy line lacks (a released commit, or a
-/// verification's bound fix, that the legacy line does not carry).
-fn already_recorded(recorded: &BTreeMap<String, Event>, event: &Event) -> bool {
-    if recorded.contains_key(&event.id) {
-        return true;
-    }
-    let legacy = event.legacy_id();
-    // Legacy lines never carry a cycle, so an event with one is always new to them.
-    if legacy == event.id || event.cycle.is_some() {
-        return false;
-    }
-    recorded.get(&legacy).is_some_and(|old| {
-        let richer = |new: &Option<String>, old: &Option<String>| new.is_some() && new != old;
-        let adds = match event.kind {
-            EventKind::Released => richer(&event.commit, &old.commit),
-            EventKind::Verified => richer(&event.fix, &old.fix),
-            _ => false,
-        };
-        !adds
-    })
-}
-
-/// The cycle of `event`: how many pulls (for a release) or reopens (for a fix or check)
-/// of its subject in `events` are recorded at or before its time.
-fn cycle_in<'a>(events: impl Iterator<Item = &'a Event>, event: &Event) -> Option<u32> {
-    let resets = match event.kind {
-        EventKind::Released => EventKind::Pulled,
-        EventKind::Fixed | EventKind::Verified => EventKind::Reopened,
-        _ => return None,
-    };
-    let count = events
-        .filter(|e| e.subject == event.subject && e.kind == resets && e.at <= event.at)
-        .count();
-    u32::try_from(count).ok().filter(|n| *n > 0)
-}
-
-/// `event` with its cycle set from `events` and its id recomputed.
-fn with_cycle<'a>(event: Event, events: impl Iterator<Item = &'a Event>) -> Event {
-    let cycle = cycle_in(events, &event);
-    if cycle == event.cycle && !event.id.is_empty() {
-        return event;
-    }
-    Event { cycle, ..event }.with_id()
-}
-
-/// The latest fix commit for `issue` since its last reopen, replaying `events` in order.
-fn current_fix_in<'a>(events: impl Iterator<Item = &'a Event>, issue: &str) -> Option<String> {
-    let mut fix = None;
-    for event in events.filter(|e| e.subject == issue) {
-        match event.kind {
-            EventKind::Fixed => fix = event.commit.clone(),
-            EventKind::Reopened => fix = None,
-            _ => {}
-        }
-    }
-    fix
+    Report { kind: IssueKind, event: Event },
 }
 
 /// A loaded catalog plus its log. Events are validated and queued with `append` (or
@@ -776,8 +722,8 @@ fn current_fix_in<'a>(events: impl Iterator<Item = &'a Event>, issue: &str) -> O
 pub struct LogWriter {
     pub catalog: Catalog,
     path: PathBuf,
-    /// Recorded and queued events by id.
-    ids: BTreeMap<String, Event>,
+    /// Source keys recorded or queued.
+    keys: BTreeSet<String>,
     pending: Vec<Pending>,
 }
 
@@ -855,16 +801,16 @@ impl LogWriter {
             )
             .into());
         }
-        let ids = catalog
+        let keys = catalog
             .tracker
             .log
             .iter()
-            .map(|e| (e.id.clone(), e.clone()))
+            .filter_map(|e| e.key.clone())
             .collect();
         Ok(Self {
             path: catalog.directory.join(LOG_FILE),
             catalog,
-            ids,
+            keys,
             pending: vec![],
         })
     }
@@ -872,16 +818,6 @@ impl LogWriter {
     /// Issue IDs known from issues.yaml or a `reported` event.
     pub fn known_issue(&self, id: &str) -> bool {
         self.catalog.tracker.issue(id).is_some()
-    }
-
-    /// The latest fix commit recorded for an issue since its last reopen, including
-    /// events queued in this run.
-    pub fn current_fix(&self, issue: &str) -> Option<String> {
-        self.catalog
-            .tracker
-            .derived
-            .get(issue)
-            .and_then(|d| d.fixes.last().cloned())
     }
 
     fn check(&self, event: &Event) -> Result<()> {
@@ -899,26 +835,20 @@ impl LogWriter {
         .into())
     }
 
-    /// Validate and queue one event. Returns false when an event with the same id (or its
-    /// legacy id) is already recorded or queued. Nothing is written until `flush`.
+    /// Validate and queue one event. Returns false when its source key is already
+    /// recorded or queued; an event without a key is always queued. Nothing is written
+    /// until `flush`.
     pub fn append(&mut self, event: &Event) -> Result<bool> {
-        let event = &with_cycle(event.clone(), self.catalog.tracker.log.iter());
-        self.check(event)?;
-        if already_recorded(&self.ids, event) {
-            return Ok(false);
+        let event = event.clone().with_id();
+        self.check(&event)?;
+        if let Some(key) = &event.key {
+            if !self.keys.insert(key.clone()) {
+                return Ok(false);
+            }
         }
-        self.ids.insert(event.id.clone(), event.clone());
-        self.pending.push(Pending::Event(event.clone()));
-        self.catalog.tracker.record(event);
+        self.catalog.tracker.record(&event);
+        self.pending.push(Pending::Event(event));
         Ok(true)
-    }
-
-    /// Queue a verification; its `fix` is bound in `flush`, under the lock, to the
-    /// issue's current fix as the re-read log has it.
-    pub fn verify(&mut self, event: Event) -> Result<()> {
-        self.check(&event.clone().with_id())?;
-        self.pending.push(Pending::Verify(event));
-        Ok(())
     }
 
     /// Queue a report. Its subject is ignored: the issue id is allocated in `flush`,
@@ -976,8 +906,8 @@ impl LogWriter {
     }
 
     /// Write every queued event in one append, under the lock. The log is re-read under
-    /// the lock: an event another writer recorded meanwhile is not written twice, report
-    /// ids are allocated against it, and a torn last line is cut off first. Returns each
+    /// the lock: a keyed event another writer recorded meanwhile is not written twice,
+    /// report ids are allocated against it, and a torn last line is cut off first. Returns each
     /// queued event and whether it was written.
     pub fn flush(&mut self) -> Result<Vec<(Event, bool)>> {
         let pending = std::mem::take(&mut self.pending);
@@ -1010,8 +940,7 @@ impl LogWriter {
             current.truncate(at);
         }
         let mut recent: Vec<Event> = parsed.events.into_iter().map(|(_, e)| e).collect();
-        let mut recorded: BTreeMap<String, Event> =
-            recent.iter().map(|e| (e.id.clone(), e.clone())).collect();
+        let mut keys: BTreeSet<String> = recent.iter().filter_map(|e| e.key.clone()).collect();
         let mut subjects: BTreeSet<String> = recent
             .iter()
             .chain(self.catalog.tracker.log.iter())
@@ -1024,32 +953,22 @@ impl LogWriter {
         let mut results = Vec::new();
         for item in pending {
             let event = match item {
-                Pending::Event(event) => with_cycle(event, recent.iter()),
+                Pending::Event(event) => event,
                 Pending::Report { kind, mut event } => {
                     let title = event.title.clone().unwrap_or_default();
                     event.subject = self.allocate_report_id(kind, &title, &recent, &subjects);
                     let event = event.with_id();
                     self.check(&event)?;
-                    if !self.ids.contains_key(&event.id) {
-                        self.ids.insert(event.id.clone(), event.clone());
-                        self.catalog.tracker.record(&event);
-                    }
-                    event
-                }
-                Pending::Verify(mut event) => {
-                    event.fix = current_fix_in(recent.iter(), &event.subject);
-                    let event = with_cycle(event.with_id(), recent.iter());
-                    self.check(&event)?;
-                    if !self.ids.contains_key(&event.id) {
-                        self.ids.insert(event.id.clone(), event.clone());
-                        self.catalog.tracker.record(&event);
-                    }
+                    self.catalog.tracker.record(&event);
                     event
                 }
             };
-            let added = !already_recorded(&recorded, &event);
+            // Only a source key makes an event already recorded.
+            let added = event
+                .key
+                .as_ref()
+                .is_none_or(|key| keys.insert(key.clone()));
             if added {
-                recorded.insert(event.id.clone(), event.clone());
                 subjects.insert(event.subject.clone());
                 text.push_str(&event.line()?);
                 text.push('\n');
@@ -1100,56 +1019,62 @@ fn resolve_commit(repo: &Path, commit: &str) -> String {
     }
 }
 
-/// Refuse a catalog path that reaches the catalog through a symlink, or resolves outside
-/// the root it was found from. The root is the current directory for a relative path, and
-/// for an absolute path the nearest ancestor holding `.git` (else the catalog's parent).
-/// Only components below the root are checked, so a system-level symlink above it (such
-/// as macOS's /var) does not count.
-pub fn check_catalog_path(dir: &Path) -> Result<()> {
+/// `path` made absolute against `cwd`, with `.` and `..` resolved lexically.
+fn lexical_absolute(cwd: &Path, path: &Path) -> PathBuf {
     use std::path::Component;
-    let cwd = std::env::current_dir()?;
-    let (root, rest): (PathBuf, PathBuf) = if dir.is_absolute() {
-        let root = dir
-            .ancestors()
-            .skip(1)
-            .find(|a| a.join(".git").exists())
-            .or_else(|| dir.parent())
-            .unwrap_or(dir)
-            .to_path_buf();
-        let rest = dir
-            .strip_prefix(&root)
-            .unwrap_or(Path::new(""))
-            .to_path_buf();
-        (root, rest)
-    } else {
-        (cwd.clone(), dir.to_path_buf())
-    };
-    let mut walked = root.clone();
-    for component in rest.components() {
+    let mut out = PathBuf::new();
+    for component in cwd.join(path).components() {
         match component {
-            Component::Normal(part) => walked.push(part),
-            Component::ParentDir => walked.push(".."),
-            _ => continue,
-        }
-        if fs::symlink_metadata(&walked).is_ok_and(|m| m.file_type().is_symlink()) {
-            return Err(format!(
-                "refusing to write: catalog path {} goes through symlink {}",
-                dir.display(),
-                walked.display()
-            )
-            .into());
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
         }
     }
-    let resolved =
-        fs::canonicalize(root.join(&rest)).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let root = fs::canonicalize(&root)?;
-    if !resolved.starts_with(&root) {
+    out
+}
+
+/// Refuse writing to a catalog reached through a symlink. The root is the git toplevel of
+/// the *canonical* catalog directory (or its canonical parent outside git). Walking the
+/// lexical path (absolute, `..` resolved), some ancestor must canonicalize to that root;
+/// the deepest such ancestor is the root's lexical counterpart. The path is refused when
+/// none does (it enters the repository through a symlink, as with a `spec` symlinked to
+/// another checkout), or when any component at or below that counterpart, or below the
+/// current directory, is a symlink. Symlinks above both (such as macOS's /var) are fine.
+pub fn check_catalog_path(dir: &Path) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let lexical = lexical_absolute(&cwd, dir);
+    let canonical = fs::canonicalize(&lexical).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let root = crate::scan_git::git(&canonical, &["rev-parse", "--show-toplevel"])
+        .ok()
+        .map(|top| PathBuf::from(top.trim()))
+        .filter(|top| !top.as_os_str().is_empty())
+        .and_then(|top| fs::canonicalize(top).ok())
+        .or_else(|| canonical.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| canonical.clone());
+    let Some(counterpart) = lexical
+        .ancestors()
+        .find(|a| fs::canonicalize(a).is_ok_and(|c| c == root))
+    else {
         return Err(format!(
-            "refusing to write: catalog {} resolves outside {}",
+            "refusing to write: catalog path {} reaches {} through a symlink",
             dir.display(),
             root.display()
         )
         .into());
+    };
+    for ancestor in lexical.ancestors() {
+        let checked =
+            ancestor.starts_with(counterpart) || (ancestor.starts_with(&cwd) && ancestor != cwd);
+        if checked && fs::symlink_metadata(ancestor).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(format!(
+                "refusing to write: catalog path {} goes through symlink {}",
+                dir.display(),
+                ancestor.display()
+            )
+            .into());
+        }
     }
     Ok(())
 }
@@ -1164,11 +1089,18 @@ pub fn run(args: LogArgs) -> Result<()> {
         None => now(),
     };
     let by = args.by.clone().unwrap_or_else(|| default_actor(&repo));
-    let event = match args.action {
+    let key = args.key.clone();
+    if key.as_deref().is_some_and(|k| k.trim().is_empty()) {
+        return Err("--key must not be empty".into());
+    }
+    let mut event = match args.action {
         LogAction::ScanGit {
             repo: chosen,
             since,
         } => {
+            if key.is_some() {
+                return Err("scan-git sets its own source keys; leave out --key".into());
+            }
             let repo = chosen.unwrap_or(repo);
             return crate::scan_git::scan(&mut writer, &repo, since.as_deref());
         }
@@ -1195,6 +1127,7 @@ pub fn run(args: LogArgs) -> Result<()> {
                 ImpactArg::Low => Impact::Low,
             });
             event.source = source;
+            event.key = key;
             writer.report(kind, event)?;
             let results = writer.flush()?;
             for (event, added) in &results {
@@ -1218,14 +1151,7 @@ pub fn run(args: LogArgs) -> Result<()> {
             let mut event = Event::new(EventKind::Verified, &issue, &at, &by);
             event.evidence = evidence;
             event.commit = commit.map(|c| resolve_commit(&repo, &c));
-            // Bound under the lock to the issue's current fix: the same evidence after a
-            // new fix is a new fact; rerunning it for the same fix is not.
-            writer.verify(event)?;
-            let results = writer.flush()?;
-            for (event, added) in &results {
-                announce(event, *added);
-            }
-            return Ok(());
+            event
         }
         LogAction::Reopened { issue, reason } => {
             let mut event = Event::new(EventKind::Reopened, &issue, &at, &by);
@@ -1262,9 +1188,8 @@ pub fn run(args: LogArgs) -> Result<()> {
             event
         }
     };
+    event.key = key;
     let event = event.with_id();
-    // Not queued means already recorded; a queued event may gain a cycle (and a new id)
-    // on the way, so report what was written.
     if !writer.append(&event)? {
         announce(&event, false);
         return Ok(());

@@ -96,80 +96,73 @@ A catalog without a log behaves exactly as described above.
 One JSON object per line, keys in this order, empty optional fields omitted:
 
 ```json
-{"id":"5f0c3c1a9d2e7b44","kind":"fixed","subject":"bug.home-blank","at":"2026-11-21T10:02:11Z","by":"Alice","commit":"9e1c…"}
+{"id":"5f0c3c1a9d2e7b44","kind":"fixed","subject":"bug.home-blank","at":"2026-11-21T10:02:11Z","by":"Alice","key":"git:trailer:9e1c…:Fixes:bug.home-blank","commit":"9e1c…"}
 ```
 
 | Kind | Subject | Fields |
 | --- | --- | --- |
 | `reported` | issue | `title` (required), `entries`, `platforms`, `impact`, `source` |
-| `fixed` | issue | `commit`, optional `cycle` |
-| `verified` | issue | `evidence` (nonempty), optional `commit`, `fix`, `cycle` |
+| `fixed` | issue | `commit` |
+| `verified` | issue | `evidence` (nonempty), optional `commit` |
 | `reopened` | issue | `reason` |
 | `uploaded` | release | `platform`, `build`, optional `commit` |
-| `released` | release | `date` (YYYY-MM-DD), optional `platform`, `commit`, `cycle` |
+| `released` | release | `date` (YYYY-MM-DD), optional `platform`, `commit` |
 | `pulled` | release | `reason` |
 
-`at` is UTC to the second (`YYYY-MM-DDTHH:MM:SSZ`); `by` is who recorded the fact. The
-issue kind comes from the subject's prefix (`bug.` or `request.`). `id` is an FNV-1a 64
-hash (16 hex digits) of the kind, the subject and the fields that make the fact distinct:
-nothing more for `reported` (one report per issue); `commit` for `fixed`; `by`,
-`evidence`, `commit` and the bound `fix` for `verified`; `reason` and `at` for
-`reopened`; `platform` and `build` for `uploaded`; `platform` and `commit` (or its
-absence) for `released`; `reason` for `pulled`; plus `cycle` when present. Appending an
-event whose id is already in the log does nothing and prints `already recorded`.
+Any event may carry `key`. `at` is UTC to the second (`YYYY-MM-DDTHH:MM:SSZ`); `by` is who
+recorded the fact. The issue kind comes from the subject's prefix (`bug.` or `request.`).
 
-`cycle` counts how many `pulled` events (for `released`) or `reopened` events (for
-`fixed` and `verified`) of the same subject are recorded at or before the event's `at`;
-it is set by the writer and omitted when zero. So a release after a pull, or a fix or
-check after a reopen, is a new fact even with the same commit, while rerunning the same
-command with no pull or reopen in between stays a no-op.
+**Idempotency is by source, not content.** `key` is a stable source key set only by
+automated sources: `scan-git` uses `git:trailer:<commit>:<Fixes|Verifies|Reports>:<issue>`
+and `git:tag:<full refname>:<commit>`, and tools pass `--key` (a release hook might pass
+`release-taupe:<upload id>`). An event whose key is already in the log is `already
+recorded`. An event without a key is always appended: a person or agent running a
+command states a new fact. So a rescan never re-adds a trailer or tag, whatever happened
+since (a pull, a reopen), and a re-release after a pull is just another `released` line.
 
-Ids from the previous release (`released` without the commit part; `verified` without
-`fix`; neither with `cycle`) are still accepted. A new event matching a legacy line counts as already recorded
-only when it adds nothing that line lacks: a `released` with a commit the legacy line
-does not have, or a verification bound to a fix it does not name, is appended. New lines
-are always written in the current form.
+`id` is an FNV-1a 64 hash (16 hex digits) of the whole line with `id` left empty, `at`
+included: unique per line, and equal for identical lines. Ids written by earlier
+releases (derived from a fact's distinguishing fields) are still accepted, as are the
+older fields `fix` (a verification's bound fix) and `cycle` (ignored); neither is
+written any more.
 
 Parsing is strict: unknown fields, missing or forbidden fields for the kind, malformed
-times and dates, an `id` that does not match the content, and references to unknown
+times and dates, an `id` that matches no known derivation, and references to unknown
 issues, entries or platforms are errors that name the line (`tracker/log.jsonl:7`). The
 `log` commands refuse to append while the log has errors. Blank lines are ignored and
-never written. A repeated id keeps its first line: an identical repeat is silent, and a
-repeat whose content differs is a warning (never an error), so writers racing to record
-the same fact cannot make the log unloadable. The log is read as bytes and each line
-decoded on its own. A last line without a newline that is not valid UTF-8 or does not
-parse is a torn write (a writer stopped mid-line, possibly mid-character): it is ignored
-with a warning, and the next writer cuts it off before appending. Invalid UTF-8 or a
-malformed line anywhere else stays an error naming the line.
+never written. A repeated id keeps its first line: an identical repeat is silent, one
+with different content is a warning. The log is read as bytes, each line decoded on its
+own: an unterminated last line that is not valid UTF-8 or does not parse is a torn write,
+ignored with a warning and cut off by the next writer. Invalid UTF-8 or a malformed line
+anywhere else stays an error.
 
 Writers queue their events, then take an OS advisory lock on `tracker/log.jsonl.lock`
-(`File::lock`, so Concordance needs Rust 1.89 or later to build), polling for up to 10
-seconds before failing with a clear error. The OS releases the lock if the process dies,
-so a leftover lock file never blocks anyone. Under the lock a writer re-reads the log,
-allocates `report` ids against it, and appends every event not yet recorded in one
-write; `scan-git` writes all it found at once. Writers refuse to write when `tracker/`,
-the log or the lock is a symlink, or when `tracker/` resolves outside the catalog
-directory.
+(`File::lock`, so Concordance needs Rust 1.89 or later), polling for up to 10 seconds
+before failing. The OS releases the lock if the process dies. Under the lock a writer
+re-reads the log, skips keyed events already there, allocates `report` ids, and appends
+everything in one write. Writers refuse to write when `tracker/`, the log or the lock is a
+symlink, or when `tracker/` resolves outside the catalog directory.
 
-The catalog path itself is checked before any write, whether it came from `--catalog`,
-`$CONCORDANCE_CATALOG`, the current directory or `spec/*/catalog.toml`: writes are
-refused when any component below its root is a symlink, or when it resolves outside that
-root. The root is the current directory for a relative path, and for an absolute path the
-nearest ancestor holding `.git` (else the catalog's parent), so system-level symlinks
-above it do not count. A relative `--catalog ../other-repo/spec/app` is refused; give the
-absolute path instead.
+**Catalog path.** Before any write, the catalog path (from `--catalog`,
+`$CONCORDANCE_CATALOG`, the current directory or `spec/*/catalog.toml`) is checked. Its
+root is the git toplevel of the *canonical* catalog directory (or its canonical parent
+outside git). Some ancestor of the lexical path (made absolute, `..` resolved) must
+canonicalize to that root; the deepest one is its lexical counterpart. Writes are
+refused when none does (the path enters the repository through a symlink, as when
+`/repo/spec` links to another checkout), or when any component at or below that
+counterpart, or below the current directory, is a symlink. Symlinks above both (such as
+macOS's `/var`) are fine, and naming another checkout's catalog directly is fine.
 
 **Threat model.** These checks guard against mistakes and stale setups, not a concurrent
-local attacker: someone who can swap `tracker/`, the log or a catalog path component for
-a symlink between the check and the write is out of scope. Symlinks visible before
-writing are refused.
+local attacker: swapping a path component for a symlink between the check and the write
+is out of scope. Symlinks visible before writing are refused.
 
 ### Commands
 
 ```sh
 concordance log report bug|request "Title" [--entry ID]... [--platform P]... [--impact I] [--source S]...
 concordance log fixed ISSUE --commit SHA
-concordance log verified ISSUE --evidence TEXT... --by WHO
+concordance log verified ISSUE --evidence TEXT... --by WHO [--commit SHA]
 concordance log reopened ISSUE --reason TEXT
 concordance log uploaded RELEASE --platform P --build B [--commit SHA]
 concordance log released RELEASE [--platform P] [--date D] [--commit SHA]
@@ -180,31 +173,26 @@ concordance log scan-git [--repo DIR] [--since REF]
 Every `log` command takes `--catalog DIR` (default: `$CONCORDANCE_CATALOG`, then the
 current directory if it holds `catalog.toml`, then the only `spec/*/catalog.toml` below
 it), `--by WHO` (default: `$CONCORDANCE_ACTOR`, then `git config user.name` in the
-repository, then `unknown`; `verified` requires it) and `--at` (UTC time or date; default
-now). Commits given to `fixed`, `verified`, `uploaded` and `released` are expanded to full
-hashes when git knows them. `released` without `--date` uses the day of `--at`.
-`verified` records the issue's current fix commit (the latest since the last reopen, as
-the log reads under the lock) as `fix`, alongside any explicit `--commit`, so the same
-evidence after a new fix is a new fact while rerunning it for the same fix is a no-op.
-A ref that names more than one of `refs/heads/X`, `refs/tags/X` and `refs/remotes/X`,
-or a hex-looking name that names a ref and also abbreviates an object, is ambiguous: it
-is recorded as given with a warning and never treated as a known commit. Full ref names
-(`refs/tags/X`) and full 40- or 64-digit hashes are fine. `report` allocates its id under
-the lock, so two different titles with the same slug reported at once become two issues.
+repository, then `unknown`; `verified` requires it), `--at` (UTC time or date; default
+now) and `--key KEY` (not for `scan-git`, which sets its own). Commits are expanded to
+full hashes when git resolves them to exactly one commit. A name that more than one of
+`refs/heads/X`, `refs/tags/X` and `refs/remotes/X` names, or a hex-looking name that names
+a ref and also abbreviates an object, is ambiguous: recorded as given with a warning and
+never treated as a known commit. Full refs and full 40- or 64-digit hashes are fine.
+`released` without `--date` uses the day of `--at`.
 
 `report` prints the issue id: `bug.` or `request.` plus a slug of the title (lowercase
 ASCII letters and digits joined by hyphens, at most 48 characters), suffixed `-2`, `-3`, …
-when issues.yaml, an entry or the log already uses it. A title that an existing issue of
-the same kind already has reuses that issue's id, so reporting the same thing twice is a
-no-op, and reporting an issues.yaml title adds a report for it.
+when issues.yaml, an entry or the log already uses it. The id is allocated under the
+lock, so two titles with the same slug reported at once become two issues. A title an
+existing issue of the same kind already has reuses that issue's id.
 
 ### `scan-git`
 
-Reads commits (oldest first; with `--since`, `REF..HEAD`, where REF is resolved with
-`git rev-parse --verify --end-of-options REF^{commit}` and refs that look like options are
-refused) in the catalog's `repo_root`
-(or `--repo`) and appends what their trailers state, with the commit's author as `by` and
-its commit time as `at`:
+Reads commits (oldest first; with `--since`, `REF..HEAD`, REF resolved to exactly one
+commit and option-shaped refs refused) in the catalog's `repo_root` (or `--repo`) and
+appends what their trailers state, with the commit's author as `by` and its commit time as
+`at`:
 
 ```text
 Fixes: bug.home-blank, bug.player-stall
@@ -214,18 +202,13 @@ Reports: request.reuse-identity
 
 Trailer values list IDs separated by commas, each optionally followed by evidence in
 parentheses. `Fixes:` records `fixed` with the commit; `Verifies:` records `verified` with
-the evidence (or `commit <hash>` when none is given), the commit, and the fix it is bound
-to, taken from history rather than the log's state at scan time: among the recorded
-fixes and the scan's latest earlier `Fixes:` for that issue, those the verifying commit
-contains, the one containing the others. Within one commit every `Fixes:` is read before
-any `Verifies:`, whatever the trailer order, so a commit that fixes and checks binds the
-check to its own fix. An unchanged rescan therefore records nothing. `Reports:` records a
-`reported` event for an issue that already exists. IDs that are not known issues are
-skipped with a warning on stderr.
+the evidence (or `commit <hash>`) and the commit; `Reports:` records `reported` for an
+issue that already exists. Within a commit, `Fixes:` are written before `Verifies:`.
+Unknown IDs are skipped with a warning.
 
-Tags matching a pattern in catalog.toml record `released` events for the version, with the
-tag's commit, dated by the tag's creator date (the tagger date of an annotated tag, the
-commit date of a lightweight one) and recorded by the tagger or commit author:
+Tags matching a pattern in catalog.toml record `released` for the version, with the
+commit the tag peels to (`refs/tags/X^{commit}`; a tag of a tree or blob is skipped with a
+warning), dated by the tag's creator date and recorded by the tagger or commit author:
 
 ```toml
 [tracker]
@@ -233,10 +216,9 @@ tag_pattern = ["ios/v{version}", "taupe-{version}"]   # or one string
 ```
 
 Each pattern has exactly one `{version}` (which must start with a digit); `*` matches
-within one path segment. Tags are read by full refname (`refs/tags/…`), so a branch with
-the same short name cannot stand in. With `--since`, tags whose commit the ref already
-contains are skipped; in a shallow clone, where git cannot always tell, such a tag is
-scanned with a warning. Rescanning records nothing new.
+within one path segment. Tags are read by full refname. With `--since`, tags whose commit
+the ref already contains are skipped; in a shallow clone, where git cannot always tell,
+such a tag is scanned with a warning.
 
 ### Derived states
 
@@ -246,12 +228,12 @@ whether one fact follows another:
 - **Issues** reported only in the log appear beside issues.yaml ones (`reported` is the
   day of the report). An issue is **open** until a fix is recorded, **fixed** with a fix
   commit, and **verified** when someone other than every fixer records a verification of
-  the latest fix; the verifying evidence joins the issue's evidence. A verification
-  without a `commit` but bound to a fix (`fix`) counts only for that fix; one bound to an earlier fix is listed
-  as `checked an earlier fix by WHO`. A legacy verification without `fix` or `commit` is
-  of the latest fix when it comes after that fix in the log. One with a `commit` counts
-  only when git confirms that commit is the fix commit or contains
-  it; when git cannot say, it is listed as `check by WHO unconfirmed`. Commits are
+  the latest fix (since the last reopen); the verifying evidence joins the issue's
+  evidence. A verification with a `commit` counts when git confirms that commit is or
+  contains the fix commit (when git cannot say, it is listed as `check by WHO
+  unconfirmed`); one without a commit (a manual check) counts when it comes after the fix
+  in the log. An older line's stored `fix` must be the latest fix, or the check is listed
+  as `checked an earlier fix by WHO`. Commits are
   compared only after both are resolved to full hashes with `git rev-parse --verify
   --end-of-options REF^{commit}`; an unresolvable or ambiguous ref is unknown, never
   proof. A fixer's own check does not count: the issue stays fixed and Unverified lists

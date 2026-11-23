@@ -145,21 +145,6 @@ impl Tracker {
             self.push_issue(issue_from_report(event));
             self.log_only_issues.insert(event.subject.clone());
         }
-        // Keep the current fix right for events queued later in the same run.
-        match event.kind {
-            EventKind::Fixed => self
-                .derived
-                .entry(event.subject.clone())
-                .or_default()
-                .fixes
-                .extend(event.commit.clone()),
-            EventKind::Reopened => {
-                if let Some(d) = self.derived.get_mut(&event.subject) {
-                    d.fixes.clear();
-                }
-            }
-            _ => {}
-        }
         self.log.push(event.clone());
     }
 }
@@ -476,29 +461,21 @@ impl Catalog {
             if let Some(fix) = latest {
                 for check in &run.verifications {
                     let own = fixers.contains(check.by.as_str());
-                    let covers = match &check.commit {
-                        Some(commit) => git.contains(
-                            &fix.commit,
-                            commit,
-                            &format!("issue `{id}`: verification by {}", check.by),
-                        ),
-                        // Bound to a fix: counts only for that fix.
-                        None => match &check.fix {
-                            Some(bound) => {
-                                let same = git.same(
-                                    bound,
-                                    &fix.commit,
-                                    &format!("issue `{id}`: verification by {}", check.by),
-                                );
-                                if same != Some(true) && !own {
-                                    earlier.insert(check.by.clone());
-                                    continue;
-                                }
-                                same
+                    let context = format!("issue `{id}`: verification by {}", check.by);
+                    // An older line's stored `fix` must be the latest fix.
+                    if let Some(bound) = &check.fix {
+                        if git.same(bound, &fix.commit, &context) != Some(true) {
+                            if !own {
+                                earlier.insert(check.by.clone());
                             }
-                            // Legacy checks without a bound fix: file order.
-                            None => Some(check.position > fix.position),
-                        },
+                            continue;
+                        }
+                    }
+                    // With a commit, git must confirm it is or contains the fix; without
+                    // one (a manual check), it must come after the fix in the log.
+                    let covers = match &check.commit {
+                        Some(commit) => git.contains(&fix.commit, commit, &context),
+                        None => Some(check.position > fix.position),
                     };
                     match (covers, own) {
                         (Some(true), false) => counted.push(check),

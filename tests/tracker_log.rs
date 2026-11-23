@@ -198,12 +198,16 @@ fn report_writes_a_stable_line_and_unique_ids() {
         "\",\"kind\":\"reported\",\"subject\":\"bug.app-crashes\",\"at\":\"2026-11-22T10:00:00Z\",\"by\":\"tester\",\"title\":\"App crashes!\",\"entries\":[\"home.show-library\"],\"platforms\":[\"ios\"],\"impact\":\"high\"}"
     );
 
-    // The same title again is the same issue: nothing appended.
+    // The same title again is the same issue (a second report is a new fact).
     let again = repo.log(&["--catalog", "spec/app", "report", "bug", "App crashes!"]);
     assert!(
-        again.starts_with("already recorded: reported bug.app-crashes"),
+        again.starts_with("recorded: reported bug.app-crashes ("),
         "{again}"
     );
+    // A tool's source key makes a repeat a no-op.
+    let keyed = |n: &str| repo.log(&["--key", "intake:42", "report", "bug", n]);
+    assert!(keyed("From intake").starts_with("recorded"));
+    assert!(keyed("From intake").starts_with("already recorded"));
     // Another title with the same slug gets -2; a slug taken by issues.yaml too.
     let other = repo.log(&["--catalog", "spec/app", "report", "bug", "App crashes"]);
     assert!(other.contains("bug.app-crashes-2"), "{other}");
@@ -215,7 +219,7 @@ fn report_writes_a_stable_line_and_unique_ids() {
     // Reporting a title that issues.yaml already has records a report for that issue.
     let yaml = repo.log(&["report", "bug", "Home is blank"]);
     assert!(yaml.contains("reported bug.home-blank ("), "{yaml}");
-    assert_eq!(repo.lines().len(), 5);
+    assert_eq!(repo.lines().len(), 7);
 
     let view = repo.track_json();
     let crash = issue(&view, "bugs", "bug.app-crashes").expect("log-only issue listed");
@@ -393,18 +397,6 @@ fn derived_issue_states_and_warnings() {
         "--reason",
         "still blank",
     ]);
-    // Recording the same fact twice is a no-op.
-    let again = repo.log(&[
-        "--at",
-        &at("15T09:00:00Z"),
-        "--by",
-        "alice",
-        "fixed",
-        "bug.home-blank",
-        "--commit",
-        "bbbb222",
-    ]);
-    assert!(again.starts_with("already recorded"), "{again}");
 
     let view = repo.track_json();
     let log_only = issue(&view, "bugs", "bug.log-only").expect("self-verified stays open");
@@ -836,8 +828,28 @@ fn repeated_ids_load_and_blank_lines_are_ignored() {
     let text = fs::read_to_string(repo.0.join(LOG)).expect("log");
     assert!(text.ends_with("}\n") && !text.ends_with("\n\n"), "{text:?}");
     // Same id, different content: the first line is kept, with a warning.
-    let other = fixed_line("bug.home-blank", "abc1234", "bob", "2026-11-11T00:00:00Z");
-    fs::write(repo.0.join(LOG), format!("{first}\n{other}\n")).expect("write");
+    // Older ids hashed only a fix's subject and commit, so these two lines (one by
+    // alice, one by bob) share one id with different content.
+    let older = |by: &str, at: &str| {
+        let mut event = concordance::log::Event::new(
+            concordance::log::EventKind::Fixed,
+            "bug.home-blank",
+            at,
+            by,
+        );
+        event.commit = Some("abc1234".into());
+        event.id = event.older_ids()[0].clone();
+        event.line().expect("line")
+    };
+    fs::write(
+        repo.0.join(LOG),
+        format!(
+            "{}\n{}\n",
+            older("alice", "2026-11-10T00:00:00Z"),
+            older("bob", "2026-11-11T00:00:00Z")
+        ),
+    )
+    .expect("write");
     let view = repo.track_json();
     let warnings = strings(&view["warnings"]);
     assert!(
@@ -862,8 +874,14 @@ fn concurrent_writers_never_duplicate() {
             } else {
                 format!("Thing {n}")
             };
+            // The repeated report carries a tool's source key: recorded once.
+            let mut args = vec!["log".to_owned()];
+            if n % 2 == 0 {
+                args.extend(["--key".to_owned(), "intake:same".to_owned()]);
+            }
+            args.extend(["report".to_owned(), "bug".to_owned(), title]);
             Command::new(env!("CARGO_BIN_EXE_concordance"))
-                .args(["log", "report", "bug", &title])
+                .args(&args)
                 .current_dir(&repo.0)
                 .env("CONCORDANCE_ACTOR", "tester")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -998,63 +1016,6 @@ fn verification_must_postdate_or_descend_from_the_fix() {
         issue(&view, "bugs", "bug.declared-planned").is_none(),
         "{view:#}"
     );
-}
-
-#[test]
-fn verified_binds_to_the_current_fix() {
-    let repo = Repo::new();
-    let verify = |at: &str| {
-        repo.log(&[
-            "--at",
-            at,
-            "--by",
-            "bob",
-            "verified",
-            "bug.home-blank",
-            "--evidence",
-            "unit 3/3",
-        ])
-    };
-    repo.log(&[
-        "--at",
-        "2026-11-10T00:00:00Z",
-        "--by",
-        "alice",
-        "fixed",
-        "bug.home-blank",
-        "--commit",
-        "c1c1c1c1",
-    ]);
-    assert!(verify("2026-11-11T00:00:00Z").starts_with("recorded"));
-    assert_eq!(repo.lines()[1]["fix"], "c1c1c1c1");
-    assert!(repo.lines()[1].get("commit").is_none());
-    // Rerunning for the same fix is a no-op.
-    assert!(verify("2026-11-11T05:00:00Z").starts_with("already recorded"));
-    repo.log(&[
-        "--at",
-        "2026-11-12T00:00:00Z",
-        "reopened",
-        "bug.home-blank",
-        "--reason",
-        "back",
-    ]);
-    repo.log(&[
-        "--at",
-        "2026-11-13T00:00:00Z",
-        "--by",
-        "alice",
-        "fixed",
-        "bug.home-blank",
-        "--commit",
-        "c2c2c2c2",
-    ]);
-    // The same evidence after the new fix is a new fact.
-    assert!(verify("2026-11-14T00:00:00Z").starts_with("recorded"));
-    assert_eq!(repo.lines()[4]["fix"], "c2c2c2c2");
-    // The id includes the bound fix, so the two checks are distinct facts.
-    assert_ne!(repo.lines()[1]["id"], repo.lines()[4]["id"]);
-    let view = repo.track_json();
-    assert!(issue(&view, "bugs", "bug.home-blank").is_none());
 }
 
 #[test]
@@ -1207,7 +1168,16 @@ fn scan_git_waits_for_writers_and_rereads_under_the_lock() {
         .expect("spawn");
     std::thread::sleep(std::time::Duration::from_millis(400));
     // Another writer records one of the same facts while the scan waits.
-    let line = fixed_line("bug.home-blank", &a, "Alice", "2026-11-10T00:00:00Z");
+    // The same fact from the same source, so it carries the scan's source key.
+    let mut fact = concordance::log::Event::new(
+        concordance::log::EventKind::Fixed,
+        "bug.home-blank",
+        "2026-11-10T00:00:00Z",
+        "Alice",
+    );
+    fact.commit = Some(a.clone());
+    fact.key = Some(format!("git:trailer:{a}:Fixes:bug.home-blank"));
+    let line = fact.with_id().line().expect("line");
     fs::write(repo.0.join(LOG), format!("{line}\n")).expect("write");
     drop(held);
     let output = child.wait_with_output().expect("wait");
@@ -1342,7 +1312,7 @@ fn finish(child: std::process::Child) -> String {
 }
 
 #[test]
-fn legacy_ids_still_load_and_dedupe() {
+fn older_ids_and_fields_still_load() {
     let repo = Repo::new();
     // A released event as the previous release wrote it: the id omits the commit part.
     let mut released = concordance::log::Event::new(
@@ -1360,10 +1330,25 @@ fn legacy_ids_still_load_and_dedupe() {
     fs::write(repo.0.join(LOG), format!("{line}\n")).expect("write");
     let catalog = Catalog::load(repo.catalog()).expect("legacy id accepted");
     assert_eq!(catalog.tracker.log[0].id, legacy);
-    // Recording the same fact again matches the legacy id: nothing written.
+    // Without a source key, recording it again is a new line.
     let again = repo.log(&["--at", "2026-11-11T00:00:00Z", "released", "1.1.0"]);
-    assert!(again.starts_with("already recorded"), "{again}");
-    assert_eq!(repo.lines().len(), 1);
+    assert!(again.starts_with("recorded"), "{again}");
+    assert_eq!(repo.lines().len(), 2);
+    // Lines with the older-only fields `fix` and `cycle` still load.
+    let mut old = concordance::log::Event::new(
+        concordance::log::EventKind::Released,
+        "1.1.0",
+        "2026-11-13T00:00:00Z",
+        "rel",
+    );
+    old.date = Some("2026-11-13".into());
+    old.cycle = Some(1);
+    let old = old.with_id();
+    let mut text = fs::read_to_string(repo.0.join(LOG)).expect("log");
+    text.push_str(&old.line().expect("line"));
+    text.push('\n');
+    fs::write(repo.0.join(LOG), text).expect("write");
+    Catalog::load(repo.catalog()).expect("cycle field accepted");
     // New lines use the current form.
     repo.log(&["--at", "2026-11-12T00:00:00Z", "released", "1.2.0"]);
     let lines = repo.lines();
@@ -1374,7 +1359,7 @@ fn legacy_ids_still_load_and_dedupe() {
         "tester",
     );
     fresh.date = Some("2026-11-12".into());
-    assert_eq!(lines[1]["id"], fresh.stable_id().as_str());
+    assert_eq!(lines[3]["id"], fresh.stable_id().as_str());
 }
 
 #[test]
@@ -1557,7 +1542,10 @@ fn large_logs_load_quickly() {
         started.elapsed()
     );
     let out = repo.log(&["report", "bug", "Generated 3999"]);
-    assert!(out.starts_with("already recorded"), "{out}");
+    assert!(
+        out.starts_with("recorded: reported bug.generated-3999 ("),
+        "{out}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1595,63 +1583,6 @@ fn torn_line_inside_a_multibyte_character() {
         .errors
         .iter()
         .any(|e| e.reference == "tracker/log.jsonl:1" && e.message.contains("UTF-8")));
-}
-
-#[test]
-fn legacy_lines_do_not_hide_richer_facts() {
-    let repo = Repo::new();
-    let commit = repo.commit("Rel", "2026-11-10T00:00:00Z", "Release");
-    // A legacy released line without a commit.
-    let mut legacy = concordance::log::Event::new(
-        concordance::log::EventKind::Released,
-        "1.1.0",
-        "2026-11-11T00:00:00Z",
-        "rel",
-    );
-    legacy.date = Some("2026-11-11".into());
-    legacy.id = legacy.legacy_id();
-    append_line(&repo, &legacy.line().expect("line"));
-    // The same release with a commit adds something: appended.
-    let out = repo.log(&[
-        "--at",
-        "2026-11-11T00:00:00Z",
-        "released",
-        "1.1.0",
-        "--commit",
-        &commit,
-    ]);
-    assert!(out.starts_with("recorded"), "{out}");
-    // Without a commit it adds nothing: already recorded.
-    let out = repo.log(&["--at", "2026-11-11T00:00:00Z", "released", "1.1.0"]);
-    assert!(out.starts_with("already recorded"), "{out}");
-    // A legacy verification without a bound fix; the same check bound to a fix is new.
-    repo.log(&[
-        "--by",
-        "alice",
-        "fixed",
-        "bug.home-blank",
-        "--commit",
-        "f1f1f1f1",
-    ]);
-    let mut check = concordance::log::Event::new(
-        concordance::log::EventKind::Verified,
-        "bug.home-blank",
-        "2026-11-12T00:00:00Z",
-        "bob",
-    );
-    check.evidence = vec!["ok".into()];
-    check.id = check.legacy_id();
-    append_line(&repo, &check.line().expect("line"));
-    let out = repo.log(&[
-        "--by",
-        "bob",
-        "verified",
-        "bug.home-blank",
-        "--evidence",
-        "ok",
-    ]);
-    assert!(out.starts_with("recorded"), "{out}");
-    assert_eq!(repo.lines().len(), 5);
 }
 
 #[test]
@@ -1698,13 +1629,12 @@ fn a_check_bound_to_an_earlier_fix_does_not_verify_a_newer_one() {
         "--evidence",
         "ok",
     ]);
-    assert_eq!(repo.lines().last().expect("line")["fix"], "bbbb0002");
     let view = repo.track_json();
     assert!(issue(&view, "bugs", "bug.home-blank").is_none());
 }
 
 #[test]
-fn rescan_binds_the_same_fix() {
+fn rescan_is_a_no_op() {
     let repo = Repo::new();
     repo.commit(
         "Alice",
@@ -1726,10 +1656,14 @@ fn rescan_binds_the_same_fix() {
         first.ends_with("scan-git: 3 recorded, 0 already recorded\n"),
         "{first}"
     );
-    let lines = repo.lines();
-    assert_eq!(lines[1]["fix"], lines[0]["commit"]);
     let second = success(repo.run(&["log", "scan-git"]));
     assert_eq!(second, "scan-git: 0 recorded, 3 already recorded\n");
+    // Bob checked fix A in a commit fix B does not descend from: not a check of B.
+    let view = repo.track_json();
+    assert_eq!(
+        unverified_reasons(&view, "bug.home-blank"),
+        vec!["checked before the latest fix by Bob"]
+    );
     assert_eq!(repo.lines().len(), 3);
 }
 
@@ -1870,65 +1804,17 @@ fn fixes_are_read_before_verifies_in_one_commit() {
         let lines = repo.lines();
         assert_eq!(lines[0]["kind"], "fixed");
         assert_eq!(lines[1]["kind"], "verified");
-        assert_eq!(lines[1]["fix"], sha.as_str(), "{message}");
+        assert!(lines[1].get("fix").is_none());
+        assert_eq!(
+            lines[1]["key"],
+            format!("git:trailer:{sha}:Verifies:bug.home-blank")
+        );
         let second = success(repo.run(&["log", "scan-git"]));
         assert_eq!(
             second, "scan-git: 0 recorded, 2 already recorded\n",
             "{message}"
         );
     }
-}
-
-#[test]
-fn release_after_a_pull_and_fix_after_a_reopen_are_new_facts() {
-    let repo = Repo::new();
-    let commit = repo.commit("Rel", "2026-11-10T00:00:00Z", "Release");
-    let release = |at: &str| repo.log(&["--at", at, "released", "1.1.0", "--commit", &commit]);
-    assert!(release("2026-11-10T01:00:00Z").starts_with("recorded"));
-    assert!(release("2026-11-10T02:00:00Z").starts_with("already recorded"));
-    repo.log(&[
-        "--at",
-        "2026-11-11T00:00:00Z",
-        "pulled",
-        "1.1.0",
-        "--reason",
-        "crash",
-    ]);
-    assert!(release("2026-11-12T00:00:00Z").starts_with("recorded"));
-    assert!(release("2026-11-12T01:00:00Z").starts_with("already recorded"));
-    assert_eq!(repo.lines()[2]["cycle"], 1);
-    let catalog = Catalog::load(repo.catalog()).expect("valid");
-    let state = catalog.tracker.release("1.1.0").map(|r| r.state.as_str());
-    assert_eq!(state, Some("released"));
-
-    let fix = |at: &str| {
-        repo.log(&[
-            "--at",
-            at,
-            "--by",
-            "alice",
-            "fixed",
-            "bug.home-blank",
-            "--commit",
-            &commit,
-        ])
-    };
-    assert!(fix("2026-11-13T00:00:00Z").starts_with("recorded"));
-    repo.log(&[
-        "--at",
-        "2026-11-14T00:00:00Z",
-        "reopened",
-        "bug.home-blank",
-        "--reason",
-        "back",
-    ]);
-    assert!(fix("2026-11-15T00:00:00Z").starts_with("recorded"));
-    assert!(fix("2026-11-15T01:00:00Z").starts_with("already recorded"));
-    let view = repo.track_json();
-    assert_eq!(
-        issue(&view, "bugs", "bug.home-blank").expect("open")["state"],
-        "fixed"
-    );
 }
 
 #[test]
@@ -1949,12 +1835,206 @@ fn catalog_paths_through_symlinks_are_refused() {
     assert!(err.contains("goes through symlink"), "{err}");
     // The real path works.
     repo.log(&["--catalog", "real-app", "report", "bug", "Fine"]);
-    // A relative path that leaves the current directory is refused.
+    // Another checkout's catalog, named directly, is fine.
     let other = Repo::new();
-    let outside = format!(
+    let sibling = format!(
         "../{}/spec/app",
         other.0.file_name().and_then(|n| n.to_str()).expect("name")
     );
-    let err = failure(repo.run(&["log", "--catalog", &outside, "report", "bug", "Nope"]));
-    assert!(err.contains("resolves outside"), "{err}");
+    repo.log(&[
+        "--catalog",
+        &sibling,
+        "report",
+        "bug",
+        "In the other checkout",
+    ]);
+    assert_eq!(other.lines().len(), 1);
+    // But /repo/spec as a symlink into the other checkout is refused: the path enters
+    // that repository through a symlink.
+    let third = Repo::new();
+    fs::remove_dir_all(third.0.join("spec")).expect("remove spec");
+    std::os::unix::fs::symlink(other.0.join("spec"), third.0.join("spec")).expect("symlink");
+    for args in [
+        vec!["log", "report", "bug", "Nope"],
+        vec!["log", "--catalog", "spec/app", "report", "bug", "Nope"],
+    ] {
+        let err = failure(third.run(&args));
+        assert!(err.contains("through a symlink"), "{err}");
+    }
+    assert_eq!(other.lines().len(), 1);
+}
+
+// ---------------------------------------------------------------------------------------
+// Idempotency by source key.
+
+fn release_state(repo: &Repo, id: &str) -> String {
+    let catalog = Catalog::load(repo.catalog()).expect("valid");
+    catalog
+        .tracker
+        .release(id)
+        .map(|r| r.state.as_str().to_owned())
+        .unwrap_or_default()
+}
+
+#[test]
+fn rescan_after_a_pull_is_a_no_op_and_the_release_stays_pulled() {
+    let repo = Repo::new();
+    repo.commit("Rel", "2026-11-10T00:00:00Z", "Release");
+    repo.git(&["tag", "ios/v1.1.0"], "Rel", "2026-11-10T00:00:00Z");
+    success(repo.run(&["log", "scan-git"]));
+    // Same timestamp as the tag, on purpose.
+    repo.log(&[
+        "--at",
+        "2026-11-10T00:00:00Z",
+        "pulled",
+        "1.1.0",
+        "--reason",
+        "crash",
+    ]);
+    let again = success(repo.run(&["log", "scan-git"]));
+    assert_eq!(again, "scan-git: 0 recorded, 1 already recorded\n");
+    assert_eq!(release_state(&repo, "1.1.0"), "pulled");
+}
+
+#[test]
+fn pull_release_pull_with_the_same_reason_ends_pulled() {
+    let repo = Repo::new();
+    let step = |args: &[&str]| assert!(repo.log(args).starts_with("recorded"));
+    step(&["--at", "2026-11-10T00:00:00Z", "released", "1.1.0"]);
+    step(&[
+        "--at",
+        "2026-11-11T00:00:00Z",
+        "pulled",
+        "1.1.0",
+        "--reason",
+        "crash",
+    ]);
+    step(&["--at", "2026-11-12T00:00:00Z", "released", "1.1.0"]);
+    assert_eq!(release_state(&repo, "1.1.0"), "released");
+    step(&[
+        "--at",
+        "2026-11-13T00:00:00Z",
+        "pulled",
+        "1.1.0",
+        "--reason",
+        "crash",
+    ]);
+    assert_eq!(release_state(&repo, "1.1.0"), "pulled");
+    assert_eq!(repo.lines().len(), 4);
+}
+
+#[test]
+fn reopen_then_rescan_adds_nothing() {
+    let repo = Repo::new();
+    repo.commit(
+        "Alice",
+        "2026-11-10T00:00:00Z",
+        "Fix\n\nFixes: bug.home-blank\n",
+    );
+    repo.commit(
+        "Bob",
+        "2026-11-11T00:00:00Z",
+        "Check\n\nVerifies: bug.home-blank (ok)\n",
+    );
+    success(repo.run(&["log", "scan-git"]));
+    repo.log(&["reopened", "bug.home-blank", "--reason", "back"]);
+    let again = success(repo.run(&["log", "scan-git"]));
+    assert_eq!(again, "scan-git: 0 recorded, 2 already recorded\n");
+    let view = repo.track_json();
+    assert_eq!(
+        issue(&view, "bugs", "bug.home-blank").expect("open")["state"],
+        "open"
+    );
+}
+
+#[test]
+fn manual_verified_after_a_new_fix_counts() {
+    let repo = Repo::new();
+    // Each at its own time: identical lines (same second, same content) are one line.
+    let at = |d: &str| format!("2026-11-{d}T00:00:00Z");
+    repo.log(&[
+        "--at",
+        &at("10"),
+        "--by",
+        "alice",
+        "fixed",
+        "bug.home-blank",
+        "--commit",
+        "aaaa0001",
+    ]);
+    repo.log(&[
+        "--at",
+        &at("11"),
+        "--by",
+        "bob",
+        "verified",
+        "bug.home-blank",
+        "--evidence",
+        "unit 3/3",
+    ]);
+    repo.log(&[
+        "--at",
+        &at("12"),
+        "reopened",
+        "bug.home-blank",
+        "--reason",
+        "back",
+    ]);
+    repo.log(&[
+        "--at",
+        &at("13"),
+        "--by",
+        "alice",
+        "fixed",
+        "bug.home-blank",
+        "--commit",
+        "aaaa0001",
+    ]);
+    let view = repo.track_json();
+    assert_eq!(
+        issue(&view, "bugs", "bug.home-blank").expect("open")["state"],
+        "fixed"
+    );
+    // The same evidence again, after the new fix: a new fact that verifies it.
+    let out = repo.log(&[
+        "--at",
+        &at("14"),
+        "--by",
+        "bob",
+        "verified",
+        "bug.home-blank",
+        "--evidence",
+        "unit 3/3",
+    ]);
+    assert!(out.starts_with("recorded"), "{out}");
+    let view = repo.track_json();
+    assert!(issue(&view, "bugs", "bug.home-blank").is_none());
+}
+
+#[test]
+fn tags_that_do_not_peel_to_a_commit_are_skipped() {
+    let repo = Repo::new();
+    repo.commit("Rel", "2026-11-10T00:00:00Z", "Release");
+    let tree = repo.git(&["rev-parse", "HEAD^{tree}"], "Rel", "2026-11-10T00:00:00Z");
+    repo.git(&["tag", "ios/v0.1.0", &tree], "Rel", "2026-11-10T00:00:00Z");
+    repo.git(&["tag", "ios/v1.1.0"], "Rel", "2026-11-10T00:00:00Z");
+    let output = repo.run(&["log", "scan-git"]);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let out = success(output);
+    assert!(
+        stderr.contains("tag ios/v0.1.0 does not point at a commit; skipped"),
+        "{stderr}"
+    );
+    assert!(
+        out.ends_with("scan-git: 1 recorded, 0 already recorded\n"),
+        "{out}"
+    );
+    assert_eq!(repo.lines()[0]["subject"], "1.1.0");
+}
+
+#[test]
+fn key_is_refused_for_scan_git() {
+    let repo = Repo::new();
+    let err = failure(repo.run(&["log", "--key", "x", "scan-git"]));
+    assert!(err.contains("sets its own source keys"), "{err}");
 }

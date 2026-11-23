@@ -263,8 +263,6 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
         args.push(range);
     }
     let text = git(repo, &args)?;
-    // The latest `Fixes:` per issue in the walk so far (oldest commit first).
-    let mut walked_fix: BTreeMap<String, String> = BTreeMap::new();
     for record in text.split('\u{1e}') {
         let record = record.trim_start_matches('\n');
         if record.trim().is_empty() {
@@ -276,8 +274,8 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
         };
         let at = timestamp_from_unix(time.trim().parse().unwrap_or(0));
         let short = crate::log::prefix(sha, 12);
-        // Every Fixes: in a commit before its Verifies:, whatever the trailer order, so a
-        // self-contained commit binds its check to its own fix.
+        // Every Fixes: in a commit before its Verifies:, whatever the trailer order, so in
+        // file order a commit's fix comes before its check.
         let mut items: Vec<(u8, String, String, Option<String>)> = Vec::new();
         for line in trailers.lines() {
             let Some((key, value)) = line.split_once(':') else {
@@ -304,18 +302,16 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
                     ));
                     continue;
                 };
-                let event = match key.as_str() {
+                let mut event = match key.as_str() {
                     "fixes" => {
                         let mut e = Event::new(EventKind::Fixed, &id, &at, author);
                         e.commit = Some(sha.to_owned());
-                        walked_fix.insert(id.clone(), sha.to_owned());
                         e
                     }
                     "verifies" => {
                         let mut e = Event::new(EventKind::Verified, &id, &at, author);
                         e.evidence = vec![evidence.unwrap_or_else(|| format!("commit {short}"))];
                         e.commit = Some(sha.to_owned());
-                        e.fix = fix_for_check(writer, &mut ancestry, &id, sha, walked_fix.get(&id));
                         e
                     }
                     _ => {
@@ -324,6 +320,9 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
                         e
                     }
                 };
+                // The source key: one fact per commit, trailer kind and issue, whatever
+                // the log says since (a pull or reopen never makes a rescan re-add it).
+                event.key = Some(format!("git:trailer:{sha}:{}:{id}", key_label(&key)));
                 tally.add(writer, event)?;
             }
         }
@@ -346,14 +345,14 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
             repo,
             &[
                 "for-each-ref",
-                "--format=%(refname)%1f%(objectname)%1f%(*objectname)%1f%(creatordate:unix)%1f%(taggername)%1f%(authorname)",
+                "--format=%(refname)%1f%(creatordate:unix)%1f%(taggername)%1f%(authorname)",
                 "refs/tags",
             ],
         )?;
         let mut tags = Vec::new();
         for line in text.lines() {
             let fields: Vec<&str> = line.split('\u{1f}').collect();
-            let [refname, object, peeled, time, tagger, author] = fields[..] else {
+            let [refname, time, tagger, author] = fields[..] else {
                 continue;
             };
             // The full refname, so a branch with the same short name cannot stand in.
@@ -367,19 +366,20 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
             else {
                 continue;
             };
-            let commit = if peeled.is_empty() { object } else { peeled };
+            // Peel to a commit; a tag of a tree or blob is never a release.
+            let Some(commit) = ancestry.resolve(refname)? else {
+                tally
+                    .warnings
+                    .push(format!("tag {name} does not point at a commit; skipped"));
+                continue;
+            };
             let by = if tagger.is_empty() { author } else { tagger };
             let seconds: i64 = time.trim().parse().unwrap_or(0);
-            tags.push((
-                seconds,
-                name.to_owned(),
-                version,
-                commit.to_owned(),
-                by.to_owned(),
-            ));
+            tags.push((seconds, refname.to_owned(), version, commit, by.to_owned()));
         }
         tags.sort();
-        for (seconds, name, version, commit, by) in tags {
+        for (seconds, refname, version, commit, by) in tags {
+            let name = refname.strip_prefix("refs/tags/").unwrap_or(&refname);
             if let Some(since) = &since {
                 match ancestry.contains(&commit, since)? {
                     Some(true) => continue,
@@ -397,6 +397,7 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
             };
             let mut event = Event::new(EventKind::Released, &version, &at, &by);
             event.date = Some(crate::log::day(&at));
+            event.key = Some(format!("git:tag:{refname}:{commit}"));
             event.commit = Some(commit);
             if let Err(error) = tally.add(writer, event) {
                 tally.warnings.push(format!("tag {name}: {error}"));
@@ -417,40 +418,6 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
         tally.seen - recorded
     );
     Ok(())
-}
-
-/// The fix a `Verifies:` at commit `check` is bound to, from history rather than from the
-/// log's state at scan time (so a rescan binds the same fix): among the recorded fixes
-/// (since the last reopen) and the walk's latest `Fixes:`, those contained in `check`,
-/// the one containing all the others.
-fn fix_for_check(
-    writer: &LogWriter,
-    ancestry: &mut Ancestry,
-    issue: &str,
-    check: &str,
-    walked: Option<&String>,
-) -> Option<String> {
-    let recorded = writer
-        .catalog
-        .tracker
-        .derived
-        .get(issue)
-        .map(|d| d.fixes.clone())
-        .unwrap_or_default();
-    let mut candidates: Vec<String> = Vec::new();
-    for fix in recorded.into_iter().chain(walked.cloned()) {
-        if !candidates.contains(&fix) && ancestry.contains(&fix, check).ok().flatten() == Some(true)
-        {
-            candidates.push(fix);
-        }
-    }
-    let mut best = candidates.first().cloned().or_else(|| walked.cloned())?;
-    for candidate in candidates.iter().skip(1) {
-        if ancestry.contains(&best, candidate).ok().flatten() == Some(true) {
-            best = candidate.clone();
-        }
-    }
-    Some(best)
 }
 
 fn key_label(key: &str) -> &'static str {
