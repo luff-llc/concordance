@@ -582,6 +582,9 @@ pub enum SourceGlobs {
         user_visible: Vec<String>,
         #[serde(default)]
         strings: Vec<String>,
+        /// Test files, for `inventory` (files matching `all` that look like tests also count).
+        #[serde(default)]
+        tests: Vec<String>,
     },
 }
 impl SourceGlobs {
@@ -600,6 +603,12 @@ impl SourceGlobs {
         match self {
             Self::All(_) => &[],
             Self::Table { strings, .. } => strings,
+        }
+    }
+    pub fn tests(&self) -> &[String] {
+        match self {
+            Self::All(_) => &[],
+            Self::Table { tests, .. } => tests,
         }
     }
 }

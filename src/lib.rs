@@ -149,7 +149,8 @@ impl Catalog {
                 && (nested || p.file_name().and_then(|s| s.to_str()) != Some("tokens.yaml"))
         });
         files.sort();
-        if files.is_empty() {
+        // A fresh `init` catalog has an empty `catalog/` directory and is valid.
+        if files.is_empty() && !nested {
             report.error(
                 "schema",
                 "",
