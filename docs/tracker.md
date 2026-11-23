@@ -96,12 +96,16 @@ window has ended without release are marked overdue and upcoming beats are liste
 `track` sections, in order:
 
 1. **Summary**: last release, next release and its window, open bugs by impact, open
-   requests, unverified items, and gap counts per platform.
+   requests, unverified items, and gap counts per platform, written compactly as
+   `android 34 missing · 135 partial · 14 stale; ios none` (zero parts dropped; `none`
+   when no platform has gaps). Gaps count `missing`, `partial` and `stale` entries.
 2. **Releases**: newest planned first (in-review, candidate, planned, idea), then the
    last two released or pulled. Each lists its window, why, builds, and every carried
    item with its current status: an entry's status on each platform, or an issue's state.
    A release's readiness counts carried items that are not shipped on every platform the
-   release builds, and issues that are not `verified` or `closed`.
+   release builds (the report's baseline and target platforms when `builds` is empty;
+   `not-applicable` counts as done), and issues that are not `verified` or `closed`.
+   A release without a window shows no window line.
 3. **Bugs** and **Requests**: open ones (not verified, closed, wont-fix or duplicate),
    ordered by impact, then reported date, then ID.
 4. **Unverified**: issues marked `fixed` without evidence, and fixed issues whose
@@ -133,7 +137,8 @@ why = "New OS features announced; plan adoption for September."
 
 `suite` loads every catalog (structural validation only; no evidence checks), then
 writes: one row per app (last release, next release and window, open bugs with
-critical/high counts, open requests, unverified, gaps per platform); upcoming beats with
+critical/high counts, open requests, unverified, gaps per platform in the same compact
+form as the track summary); upcoming beats with
 the releases whose window falls within 60 days before each beat (needs `--today` to
 filter past beats; otherwise all beats are listed); and a shared-features table showing,
 for each shared feature, every app's entry and its baseline status, with unresolved

@@ -244,11 +244,14 @@ impl Catalog {
     /// Whether a carried item counts as done for a release.
     fn carried_item(&self, release: &Release, id: &str) -> CarriedItem {
         if let Some(entry) = self.entries.get(id) {
-            let built: Vec<&String> = if release.builds.is_empty() {
-                self.config.platforms.keys().collect()
+            // Without builds, readiness covers the report's baseline and target platforms.
+            let report = &self.config.report;
+            let mut built: Vec<&String> = if release.builds.is_empty() {
+                vec![&report.baseline, &report.target]
             } else {
                 release.builds.keys().collect()
             };
+            built.dedup();
             let ready = built.iter().all(|p| {
                 entry.platforms.get(*p).is_some_and(|r| {
                     matches!(r.status, Status::Implemented | Status::NotApplicable)
@@ -576,19 +579,28 @@ fn statuses_text(statuses: &BTreeMap<String, String>) -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
+/// `android 34 missing · 135 partial · 14 stale; ios none`, dropping zero parts; `none`
+/// when no platform has gaps.
 pub(crate) fn gaps_text(gaps: &BTreeMap<String, GapCounts>) -> String {
-    if gaps.is_empty() {
+    if gaps.values().all(|c| c.total() == 0) {
         return "none".into();
     }
     gaps.iter()
         .map(|(p, c)| {
-            format!(
-                "{p} {} ({} missing, {} partial, {} stale)",
-                c.total(),
-                c.missing,
-                c.partial,
-                c.stale
-            )
+            let parts: Vec<String> = [
+                (c.missing, "missing"),
+                (c.partial, "partial"),
+                (c.stale, "stale"),
+            ]
+            .into_iter()
+            .filter(|(n, _)| *n > 0)
+            .map(|(n, what)| format!("{n} {what}"))
+            .collect();
+            if parts.is_empty() {
+                format!("{p} none")
+            } else {
+                format!("{p} {}", parts.join(" · "))
+            }
         })
         .collect::<Vec<_>>()
         .join("; ")
@@ -655,7 +667,9 @@ impl TrackView {
             };
             out.push(format!("### `{}`{title} ({}){overdue}", r.id, r.state));
             out.push(String::new());
-            out.push(format!("- Window: {}", window_text(r.window.as_ref())));
+            if let Some(window) = &r.window {
+                out.push(format!("- Window: {} to {}", window.from, window.to));
+            }
             if let Some(released) = &r.released {
                 out.push(format!("- Released: {released}"));
             }

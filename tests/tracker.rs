@@ -588,3 +588,41 @@ fn suite_rejects_bad_files() {
         assert!(!output.status.success(), "{to} was accepted");
     }
 }
+
+#[test]
+fn readiness_without_builds_uses_report_baseline_and_target() {
+    let fixture = Fixture::new();
+    // A configured platform with no records must not hold back a release without builds.
+    fixture.edit(
+        "catalog.toml",
+        "android = \"android\"\n",
+        "android = \"android\"\neink = \"eink\"\n",
+    );
+    fixture.edit(
+        "tracker/releases.yaml",
+        "carries: [player.speed]",
+        "carries: [player.speed, player.skip-forward]",
+    );
+    let catalog = Catalog::load(fixture.taupe()).expect("catalog");
+    let view = catalog.track(None).expect("view");
+    let release = view
+        .releases
+        .iter()
+        .find(|r| r.id == "1.3.0")
+        .expect("1.3.0");
+    let ready: Vec<(&str, bool)> = release
+        .carries
+        .iter()
+        .map(|c| (c.id.as_str(), c.ready))
+        .collect();
+    assert_eq!(
+        ready,
+        [("player.speed", false), ("player.skip-forward", true)]
+    );
+    // Releases with builds still use exactly those platforms; no window means no window line.
+    let markdown = view.markdown();
+    assert!(!markdown.contains("Window: no window"));
+    assert!(
+        markdown.contains("- Gaps: android 2 missing · 1 partial · 1 stale; eink none; ios none")
+    );
+}
