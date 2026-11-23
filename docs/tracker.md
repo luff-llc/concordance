@@ -103,7 +103,7 @@ One JSON object per line, keys in this order, empty optional fields omitted:
 | --- | --- | --- |
 | `reported` | issue | `title` (required), `entries`, `platforms`, `impact`, `source` |
 | `fixed` | issue | `commit` |
-| `verified` | issue | `evidence` (nonempty), optional `commit` |
+| `verified` | issue | `evidence` (nonempty), optional `commit`, `fix` |
 | `reopened` | issue | `reason` |
 | `uploaded` | release | `platform`, `build`, optional `commit` |
 | `released` | release | `date` (YYYY-MM-DD), optional `platform`, `commit` |
@@ -112,11 +112,15 @@ One JSON object per line, keys in this order, empty optional fields omitted:
 `at` is UTC to the second (`YYYY-MM-DDTHH:MM:SSZ`); `by` is who recorded the fact. The
 issue kind comes from the subject's prefix (`bug.` or `request.`). `id` is an FNV-1a 64
 hash (16 hex digits) of the kind, the subject and the fields that make the fact distinct:
-nothing more for `reported` (one report per issue); `commit` for `fixed`; `by`, `evidence`
-and `commit` for `verified`; `reason` and `at` for `reopened`; `platform` and `build` for
-`uploaded`; `platform` and `commit` (or its absence) for `released`; `reason` for
-`pulled`. Appending an event whose id is already in the log does nothing and prints
-`already recorded`.
+nothing more for `reported` (one report per issue); `commit` for `fixed`; `by`,
+`evidence`, `commit` and the bound `fix` for `verified`; `reason` and `at` for
+`reopened`; `platform` and `build` for `uploaded`; `platform` and `commit` (or its
+absence) for `released`; `reason` for `pulled`. Appending an event whose id is already in
+the log does nothing and prints `already recorded`.
+
+Ids from the previous release (`released` without the commit part; `verified` without
+`fix`) are still accepted, and an event matching one counts as already recorded. New
+lines are always written in the current form.
 
 Parsing is strict: unknown fields, missing or forbidden fields for the kind, malformed
 times and dates, an `id` that does not match the content, and references to unknown
@@ -124,13 +128,22 @@ issues, entries or platforms are errors that name the line (`tracker/log.jsonl:7
 `log` commands refuse to append while the log has errors. Blank lines are ignored and
 never written. A repeated id keeps its first line: an identical repeat is silent, and a
 repeat whose content differs is a warning (never an error), so writers racing to record
-the same fact cannot make the log unloadable.
+the same fact cannot make the log unloadable. A last line without a newline that does
+not parse is a torn write: it is ignored with a warning, and the next writer cuts it off
+before appending. A malformed line anywhere else stays an error.
 
-Writers queue their events, then take `tracker/log.jsonl.lock` (created exclusively;
-waiting up to 10 seconds; a lock older than 60 seconds is broken with a warning),
-re-read the log under the lock, and append every event not yet recorded in one write.
-`scan-git` writes all it found at once. They refuse to write when `tracker/`, the log or
-the lock is a symlink, or when `tracker/` resolves outside the catalog directory.
+Writers queue their events, then take an OS advisory lock on `tracker/log.jsonl.lock`
+(`File::lock`, so Concordance needs Rust 1.89 or later to build), polling for up to 10
+seconds before failing with a clear error. The OS releases the lock if the process dies,
+so a leftover lock file never blocks anyone. Under the lock a writer re-reads the log,
+allocates `report` ids against it, and appends every event not yet recorded in one
+write; `scan-git` writes all it found at once. Writers refuse to write when `tracker/`,
+the log or the lock is a symlink, or when `tracker/` resolves outside the catalog
+directory.
+
+**Threat model.** These checks guard against mistakes and stale setups, not a concurrent
+local attacker: someone who can swap `tracker/` or the log for a symlink between the
+check and the write is out of scope. Symlinks visible before writing are refused.
 
 ### Commands
 
@@ -151,9 +164,10 @@ it), `--by WHO` (default: `$CONCORDANCE_ACTOR`, then `git config user.name` in t
 repository, then `unknown`; `verified` requires it) and `--at` (UTC time or date; default
 now). Commits given to `fixed`, `verified`, `uploaded` and `released` are expanded to full
 hashes when git knows them. `released` without `--date` uses the day of `--at`.
-`verified` without `--commit` records the issue's current fix commit (the latest since
-the last reopen), so the same evidence after a new fix is a new fact while rerunning it
-for the same fix is a no-op.
+`verified` records the issue's current fix commit (the latest since the last reopen) as
+`fix`, alongside any explicit `--commit`, so the same evidence after a new fix is a new
+fact while rerunning it for the same fix is a no-op. `report` allocates its id under the
+lock, so two different titles with the same slug reported at once become two issues.
 
 `report` prints the issue id: `bug.` or `request.` plus a slug of the title (lowercase
 ASCII letters and digits joined by hyphens, at most 48 characters), suffixed `-2`, `-3`, …
@@ -198,16 +212,21 @@ scanned with a warning. Rescanning records nothing new.
 
 ### Derived states
 
-`track` and `suite` replay the log in time order (file order breaks ties):
+`track` and `suite` replay the log in file (append) order; timestamps never decide
+whether one fact follows another:
 
 - **Issues** reported only in the log appear beside issues.yaml ones (`reported` is the
   day of the report). An issue is **open** until a fix is recorded, **fixed** with a fix
   commit, and **verified** when someone other than every fixer records a verification of
-  the latest fix; the verifying evidence joins the issue's evidence. A verification is of
-  the latest fix when it is recorded no earlier than that fix, or its `commit` is the fix
-  commit or contains it. A fixer's own check does not count: the issue stays fixed and
-  Unverified lists it as `self-verified by WHO`; another person's earlier check is listed
-  as `checked before the latest fix by WHO`. **Shipped** is shown instead of verified when
+  the latest fix; the verifying evidence joins the issue's evidence. A verification
+  without a `commit` is of the latest fix when it comes after that fix in the log. One
+  with a `commit` counts only when git confirms that commit is the fix commit or contains
+  it; when git cannot say, it is listed as `check by WHO unconfirmed`. Commits are
+  compared only after both are resolved to full hashes with `git rev-parse --verify
+  --end-of-options REF^{commit}`; an unresolvable or ambiguous ref is unknown, never
+  proof. A fixer's own check does not count: the issue stays fixed and Unverified lists
+  it as `self-verified by WHO`; another person's earlier check is listed as `checked
+  before the latest fix by WHO`. **Shipped** is shown instead of verified when
   a released release's commit (from any `released` event that has one) contains the
   latest fix commit (`git merge-base --is-ancestor`). **Reopened** discards earlier fixes
   and verifications.

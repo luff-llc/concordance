@@ -52,6 +52,7 @@ pub(crate) struct Ancestry {
     repo: PathBuf,
     shallow: Option<bool>,
     cache: BTreeMap<(String, String), Option<bool>>,
+    resolved: BTreeMap<String, Option<String>>,
 }
 impl Ancestry {
     pub(crate) fn new(repo: &Path) -> Self {
@@ -59,7 +60,26 @@ impl Ancestry {
             repo: repo.to_path_buf(),
             shallow: None,
             cache: BTreeMap::new(),
+            resolved: BTreeMap::new(),
         }
+    }
+    /// A ref as a full commit hash (`rev-parse --verify --end-of-options REF^{commit}`), or
+    /// `None` when git cannot resolve it unambiguously. Errors only when git is missing.
+    pub(crate) fn resolve(&mut self, reference: &str) -> Result<Option<String>> {
+        if let Some(answer) = self.resolved.get(reference) {
+            return Ok(answer.clone());
+        }
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&self.repo)
+            .args(["rev-parse", "--verify", "--quiet", "--end-of-options"])
+            .arg(format!("{reference}^{{commit}}"))
+            .output()
+            .map_err(|e| format!("git unavailable: {e}"))?;
+        let full = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let answer = (output.status.success() && !full.is_empty()).then_some(full);
+        self.resolved.insert(reference.to_owned(), answer.clone());
+        Ok(answer)
     }
     pub(crate) fn is_shallow(&mut self) -> bool {
         if self.shallow.is_none() {
@@ -235,6 +255,7 @@ pub fn scan(writer: &mut LogWriter, repo: &Path, since: Option<&str>) -> Result<
                         let mut e = Event::new(EventKind::Verified, &id, &at, author);
                         e.evidence = vec![evidence.unwrap_or_else(|| format!("commit {short}"))];
                         e.commit = Some(sha.to_owned());
+                        e.fix = writer.current_fix(&id);
                         e
                     }
                     _ => {

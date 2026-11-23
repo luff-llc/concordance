@@ -372,14 +372,23 @@ impl Catalog {
             };
             let selves = list(|d| &d.self_verified_by);
             let stale = list(|d| &d.stale_verified_by);
+            let unconfirmed = list(|d| &d.unconfirmed_by);
             if !selves.is_empty() {
                 reasons.push(format!("self-verified by {}", selves.join(", ")));
-            } else if !stale.is_empty() {
+            }
+            if !stale.is_empty() {
                 reasons.push(format!(
                     "checked before the latest fix by {}",
                     stale.join(", ")
                 ));
-            } else if issue.evidence.is_empty() {
+            }
+            if !unconfirmed.is_empty() {
+                reasons.push(format!(
+                    "check by {} unconfirmed: git cannot place its commit after the fix",
+                    unconfirmed.join(", ")
+                ));
+            }
+            if reasons.is_empty() && issue.evidence.is_empty() {
                 reasons.push("fixed without evidence".to_owned());
             }
             // Shipped only when git confirms a released commit contains the fix

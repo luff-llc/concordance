@@ -99,6 +99,9 @@ pub struct Event {
     pub source: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
+    /// The fix commit a verification is bound to: the issue's current fix when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -127,6 +130,7 @@ impl Event {
             impact: None,
             source: vec![],
             commit: None,
+            fix: None,
             evidence: vec![],
             platform: None,
             build: None,
@@ -141,11 +145,32 @@ impl Event {
     }
 
     /// FNV-1a 64 over the kind, the subject and the fields that make this fact distinct:
-    /// the commit of a fix; who verified, the evidence and commit of a verification; the
+    /// the commit of a fix; who verified, the evidence, commit and bound fix of a
+    /// verification; the
     /// reason and time of a reopen; platform and build of an upload; the platform and
     /// commit (or its absence) of a release; the reason for a pull. A report is one per
     /// issue.
     pub fn stable_id(&self) -> String {
+        self.derive_id(false)
+    }
+
+    /// The id the previous release of Concordance derived: released ids without the
+    /// commit, verified ids without the bound fix. Logs written then still load.
+    pub fn legacy_id(&self) -> String {
+        self.derive_id(true)
+    }
+
+    /// Every id this event may be recorded under (current first).
+    pub fn ids(&self) -> Vec<String> {
+        let (current, legacy) = (self.stable_id(), self.legacy_id());
+        if current == legacy {
+            vec![current]
+        } else {
+            vec![current, legacy]
+        }
+    }
+
+    fn derive_id(&self, legacy: bool) -> String {
         let mut parts: Vec<String> = vec![self.kind.as_str().into(), self.subject.clone()];
         let opt = |v: &Option<String>| v.clone().unwrap_or_default();
         match self.kind {
@@ -155,6 +180,9 @@ impl Event {
                 parts.push(self.by.clone());
                 parts.push(self.evidence.join("\u{1e}"));
                 parts.push(opt(&self.commit));
+                if let (Some(fix), false) = (&self.fix, legacy) {
+                    parts.push(fix.clone());
+                }
             }
             EventKind::Reopened => {
                 parts.push(opt(&self.reason));
@@ -166,7 +194,9 @@ impl Event {
             }
             EventKind::Released => {
                 parts.push(opt(&self.platform));
-                parts.push(opt(&self.commit));
+                if !legacy {
+                    parts.push(opt(&self.commit));
+                }
             }
             EventKind::Pulled => parts.push(opt(&self.reason)),
         }
@@ -205,13 +235,14 @@ impl Event {
                 self.subject
             ));
         }
-        let present: [(&str, bool); 11] = [
+        let present: [(&str, bool); 12] = [
             ("title", self.title.is_some()),
             ("entries", !self.entries.is_empty()),
             ("platforms", !self.platforms.is_empty()),
             ("impact", self.impact.is_some()),
             ("source", !self.source.is_empty()),
             ("commit", self.commit.is_some()),
+            ("fix", self.fix.is_some()),
             ("evidence", !self.evidence.is_empty()),
             ("platform", self.platform.is_some()),
             ("build", self.build.is_some()),
@@ -224,7 +255,7 @@ impl Event {
                 &["entries", "platforms", "impact", "source"][..],
             ),
             EventKind::Fixed => (&["commit"], &[]),
-            EventKind::Verified => (&["evidence"], &["commit"]),
+            EventKind::Verified => (&["evidence"], &["commit", "fix"]),
             EventKind::Reopened => (&["reason"], &[]),
             EventKind::Uploaded => (&["platform", "build"], &["commit"]),
             EventKind::Released => (&["date"], &["platform", "commit"]),
@@ -241,6 +272,7 @@ impl Event {
         for (field, value) in [
             ("title", &self.title),
             ("commit", &self.commit),
+            ("fix", &self.fix),
             ("platform", &self.platform),
             ("build", &self.build),
             ("reason", &self.reason),
@@ -257,7 +289,7 @@ impl Event {
                 errors.push(format!("date {date:?} is not a calendar date (YYYY-MM-DD)"));
             }
         }
-        if errors.is_empty() && self.id != self.stable_id() {
+        if errors.is_empty() && self.id != self.stable_id() && self.id != self.legacy_id() {
             errors.push(format!(
                 "id {:?} does not match its content (expected {:?})",
                 self.id,
@@ -384,8 +416,11 @@ pub type LineError = (usize, String);
 pub struct ParsedLog {
     pub events: Vec<NumberedEvent>,
     pub errors: Vec<LineError>,
-    /// Duplicate ids whose content differs (the first line is kept).
+    /// Duplicate ids whose content differs (the first line is kept), and a torn last line.
     pub warnings: Vec<LineError>,
+    /// Byte offset where an unterminated, unparseable last line starts: a torn write,
+    /// ignored on load and cut off by the next writer.
+    pub torn_at: Option<usize>,
 }
 
 /// Parse log text strictly: every nonblank line must be one JSON event. Blank lines are
@@ -396,13 +431,27 @@ pub fn parse(text: &str) -> ParsedLog {
     let mut parsed = ParsedLog::default();
     let mut seen: std::collections::BTreeMap<String, (usize, Event)> =
         std::collections::BTreeMap::new();
-    for (index, line) in text.split('\n').enumerate() {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let last = lines.len() - 1;
+    let mut offset = 0;
+    for (index, line) in lines.iter().enumerate() {
         let number = index + 1;
+        let start = offset;
+        offset += line.len() + 1;
         if line.trim().is_empty() {
             continue;
         }
         let event: Event = match serde_json::from_str(line) {
             Ok(event) => event,
+            // Unterminated and unparseable: a writer died mid-line.
+            Err(_) if index == last => {
+                parsed.warnings.push((
+                    number,
+                    "unterminated last line does not parse (a torn write); ignored".into(),
+                ));
+                parsed.torn_at = Some(start);
+                continue;
+            }
             Err(error) => {
                 parsed.errors.push((number, error.to_string()));
                 continue;
@@ -598,62 +647,53 @@ pub fn repo_dir(catalog: &Catalog) -> PathBuf {
 
 /// How long a writer waits for the log lock.
 const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
-/// A lock older than this is assumed abandoned and broken, with a warning.
-const LOCK_STALE: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// A loaded catalog plus its log. Events are validated and queued with `append`, then
-/// written together by `flush` under a lock file beside the log.
+/// The lock file beside the log. Writers hold an OS advisory lock on it (released by the
+/// OS if the process dies); the file itself stays.
+pub const LOCK_FILE: &str = "tracker/log.jsonl.lock";
+
+/// A queued write: a finished event, or a report whose issue id is allocated under the
+/// lock.
+enum Pending {
+    Event(Event),
+    Report { kind: IssueKind, event: Event },
+}
+
+/// A loaded catalog plus its log. Events are validated and queued with `append` (or
+/// `report`), then written together by `flush` under the lock.
 pub struct LogWriter {
     pub catalog: Catalog,
     path: PathBuf,
     ids: BTreeSet<String>,
-    pending: Vec<Event>,
+    pending: Vec<Pending>,
 }
 
-/// Holds `tracker/log.jsonl.lock`; removes it when dropped.
-struct LogLock(PathBuf);
-impl Drop for LogLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
-    }
-}
-impl LogLock {
-    fn acquire(path: PathBuf) -> Result<Self> {
-        let start = std::time::Instant::now();
-        loop {
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(mut file) => {
-                    let _ = writeln!(file, "{}", std::process::id());
-                    return Ok(Self(path));
+/// Take the advisory lock on `path`, polling for up to `LOCK_WAIT`.
+fn lock_log(path: &Path) -> Result<fs::File> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let start = std::time::Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(fs::TryLockError::WouldBlock) => {
+                if start.elapsed() > LOCK_WAIT {
+                    return Err(format!(
+                        "another writer has held {} for {} s; try again",
+                        path.display(),
+                        LOCK_WAIT.as_secs()
+                    )
+                    .into());
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let age = fs::metadata(&path)
-                        .and_then(|m| m.modified())
-                        .ok()
-                        .and_then(|m| m.elapsed().ok());
-                    if age.is_some_and(|age| age > LOCK_STALE) {
-                        eprintln!(
-                            "warning: breaking stale lock {} (older than {} s)",
-                            path.display(),
-                            LOCK_STALE.as_secs()
-                        );
-                        let _ = fs::remove_file(&path);
-                        continue;
-                    }
-                    if start.elapsed() > LOCK_WAIT {
-                        return Err(format!(
-                            "{} is held by another writer; retry, or remove it if no writer is running",
-                            path.display()
-                        )
-                        .into());
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                Err(error) => return Err(format!("{}: {error}", path.display()).into()),
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(fs::TryLockError::Error(error)) => {
+                return Err(format!("{}: {error}", path.display()).into())
             }
         }
     }
@@ -684,9 +724,6 @@ fn check_write_paths(directory: &Path) -> Result<()> {
     }
     Ok(())
 }
-
-/// The lock file beside the log.
-pub const LOCK_FILE: &str = "tracker/log.jsonl.lock";
 
 impl LogWriter {
     /// Load the catalog; refuse when the existing log has errors.
@@ -719,7 +756,8 @@ impl LogWriter {
         self.catalog.tracker.issue(id).is_some()
     }
 
-    /// The latest fix commit recorded for an issue since its last reopen.
+    /// The latest fix commit recorded for an issue since its last reopen, including
+    /// events queued in this run.
     pub fn current_fix(&self, issue: &str) -> Option<String> {
         self.catalog
             .tracker
@@ -728,31 +766,92 @@ impl LogWriter {
             .and_then(|d| d.fixes.last().cloned())
     }
 
-    /// Validate and queue one event. Returns false when an event with the same id is
-    /// already recorded or queued. Nothing is written until `flush`.
-    pub fn append(&mut self, event: &Event) -> Result<bool> {
+    fn check(&self, event: &Event) -> Result<()> {
         let mut problems = event.structural_errors();
         problems.extend(self.catalog.event_reference_errors(event));
-        if !problems.is_empty() {
-            return Err(format!(
-                "{} {}: {}",
-                event.kind.as_str(),
-                event.subject,
-                problems.join("; ")
-            )
-            .into());
+        if problems.is_empty() {
+            return Ok(());
         }
-        if !self.ids.insert(event.id.clone()) {
+        Err(format!(
+            "{} {}: {}",
+            event.kind.as_str(),
+            event.subject,
+            problems.join("; ")
+        )
+        .into())
+    }
+
+    /// Validate and queue one event. Returns false when an event with the same id (or its
+    /// legacy id) is already recorded or queued. Nothing is written until `flush`.
+    pub fn append(&mut self, event: &Event) -> Result<bool> {
+        self.check(event)?;
+        if event.ids().iter().any(|id| self.ids.contains(id)) {
             return Ok(false);
         }
-        self.pending.push(event.clone());
+        self.ids.insert(event.id.clone());
+        self.pending.push(Pending::Event(event.clone()));
         self.catalog.tracker.record(event);
         Ok(true)
     }
 
+    /// Queue a report. Its subject is ignored: the issue id is allocated in `flush`,
+    /// under the lock, after re-reading the log.
+    pub fn report(&mut self, kind: IssueKind, event: Event) -> Result<()> {
+        let errors = self.catalog.event_reference_errors(&event);
+        if !errors.is_empty() {
+            return Err(format!("reported: {}", errors.join("; ")).into());
+        }
+        self.pending.push(Pending::Report { kind, event });
+        Ok(())
+    }
+
+    /// The id for a report: an issue of the same kind and title (in the catalog, the
+    /// log as re-read, or this flush), else `<kind>.<slug>` made unique with -2, -3, ...
+    fn allocate_report_id(
+        &self,
+        kind: IssueKind,
+        title: &str,
+        recent: &[Event],
+        subjects: &BTreeSet<String>,
+    ) -> String {
+        let tracker = &self.catalog.tracker;
+        let same = tracker
+            .issues
+            .iter()
+            .find(|i| i.kind == kind && i.title == title)
+            .map(|i| i.id.clone())
+            .or_else(|| {
+                recent
+                    .iter()
+                    .find(|e| {
+                        e.kind == EventKind::Reported
+                            && e.title.as_deref() == Some(title)
+                            && issue_kind(&e.subject) == Some(kind)
+                    })
+                    .map(|e| e.subject.clone())
+            });
+        if let Some(id) = same {
+            return id;
+        }
+        let base = format!("{}.{}", kind.as_str(), slug(title));
+        let taken = |id: &str| {
+            tracker.issue(id).is_some()
+                || self.catalog.entries.contains_key(id)
+                || subjects.contains(id)
+        };
+        if !taken(&base) {
+            return base;
+        }
+        (2..)
+            .map(|n| format!("{base}-{n}"))
+            .find(|id| !taken(id))
+            .unwrap_or(base)
+    }
+
     /// Write every queued event in one append, under the lock. The log is re-read under
-    /// the lock, so an event another writer recorded meanwhile is not written twice.
-    /// Returns each queued event and whether it was written.
+    /// the lock: an event another writer recorded meanwhile is not written twice, report
+    /// ids are allocated against it, and a torn last line is cut off first. Returns each
+    /// queued event and whether it was written.
     pub fn flush(&mut self) -> Result<Vec<(Event, bool)>> {
         let pending = std::mem::take(&mut self.pending);
         if pending.is_empty() {
@@ -762,8 +861,8 @@ impl LogWriter {
         check_write_paths(&directory)?;
         fs::create_dir_all(directory.join("tracker"))?;
         check_write_paths(&directory)?;
-        let _lock = LogLock::acquire(directory.join(LOCK_FILE))?;
-        let current = match fs::read_to_string(&self.path) {
+        let _lock = lock_log(&directory.join(LOCK_FILE))?;
+        let mut current = match fs::read_to_string(&self.path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(error) => return Err(format!("{}: {error}", self.path.display()).into()),
@@ -772,17 +871,51 @@ impl LogWriter {
         if let Some((line, message)) = parsed.errors.first() {
             return Err(format!("{LOG_FILE}:{line}: {message}; not appending").into());
         }
-        let mut recorded: BTreeSet<String> = parsed.events.into_iter().map(|(_, e)| e.id).collect();
+        if let Some(at) = parsed.torn_at {
+            eprintln!(
+                "warning: cutting a torn last line from {}",
+                self.path.display()
+            );
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&self.path)?
+                .set_len(at as u64)?;
+            current.truncate(at);
+        }
+        let mut recent: Vec<Event> = parsed.events.into_iter().map(|(_, e)| e).collect();
+        let mut recorded: BTreeSet<String> = recent.iter().map(|e| e.id.clone()).collect();
+        let mut subjects: BTreeSet<String> = recent
+            .iter()
+            .chain(self.catalog.tracker.log.iter())
+            .map(|e| e.subject.clone())
+            .collect();
         let mut text = String::new();
         if current.as_bytes().last().is_some_and(|c| *c != b'\n') {
             text.push('\n');
         }
         let mut results = Vec::new();
-        for event in pending {
-            let added = recorded.insert(event.id.clone());
+        for item in pending {
+            let event = match item {
+                Pending::Event(event) => event,
+                Pending::Report { kind, mut event } => {
+                    let title = event.title.clone().unwrap_or_default();
+                    event.subject = self.allocate_report_id(kind, &title, &recent, &subjects);
+                    let event = event.with_id();
+                    self.check(&event)?;
+                    if !self.ids.contains(&event.id) {
+                        self.ids.insert(event.id.clone());
+                        self.catalog.tracker.record(&event);
+                    }
+                    event
+                }
+            };
+            let added = !event.ids().iter().any(|id| recorded.contains(id));
             if added {
+                recorded.insert(event.id.clone());
+                subjects.insert(event.subject.clone());
                 text.push_str(&event.line()?);
                 text.push('\n');
+                recent.push(event.clone());
             }
             results.push((event, added));
         }
@@ -830,32 +963,6 @@ fn resolve_commit(repo: &Path, commit: &str) -> String {
     .unwrap_or_else(|| commit.to_owned())
 }
 
-/// The id `log report` gives a title: an existing issue with the same kind and title, else
-/// `<kind>.<slug>` made unique with `-2`, `-3`, ...
-fn report_id(writer: &LogWriter, kind: IssueKind, title: &str) -> String {
-    let tracker = &writer.catalog.tracker;
-    if let Some(existing) = tracker
-        .issues
-        .iter()
-        .find(|i| i.kind == kind && i.title == title)
-    {
-        return existing.id.clone();
-    }
-    let base = format!("{}.{}", kind.as_str(), slug(title));
-    let taken = |id: &str| {
-        tracker.issue(id).is_some()
-            || writer.catalog.entries.contains_key(id)
-            || tracker.log.iter().any(|e| e.subject == id)
-    };
-    if !taken(&base) {
-        return base;
-    }
-    (2..)
-        .map(|n| format!("{base}-{n}"))
-        .find(|id| !taken(id))
-        .unwrap_or(base)
-}
-
 pub fn run(args: LogArgs) -> Result<()> {
     let dir = catalog_dir(args.catalog)?;
     let mut writer = LogWriter::open(&dir)?;
@@ -885,8 +992,7 @@ pub fn run(args: LogArgs) -> Result<()> {
                 ReportKind::Bug => IssueKind::Bug,
                 ReportKind::Request => IssueKind::Request,
             };
-            let id = report_id(&writer, kind, &title);
-            let mut event = Event::new(EventKind::Reported, &id, &at, &by);
+            let mut event = Event::new(EventKind::Reported, "", &at, &by);
             event.title = Some(title);
             event.entries = entries;
             event.platforms = platforms;
@@ -897,7 +1003,12 @@ pub fn run(args: LogArgs) -> Result<()> {
                 ImpactArg::Low => Impact::Low,
             });
             event.source = source;
-            event
+            writer.report(kind, event)?;
+            let results = writer.flush()?;
+            for (event, added) in &results {
+                announce(event, *added);
+            }
+            return Ok(());
         }
         LogAction::Fixed { issue, commit } => {
             let mut event = Event::new(EventKind::Fixed, &issue, &at, &by);
@@ -914,12 +1025,10 @@ pub fn run(args: LogArgs) -> Result<()> {
             }
             let mut event = Event::new(EventKind::Verified, &issue, &at, &by);
             event.evidence = evidence;
-            // Without --commit, a check is of the issue's current fix: the same evidence
-            // after a new fix is a new fact; rerunning it for the same fix is not.
-            event.commit = match commit {
-                Some(c) => Some(resolve_commit(&repo, &c)),
-                None => writer.current_fix(&issue),
-            };
+            event.commit = commit.map(|c| resolve_commit(&repo, &c));
+            // Bound to the issue's current fix: the same evidence after a new fix is a new
+            // fact; rerunning it for the same fix is not.
+            event.fix = writer.current_fix(&issue);
             event
         }
         LogAction::Reopened { issue, reason } => {

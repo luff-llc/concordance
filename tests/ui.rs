@@ -677,8 +677,8 @@ fn artwork_colors_must_agree_across_platforms_even_with_matching_metadata() {
         v["nodes"][1]["resolved_color"] = json!("#FF0000")
     });
     let mut pixels = vec![255; 32 * 32 * 3];
-    for p in pixels[..32 * 16 * 3].chunks_exact_mut(3) {
-        p.copy_from_slice(&[255, 0, 0]);
+    for p in pixels[..32 * 16 * 3].as_chunks_mut::<3>().0 {
+        *p = [255, 0, 0];
     }
     write_pixels(&f.0.join("captures/demo.populated.android.png"), &pixels);
     let c = f.compare();

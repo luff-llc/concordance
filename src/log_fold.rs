@@ -17,17 +17,15 @@ pub struct Derivation {
     pub shipped_in: Vec<String>,
     /// People who verified their own fix (those checks do not count).
     pub self_verified_by: Vec<String>,
-    /// Others whose checks predate the latest fix and are not of its commit or a later one.
+    /// Others whose checks come before the latest fix in the log, or are of a commit git
+    /// says does not contain it.
     pub stale_verified_by: Vec<String>,
+    /// Others whose checks name a commit git cannot confirm contains the latest fix.
+    pub unconfirmed_by: Vec<String>,
     /// Released releases git says do not contain the latest fix.
     pub not_in: Vec<String>,
     /// Released releases whose containment of the latest fix git could not answer.
     pub containment_unknown: Vec<String>,
-}
-
-/// Two spellings of one commit: equal, or one an abbreviation (7+ characters) of the other.
-fn same_commit(a: &str, b: &str) -> bool {
-    a == b || (a.len().min(b.len()) >= 7 && (a.starts_with(b) || b.starts_with(a)))
 }
 
 /// Ancestry questions for the fold, turning git failures into warnings.
@@ -37,14 +35,38 @@ struct GitAsk {
     warnings: Vec<String>,
 }
 impl GitAsk {
-    /// `Some(answer)`, or `None` when git cannot say (a warning names why, once).
-    fn contains(&mut self, ancestor: &str, descendant: &str, context: &str) -> Option<bool> {
+    /// A ref as a full commit hash, or `None` (with a warning) when git cannot resolve it
+    /// unambiguously. Never guessed from a prefix.
+    fn resolve(&mut self, reference: &str, context: &str) -> Option<String> {
         if self.unavailable {
             return None;
         }
-        if same_commit(ancestor, descendant) {
+        match self.ancestry.resolve(reference) {
+            Ok(Some(full)) => Some(full),
+            Ok(None) => {
+                self.warnings.push(format!(
+                    "{context}: commit {} is not known to git (or is ambiguous)",
+                    short(reference)
+                ));
+                None
+            }
+            Err(error) => {
+                self.unavailable = true;
+                self.warnings
+                    .push(format!("shipped and commit checks skipped: {error}"));
+                None
+            }
+        }
+    }
+
+    /// `Some(answer)`, or `None` when git cannot say (a warning names why).
+    fn contains(&mut self, ancestor: &str, descendant: &str, context: &str) -> Option<bool> {
+        let ancestor = self.resolve(ancestor, context)?;
+        let descendant = self.resolve(descendant, context)?;
+        if ancestor == descendant {
             return Some(true);
         }
+        let (ancestor, descendant) = (ancestor.as_str(), descendant.as_str());
         match self.ancestry.contains(ancestor, descendant) {
             Ok(Some(answer)) => Some(answer),
             Ok(None) => {
@@ -105,8 +127,23 @@ impl Tracker {
     /// Remember an event appended during this run, so later events can refer to it.
     pub(crate) fn record(&mut self, event: &Event) {
         if event.kind == EventKind::Reported && self.issue(&event.subject).is_none() {
-            self.issues.push(issue_from_report(event));
+            self.push_issue(issue_from_report(event));
             self.log_only_issues.insert(event.subject.clone());
+        }
+        // Keep the current fix right for events queued later in the same run.
+        match event.kind {
+            EventKind::Fixed => self
+                .derived
+                .entry(event.subject.clone())
+                .or_default()
+                .fixes
+                .extend(event.commit.clone()),
+            EventKind::Reopened => {
+                if let Some(d) = self.derived.get_mut(&event.subject) {
+                    d.fixes.clear();
+                }
+            }
+            _ => {}
         }
         self.log.push(event.clone());
     }
@@ -191,7 +228,7 @@ impl Catalog {
                 let errors = self.event_reference_errors(event);
                 if errors.is_empty() {
                     if pass && self.tracker.issue(&event.subject).is_none() {
-                        self.tracker.issues.push(issue_from_report(event));
+                        self.tracker.push_issue(issue_from_report(event));
                         self.tracker.log_only_issues.insert(event.subject.clone());
                     }
                     valid.push((*line, event.clone()));
@@ -234,19 +271,19 @@ impl Catalog {
         let undeclared = self.issues_without_state();
         let tracker = &mut self.tracker;
         let mut warnings: Vec<String> = std::mem::take(&mut tracker.warnings);
-        // Replay in time order; the file order breaks ties.
-        let mut order: Vec<&Event> = tracker.log.iter().collect();
-        order.sort_by(|a, b| a.at.cmp(&b.at));
+        // Replay in file (append) order: whether a check follows a fix never depends on
+        // timestamps.
+        let order: Vec<&Event> = tracker.log.iter().collect();
 
         struct Fix {
             commit: String,
             by: String,
-            at: String,
+            position: usize,
         }
         struct Check {
             by: String,
             evidence: Vec<String>,
-            at: String,
+            position: usize,
             commit: Option<String>,
         }
         #[derive(Default)]
@@ -265,7 +302,7 @@ impl Catalog {
         }
         let mut issues: BTreeMap<String, IssueRun> = BTreeMap::new();
         let mut releases: BTreeMap<String, ReleaseRun> = BTreeMap::new();
-        for event in order {
+        for (position, event) in order.into_iter().enumerate() {
             if event.kind.is_issue() {
                 let run = issues.entry(event.subject.clone()).or_default();
                 match event.kind {
@@ -278,7 +315,7 @@ impl Catalog {
                         run.fixes.push(Fix {
                             commit: event.commit.clone().unwrap_or_default(),
                             by: event.by.clone(),
-                            at: event.at.clone(),
+                            position,
                         });
                     }
                     EventKind::Verified => {
@@ -286,7 +323,7 @@ impl Catalog {
                         run.verifications.push(Check {
                             by: event.by.clone(),
                             evidence: event.evidence.clone(),
-                            at: event.at.clone(),
+                            position,
                             commit: event.commit.clone(),
                         });
                     }
@@ -317,6 +354,10 @@ impl Catalog {
 
         // Releases.
         let mut release_commits: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut release_index: BTreeMap<String, usize> = BTreeMap::new();
+        for (position, release) in tracker.releases.iter().enumerate() {
+            release_index.entry(release.id.clone()).or_insert(position);
+        }
         for (id, run) in releases {
             let date = run.dates.iter().min().cloned();
             let derived = match run.last {
@@ -327,7 +368,10 @@ impl Catalog {
             if derived == ReleaseState::Released && !run.commits.is_empty() {
                 release_commits.insert(id.clone(), run.commits.clone());
             }
-            let Some(release) = tracker.releases.iter_mut().find(|r| r.id == id) else {
+            let Some(release) = release_index
+                .get(&id)
+                .and_then(|&i| tracker.releases.get_mut(i))
+            else {
                 tracker.releases.push(Release {
                     id: id.clone(),
                     state: derived,
@@ -390,7 +434,12 @@ impl Catalog {
             warnings: vec![],
         };
         for (id, run) in issues {
-            let Some(issue) = tracker.issues.iter_mut().find(|i| i.id == id) else {
+            let position = if tracker.issue_index.len() == tracker.issues.len() {
+                tracker.issue_index.get(&id).copied()
+            } else {
+                tracker.issues.iter().position(|i| i.id == id)
+            };
+            let Some(issue) = position.and_then(|i| tracker.issues.get_mut(i)) else {
                 continue;
             };
             if issue.reported.is_none() {
@@ -401,32 +450,37 @@ impl Catalog {
                 continue;
             }
             let fixers: BTreeSet<&str> = run.fixes.iter().map(|f| f.by.as_str()).collect();
-            // A check counts only for a fix it could have checked: recorded no earlier than
-            // the latest fix, or of that fix's commit or a later one.
+            // A check counts only for the latest fix it could have checked. One that names a
+            // commit counts when git confirms that commit is or contains the fix commit; one
+            // without counts when it comes after the fix in the log.
             let latest = run.fixes.last();
             let mut counted: Vec<&Check> = Vec::new();
             let mut selves: BTreeSet<String> = BTreeSet::new();
             let mut stale: BTreeSet<String> = BTreeSet::new();
+            let mut unconfirmed: BTreeSet<String> = BTreeSet::new();
             if let Some(fix) = latest {
                 for check in &run.verifications {
-                    let covers = check.at >= fix.at
-                        || check.commit.as_deref().is_some_and(|commit| {
-                            git.contains(
-                                &fix.commit,
-                                commit,
-                                &format!("issue `{id}`: verification by {}", check.by),
-                            ) == Some(true)
-                        });
                     let own = fixers.contains(check.by.as_str());
+                    let covers = match &check.commit {
+                        Some(commit) => git.contains(
+                            &fix.commit,
+                            commit,
+                            &format!("issue `{id}`: verification by {}", check.by),
+                        ),
+                        None => Some(check.position > fix.position),
+                    };
                     match (covers, own) {
-                        (true, false) => counted.push(check),
-                        (true, true) => {
+                        (Some(true), false) => counted.push(check),
+                        (Some(true), true) => {
                             selves.insert(check.by.clone());
                         }
-                        (false, false) => {
+                        (Some(false), false) => {
                             stale.insert(check.by.clone());
                         }
-                        (false, true) => {}
+                        (None, false) => {
+                            unconfirmed.insert(check.by.clone());
+                        }
+                        (_, true) => {}
                     }
                 }
             }
@@ -475,6 +529,7 @@ impl Catalog {
             if derived == IssueState::Fixed && !terminal {
                 derivation.self_verified_by = selves.into_iter().collect();
                 derivation.stale_verified_by = stale.into_iter().collect();
+                derivation.unconfirmed_by = unconfirmed.into_iter().collect();
             }
             if let (Some(fix), false) = (latest, derived == IssueState::Open || terminal) {
                 for (release, commits) in &release_commits {

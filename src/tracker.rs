@@ -180,13 +180,33 @@ pub struct Tracker {
     pub warnings: Vec<String>,
     pub(crate) log_only_issues: BTreeSet<String>,
     pub(crate) log_only_releases: BTreeSet<String>,
+    /// Issue ID -> position in `issues`, kept by `index_issues` and `push_issue`.
+    pub(crate) issue_index: BTreeMap<String, usize>,
 }
 impl Tracker {
     pub fn release(&self, id: &str) -> Option<&Release> {
         self.releases.iter().find(|r| r.id == id)
     }
+    /// By index when it covers every issue; otherwise (duplicate ids, or issues pushed
+    /// from outside) by scanning.
     pub fn issue(&self, id: &str) -> Option<&TrackerIssue> {
+        if self.issue_index.len() == self.issues.len() {
+            return self.issue_index.get(id).map(|&i| &self.issues[i]);
+        }
         self.issues.iter().find(|i| i.id == id)
+    }
+    /// Rebuild the issue index (the first of any duplicate ids wins).
+    pub(crate) fn index_issues(&mut self) {
+        self.issue_index.clear();
+        for (position, issue) in self.issues.iter().enumerate() {
+            self.issue_index.entry(issue.id.clone()).or_insert(position);
+        }
+    }
+    pub(crate) fn push_issue(&mut self, issue: TrackerIssue) {
+        self.issue_index
+            .entry(issue.id.clone())
+            .or_insert(self.issues.len());
+        self.issues.push(issue);
     }
 }
 
@@ -334,6 +354,7 @@ impl Catalog {
                 report,
             );
         }
+        self.tracker.index_issues();
         if let Some(config) = &self.config.tracker {
             for pattern in config.tag_pattern.patterns() {
                 if let Err(error) = crate::scan_git::tag_regex(pattern) {

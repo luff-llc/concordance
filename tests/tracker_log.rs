@@ -775,7 +775,7 @@ fn shipped_needs_git() {
     let warnings = strings(&view["warnings"]);
     assert!(
         warnings.iter().any(
-            |w| w.starts_with("issue `bug.home-blank`: fix 1111111 in `1.1.0`: git merge-base")
+            |w| w == "issue `bug.home-blank`: fix 1111111 in `1.1.0`: commit 1111111 is not known to git (or is ambiguous)"
         ),
         "{warnings:#?}"
     );
@@ -797,6 +797,17 @@ fn fixed_line(subject: &str, commit: &str, by: &str, at: &str) -> String {
 }
 fn lock_path(repo: &Repo) -> PathBuf {
     repo.0.join("spec/app/tracker/log.jsonl.lock")
+}
+/// Hold the log's OS advisory lock until dropped.
+fn hold_lock(repo: &Repo) -> fs::File {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(lock_path(repo))
+        .expect("lock file");
+    file.lock().expect("lock");
+    file
 }
 fn unverified_reasons(view: &Value, id: &str) -> Vec<String> {
     view["unverified"]
@@ -879,33 +890,25 @@ fn concurrent_writers_never_duplicate() {
     );
     assert_eq!(parsed.events.len(), 5, "{text}");
     assert_eq!(text.lines().count(), 5, "{text}");
-    assert!(!lock_path(&repo).exists());
 }
 
 #[test]
-fn lock_waits_and_breaks_stale_locks() {
+fn lock_waits_for_the_holder() {
     let repo = Repo::new();
     fs::create_dir_all(repo.catalog().join("tracker")).expect("mkdir");
-    // A held lock: the writer waits until it is released.
-    fs::write(lock_path(&repo), "1\n").expect("lock");
-    let lock = lock_path(&repo);
+    // An OS advisory lock held elsewhere: the writer waits until it is released.
+    let held = hold_lock(&repo);
     let releaser = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(400));
-        fs::remove_file(lock).expect("release");
+        drop(held);
     });
     let started = std::time::Instant::now();
     repo.log(&["report", "bug", "Waited"]);
     assert!(started.elapsed() >= std::time::Duration::from_millis(300));
     releaser.join().expect("thread");
-    // An abandoned lock older than a minute is broken with a warning.
-    let file = fs::File::create(lock_path(&repo)).expect("lock");
-    file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120))
-        .expect("age the lock");
-    let output = repo.run(&["log", "report", "bug", "After stale"]);
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    success(output);
-    assert!(stderr.contains("breaking stale lock"), "{stderr}");
-    assert!(!lock_path(&repo).exists());
+    // A lock file left behind (no holder) never blocks: the OS lock died with its process.
+    assert!(lock_path(&repo).exists());
+    repo.log(&["report", "bug", "Unblocked"]);
     assert_eq!(repo.lines().len(), 2);
 }
 
@@ -1023,7 +1026,8 @@ fn verified_binds_to_the_current_fix() {
         "c1c1c1c1",
     ]);
     assert!(verify("2026-11-11T00:00:00Z").starts_with("recorded"));
-    assert_eq!(repo.lines()[1]["commit"], "c1c1c1c1");
+    assert_eq!(repo.lines()[1]["fix"], "c1c1c1c1");
+    assert!(repo.lines()[1].get("commit").is_none());
     // Rerunning for the same fix is a no-op.
     assert!(verify("2026-11-11T05:00:00Z").starts_with("already recorded"));
     repo.log(&[
@@ -1046,7 +1050,9 @@ fn verified_binds_to_the_current_fix() {
     ]);
     // The same evidence after the new fix is a new fact.
     assert!(verify("2026-11-14T00:00:00Z").starts_with("recorded"));
-    assert_eq!(repo.lines()[4]["commit"], "c2c2c2c2");
+    assert_eq!(repo.lines()[4]["fix"], "c2c2c2c2");
+    // The id includes the bound fix, so the two checks are distinct facts.
+    assert_ne!(repo.lines()[1]["id"], repo.lines()[4]["id"]);
     let view = repo.track_json();
     assert!(issue(&view, "bugs", "bug.home-blank").is_none());
 }
@@ -1189,7 +1195,7 @@ fn scan_git_waits_for_writers_and_rereads_under_the_lock() {
         "Check\n\nVerifies: bug.home-blank (ok)\n",
     );
     fs::create_dir_all(repo.catalog().join("tracker")).expect("mkdir");
-    fs::write(lock_path(&repo), "1\n").expect("lock");
+    let held = hold_lock(&repo);
     let child = Command::new(env!("CARGO_BIN_EXE_concordance"))
         .args(["log", "scan-git"])
         .current_dir(&repo.0)
@@ -1203,7 +1209,7 @@ fn scan_git_waits_for_writers_and_rereads_under_the_lock() {
     // Another writer records one of the same facts while the scan waits.
     let line = fixed_line("bug.home-blank", &a, "Alice", "2026-11-10T00:00:00Z");
     fs::write(repo.0.join(LOG), format!("{line}\n")).expect("write");
-    fs::remove_file(lock_path(&repo)).expect("release");
+    drop(held);
     let output = child.wait_with_output().expect("wait");
     let out = success(output);
     assert!(
@@ -1313,4 +1319,243 @@ fn shallow_history_is_unknown_not_no() {
         "{stderr}"
     );
     assert!(stdout.contains("recorded: released 0.9.0"), "{stdout}");
+}
+
+// ---------------------------------------------------------------------------------------
+// Second review: legacy ids, racing reports, torn writes, commit identity, ordering, scale.
+
+fn spawn_log(repo: &Repo, args: &[&str]) -> std::process::Child {
+    Command::new(env!("CARGO_BIN_EXE_concordance"))
+        .arg("log")
+        .args(args)
+        .current_dir(&repo.0)
+        .env("CONCORDANCE_ACTOR", "tester")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env_remove("CONCORDANCE_CATALOG")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn")
+}
+fn finish(child: std::process::Child) -> String {
+    success(child.wait_with_output().expect("wait"))
+}
+
+#[test]
+fn legacy_ids_still_load_and_dedupe() {
+    let repo = Repo::new();
+    // A released event as the previous release wrote it: the id omits the commit part.
+    let mut released = concordance::log::Event::new(
+        concordance::log::EventKind::Released,
+        "1.1.0",
+        "2026-11-11T00:00:00Z",
+        "rel",
+    );
+    released.date = Some("2026-11-11".into());
+    let legacy = released.legacy_id();
+    assert_ne!(legacy, released.stable_id());
+    released.id = legacy.clone();
+    let line = released.line().expect("line");
+    fs::create_dir_all(repo.catalog().join("tracker")).expect("mkdir");
+    fs::write(repo.0.join(LOG), format!("{line}\n")).expect("write");
+    let catalog = Catalog::load(repo.catalog()).expect("legacy id accepted");
+    assert_eq!(catalog.tracker.log[0].id, legacy);
+    // Recording the same fact again matches the legacy id: nothing written.
+    let again = repo.log(&["--at", "2026-11-11T00:00:00Z", "released", "1.1.0"]);
+    assert!(again.starts_with("already recorded"), "{again}");
+    assert_eq!(repo.lines().len(), 1);
+    // New lines use the current form.
+    repo.log(&["--at", "2026-11-12T00:00:00Z", "released", "1.2.0"]);
+    let lines = repo.lines();
+    let mut fresh = concordance::log::Event::new(
+        concordance::log::EventKind::Released,
+        "1.2.0",
+        "2026-11-12T00:00:00Z",
+        "tester",
+    );
+    fresh.date = Some("2026-11-12".into());
+    assert_eq!(lines[1]["id"], fresh.stable_id().as_str());
+}
+
+#[test]
+fn racing_reports_get_distinct_ids() {
+    for _ in 0..3 {
+        let repo = Repo::new();
+        let a = spawn_log(&repo, &["report", "bug", "Login fails!"]);
+        let b = spawn_log(&repo, &["report", "bug", "Login fails?"]);
+        let (a, b) = (finish(a), finish(b));
+        let mut subjects: Vec<String> = repo
+            .lines()
+            .iter()
+            .filter_map(|l| l["subject"].as_str().map(str::to_owned))
+            .collect();
+        subjects.sort();
+        assert_eq!(
+            subjects,
+            vec!["bug.login-fails", "bug.login-fails-2"],
+            "{a}{b}"
+        );
+        let catalog = Catalog::load(repo.catalog()).expect("valid");
+        assert!(catalog.tracker.issue("bug.login-fails-2").is_some());
+    }
+}
+
+#[test]
+fn torn_last_line_is_ignored_then_cut() {
+    let repo = Repo::new();
+    repo.log(&["--at", "2026-11-20", "report", "bug", "Kept"]);
+    let good = fs::read_to_string(repo.0.join(LOG)).expect("log");
+    fs::write(
+        repo.0.join(LOG),
+        format!("{good}{{\"id\":\"12ab\",\"kind\":\"fix"),
+    )
+    .expect("torn");
+    let view = repo.track_json();
+    assert!(
+        strings(&view["warnings"])
+            .iter()
+            .any(|w| w.starts_with("tracker/log.jsonl:2: unterminated last line")),
+        "{view:#}"
+    );
+    let output = repo.run(&["log", "report", "bug", "Next"]);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    success(output);
+    assert!(stderr.contains("cutting a torn last line"), "{stderr}");
+    let text = fs::read_to_string(repo.0.join(LOG)).expect("log");
+    assert_eq!(text.lines().count(), 2, "{text}");
+    assert!(concordance::log::parse(&text).warnings.is_empty());
+    // A malformed line elsewhere stays an error.
+    fs::write(repo.0.join(LOG), format!("{{broken\n{good}")).expect("write");
+    let (_, report) = Catalog::load_collect(repo.catalog()).expect("loadable");
+    assert!(report
+        .errors
+        .iter()
+        .any(|e| e.reference == "tracker/log.jsonl:1"));
+}
+
+#[test]
+fn commits_are_compared_by_resolved_hash() {
+    let repo = Repo::new();
+    let fix = repo.commit("Alice", "2026-11-10T00:00:00Z", "Fix");
+    repo.log(&["--by", "alice", "fixed", "bug.home-blank", "--commit", &fix]);
+    // A check naming a short form of the fix commit counts once git resolves it.
+    repo.log(&[
+        "--by",
+        "bob",
+        "verified",
+        "bug.home-blank",
+        "--evidence",
+        "ok",
+        "--commit",
+        &fix[..9],
+    ]);
+    let view = repo.track_json();
+    assert!(issue(&view, "bugs", "bug.home-blank").is_none(), "{view:#}");
+
+    // A check naming a commit git does not know is unconfirmed, never proof, even when it
+    // shares a prefix with the fix.
+    let other = repo.commit("Alice", "2026-11-11T00:00:00Z", "Fix plan");
+    repo.log(&[
+        "--by",
+        "alice",
+        "fixed",
+        "bug.declared-planned",
+        "--commit",
+        &other,
+    ]);
+    let mut check = concordance::log::Event::new(
+        concordance::log::EventKind::Verified,
+        "bug.declared-planned",
+        "2026-11-12T00:00:00Z",
+        "bob",
+    );
+    check.evidence = vec!["ci".into()];
+    check.commit = Some(format!("{}0000", &other[..8]));
+    let line = check.with_id().line().expect("line");
+    let mut text = fs::read_to_string(repo.0.join(LOG)).expect("log");
+    text.push_str(&line);
+    text.push('\n');
+    fs::write(repo.0.join(LOG), text).expect("write");
+    let view = repo.track_json();
+    assert_eq!(
+        unverified_reasons(&view, "bug.declared-planned")[0],
+        "check by bob unconfirmed: git cannot place its commit after the fix"
+    );
+    assert!(strings(&view["warnings"])
+        .iter()
+        .any(|w| w.contains("is not known to git (or is ambiguous)")));
+}
+
+#[test]
+fn file_order_decides_whether_a_check_follows_a_fix() {
+    let repo = Repo::new();
+    // Same timestamp; the check is appended before the fix.
+    let at = "2026-11-10T00:00:00Z";
+    repo.log(&[
+        "--at",
+        at,
+        "--by",
+        "bob",
+        "verified",
+        "bug.home-blank",
+        "--evidence",
+        "ok",
+    ]);
+    repo.log(&[
+        "--at",
+        at,
+        "--by",
+        "alice",
+        "fixed",
+        "bug.home-blank",
+        "--commit",
+        "f00d",
+    ]);
+    let view = repo.track_json();
+    assert_eq!(
+        unverified_reasons(&view, "bug.home-blank"),
+        vec!["checked before the latest fix by bob"]
+    );
+    // Appended after the fix, even with an earlier timestamp, it counts.
+    repo.log(&[
+        "--at",
+        "2026-11-01T00:00:00Z",
+        "--by",
+        "carol",
+        "verified",
+        "bug.home-blank",
+        "--evidence",
+        "ok",
+    ]);
+    let view = repo.track_json();
+    assert!(issue(&view, "bugs", "bug.home-blank").is_none());
+}
+
+#[test]
+fn large_logs_load_quickly() {
+    let repo = Repo::new();
+    let mut text = String::new();
+    for n in 0..4000 {
+        let subject = format!("bug.generated-{n}");
+        let at = "2026-11-10T00:00:00Z";
+        let mut report =
+            concordance::log::Event::new(concordance::log::EventKind::Reported, &subject, at, "a");
+        report.title = Some(format!("Generated {n}"));
+        text.push_str(&report.with_id().line().expect("line"));
+        text.push('\n');
+        text.push_str(&fixed_line(&subject, &format!("c{n:07}"), "a", at));
+        text.push('\n');
+    }
+    fs::create_dir_all(repo.catalog().join("tracker")).expect("mkdir");
+    fs::write(repo.0.join(LOG), text).expect("write");
+    let started = std::time::Instant::now();
+    let catalog = Catalog::load(repo.catalog()).expect("valid");
+    assert_eq!(catalog.tracker.issues.len(), 4003);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
+    let out = repo.log(&["report", "bug", "Generated 3999"]);
+    assert!(out.starts_with("already recorded"), "{out}");
 }
