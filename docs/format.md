@@ -272,8 +272,9 @@ key (see [UI contracts](ui.md)). Unscoped entries behave exactly as before.
 
 An entry led by a platform other than the report baseline (an e-ink-only page turn, an
 Android-first feature that iOS follows) names it with `lead: android`; the lead must be
-in `applies_to`. `sync --platform-from P` marks other platforms stale only for entries
-that `P` leads, so run it once per leading platform (each needs a `[baselines.P]` pin).
+in `applies_to`. An entry with a `lead` is followed only by `sync --platform-from` its
+lead; entries without one are followed from any platform, as before. Run `sync` once per
+leading platform (each needs a `[baselines.P]` pin).
 
 ## Flavour platforms
 

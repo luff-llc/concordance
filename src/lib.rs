@@ -1027,6 +1027,10 @@ fn inherit(
                     target.retain(|_, v| !v.is_null());
                 }
             }
+            // `surfaces: {id: null}` with nothing to inherit for that surface.
+            if let Some(Value::Object(target)) = own.get_mut("surfaces") {
+                target.retain(|_, v| !v.is_null());
+            }
             // An explicit null unsets a parent key.
             own.retain(|_, value| !value.is_null());
         }

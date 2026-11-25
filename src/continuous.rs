@@ -559,13 +559,27 @@ impl Catalog {
             patterns = globs.map(|g| g.all().iter().collect()).unwrap_or_default();
         }
         let mut cited: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for (label, p, reference) in self.evidence_items() {
-            if p == platform {
+        // Inherited copies count: a flavour's file is cited through its parent's record.
+        for (label, p, record) in self.records() {
+            if p != platform || record.out_of_scope {
+                continue;
+            }
+            for reference in crate::validation::evidence_refs(record) {
                 let path = self.evidence_relative(platform, reference)?.to_owned();
                 cited
                     .entry(path)
                     .or_default()
                     .insert(split_target(&label).0.to_owned());
+            }
+        }
+        if platform == self.config.report.baseline {
+            for entry in self.entries.values() {
+                for detail in &entry.details {
+                    for reference in &detail.baseline {
+                        let path = self.evidence_relative(platform, reference)?.to_owned();
+                        cited.entry(path).or_default().insert(entry.id.clone());
+                    }
+                }
             }
         }
         let changed_areas: BTreeSet<&String> = self
@@ -607,7 +621,7 @@ impl Catalog {
                 })
                 .collect();
             let (covered, reason) = match (entries.is_empty(), touched.is_empty()) {
-                (true, _) if strict => (
+                (true, _) if changed_entries.is_some() => (
                     false,
                     "not cited by any entry; cite it from an entry or add a `Catalog: none` trailer"
                         .to_owned(),
@@ -901,8 +915,8 @@ impl Catalog {
             let Some(entry) = self.entries.get(entry_id) else {
                 continue;
             };
-            // Only the platform that leads an entry makes it stale elsewhere.
-            if self.lead(entry) != from {
+            // An entry with an explicit lead is followed only from that platform.
+            if entry.lead.as_deref().is_some_and(|lead| lead != from) {
                 continue;
             }
             let record = match detail_id {
@@ -917,6 +931,9 @@ impl Catalog {
                     .find(|x| x.id == d)
                     .and_then(|x| x.platforms.get(target)),
             };
+            if record.is_some_and(|r| r.out_of_scope) {
+                continue; // the feature does not exist on the target
+            }
             let before = record.map(|r| r.status);
             let stale = precise || sync.coarse_as_stale;
             let after = match before {

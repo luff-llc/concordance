@@ -379,3 +379,130 @@ fn gate_modes_separate_files_from_surfaces() {
         text(&output)
     );
 }
+
+#[test]
+fn review_regressions_flavours_patches_sync_and_nulls() {
+    let f = Fixture::new("tests/fixtures");
+    f.config(|c| {
+        c.replace(
+            "android = \"native\"",
+            "android = \"native\"\neink = { root = \"native\", inherits = \"android\" }",
+        ) + "\n[source_globs.android]\nuser_visible = [\"*.kt\"]\n[source_globs.eink]\nuser_visible = [\"*.kt\"]\n"
+    });
+    f.mutate("search", |v| {
+        v[0]["platforms"]["android"] = json!({"status": "partial", "source": ["One.kt"]});
+    });
+    fs::write(f.path("native/One.kt"), "class One\n").expect("write");
+    f.git(&["init", "-q"]);
+    let base = f.commit("base");
+    // A flavour's file is cited through its parent's record.
+    fs::write(f.path("native/One.kt"), "class One(val x: Int)\n").expect("write");
+    f.mutate("search", |v| {
+        v[0]["platforms"]["android"]["notes"] = json!("Changed.")
+    });
+    let head = f.commit("Change One");
+    for platform in ["android", "eink"] {
+        let output = f.cli(
+            "gate",
+            &["--platform", platform, "--base", &base, "--head", &head],
+        );
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{platform}: {}",
+            text(&output)
+        );
+    }
+    // --patch keeps the area rule under enforce: an uncited file is covered by an area change.
+    fs::write(f.path("native/Free.kt"), "class Free\n").expect("write");
+    f.mutate("library", |v| v[0]["notes"] = json!(["Area changed."]));
+    let patch = f.git(&["diff"]) + "\n";
+    let untracked = "diff --git a/native/Free.kt b/native/Free.kt\nnew file mode 100644\n--- /dev/null\n+++ b/native/Free.kt\n@@ -0,0 +1 @@\n+class Free\n";
+    fs::write(f.path("change.patch"), patch + untracked).expect("patch");
+    let output = f.cli(
+        "gate",
+        &[
+            "--platform",
+            "android",
+            "--patch",
+            f.path("change.patch").to_str().expect("p"),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output));
+    assert!(text(&output).contains("not cited; catalog entries changed in range"));
+
+    // `lead` must be a configured platform inside applies_to.
+    f.mutate("reader", |v| {
+        v[1]["applies_to"] = json!(["android"]);
+        v[1]["platforms"].as_object_mut().expect("p").remove("ios");
+        v[1]["lead"] = json!("ios");
+    });
+    assert!(text(&f.cli("validate", &[])).contains("lead is outside applies_to"));
+    f.mutate("reader", |v| v[1]["lead"] = json!("nosuch"));
+    assert!(text(&f.cli("validate", &[])).contains("unknown platform"));
+    f.mutate("reader", |v| {
+        v[1].as_object_mut().expect("e").remove("lead");
+    });
+
+    // `surfaces: {id: null}` with nothing to inherit is accepted.
+    let s = Fixture::new("tests/surface-fixtures");
+    s.config(|c| {
+        c.replace(
+            "android = \"android\"",
+            "android = \"android\"\neink = { root = \"android\", inherits = \"android\" }",
+        )
+    });
+    s.mutate("widgets", |v| {
+        v[0]["platforms"]["eink"] =
+            json!({"status": "partial", "surfaces": {"widget.small": null}});
+    });
+    let output = s.cli("validate", &[]);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output));
+}
+
+#[test]
+fn sync_skips_targets_outside_scope_and_follows_unled_entries_from_any_platform() {
+    let f = Fixture::new("tests/fixtures");
+    fs::write(
+        f.path("native/Reader.swift"),
+        "struct Reader { let title = \"Open\" }\n",
+    )
+    .expect("write");
+    // library.open-library exists only on iOS; reader.open-book has an android source.
+    f.mutate("library", |v| {
+        v[0]["applies_to"] = json!(["ios"]);
+        v[0]["platforms"]
+            .as_object_mut()
+            .expect("p")
+            .remove("android");
+    });
+    f.mutate("reader", |v| {
+        v[0]["platforms"]["android"] = json!({"status": "implemented", "source": ["Reader.kt"]});
+    });
+    fs::write(f.path("native/Reader.kt"), "class Reader\n").expect("write");
+    f.git(&["init", "-q"]);
+    let base = f.commit("base");
+    f.config(|c| {
+        format!("{c}\n[baselines.ios]\ncommit = '{base}'\n[baselines.android]\ncommit = '{base}'\n")
+    });
+    f.commit("pin");
+    fs::write(
+        f.path("native/Reader.swift"),
+        "struct Reader { let title = \"Book\" }\n",
+    )
+    .expect("edit");
+    fs::write(f.path("native/Reader.kt"), "class Reader(val t: String)\n").expect("edit");
+    f.commit("Change both");
+    let ios = text(&f.cli(
+        "sync",
+        &["--platform-from", "ios", "--platform-to", "android"],
+    ));
+    assert!(!ios.contains("library.open-library"), "{ios}");
+    assert!(ios.contains("reader.open-book"), "{ios}");
+    // No entry has a lead, so syncing from Android still follows Android's changes.
+    let android = text(&f.cli(
+        "sync",
+        &["--platform-from", "android", "--platform-to", "ios"],
+    ));
+    assert!(android.contains("reader.open-book"), "{android}");
+}

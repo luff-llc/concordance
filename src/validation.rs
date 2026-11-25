@@ -502,6 +502,19 @@ pub(crate) fn apply_scope(
     config: &crate::Config,
     report: &mut ValidationReport,
 ) {
+    if let Some(lead) = &entry.lead {
+        if !config.platforms.contains_key(lead) {
+            report.error("scope", &entry.id, lead, "lead", "unknown platform");
+        } else if !entry.applies(lead) {
+            report.error(
+                "scope",
+                &entry.id,
+                lead,
+                "lead",
+                "lead is outside applies_to",
+            );
+        }
+    }
     let Some(scope) = entry.applies_to.clone() else {
         return;
     };
