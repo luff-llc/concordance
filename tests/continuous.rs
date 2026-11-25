@@ -187,7 +187,12 @@ fn gate_requires_catalog_changes_for_user_visible_files_or_a_trailer() {
     );
     // Patch mode, as an integration script would call it.
     let patch = f.0.join("change.patch");
-    fs::write(&patch, f.git(&["diff", &covered, &uncited]) + "\n").expect("patch");
+    // Only the new screen: no area file changes, so it needs the trailer.
+    fs::write(
+        &patch,
+        f.git(&["diff", &covered, &uncited, "--", "native/NewScreen.swift"]) + "\n",
+    )
+    .expect("patch");
     let message = f.0.join("message.txt");
     fs::write(&message, "Add a screen\n").expect("message");
     let args = [
