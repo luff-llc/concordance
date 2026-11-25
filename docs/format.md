@@ -368,17 +368,37 @@ tests = ["Tests/**/*.swift"]                  # test files, for `inventory` only
 
 (The plain list form `ios = [...]` is still accepted; with no `user_visible` or
 `strings`, every `all` glob counts as user-visible.) A changed user-visible file is
-**covered** when the area file of an entry citing it changed in the same range, or, for
-a file no entry cites, when any area file changed. Otherwise it is listed as unmatched
+**covered** when an entry citing it changed in the same range; a file no entry cites
+needs a trailer (the per-entry rule of `enforce` mode; `report` mode and `--patch` judge
+by area file, see the modes below). Otherwise it is listed as unmatched
 and the gate fails, unless a commit message in the range (or `--message-file`) carries a
 `Catalog: none — <reason>` trailer (`-`, `–` and `—` all work). `--patch` reads the paths
 from a unified diff whose paths are relative to the repository top. The catalog must be
 in the same repository as the range. Exit codes: 0 passed, 1 failed, 2 error. The
 Markdown summary goes to stdout and, with `--summary <file>`, is appended to that file.
 
-`--surfaces-only` checks declared surfaces alone (no user-visible files), for platforms
-whose `source_globs` exist for `inventory` or `drift` but whose changes should not need a
-catalog update; the platform must have a `[surface_scan]` section.
+Each platform's gate checks two things, each in a mode: `enforce` (findings fail),
+`report` (findings are listed, marked as a would-be failure, and the gate passes) or
+`off`:
+
+```toml
+[gate.android]
+files = "report"     # user-visible files and string catalogs
+surfaces = "enforce" # declared surfaces ([surface_scan])
+```
+
+Defaults: `files` is `enforce` when the platform's `source_globs` name `user_visible` or
+`strings` files (or are a plain list), and `off` otherwise, so globs kept for
+`inventory` or `drift` alone do not gate; `surfaces` is `enforce` with a
+`[surface_scan]` section and `off` without. `--files` and `--surfaces` override them for
+one run.
+
+Under `files = "enforce"` coverage is judged per entry: a changed user-visible file is
+covered when an entry that cites it changed in the range (its YAML differs between
+`--base` and `--head`), and an uncited file is covered only by a `Catalog: none` trailer.
+`report` keeps the looser area rule: a cited file is covered when its entry's area file
+changed, and an uncited one when any area file changed. With `--patch` the area rule
+applies in both modes, since the catalog's previous state is not in the patch.
 
 With a `[surface_scan.<platform>]` section, `gate` also compares declared surfaces at
 `--base` and `--head` (with `--patch`, the working tree against `HEAD`) and fails on a new

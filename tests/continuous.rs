@@ -127,17 +127,58 @@ fn gate_requires_catalog_changes_for_user_visible_files_or_a_trailer() {
     let output = gate(&base, &head);
     assert_eq!(output.status.code(), Some(1), "{}", text(&output));
     let out = text(&output);
-    assert!(out.contains("`Reader.swift`: cited by `library.open-library`, `reader.open-book`, `search.find-book`, whose catalog files did not change"), "{out}");
+    assert!(out.contains("`Reader.swift`: cited by `library.open-library`, `reader.open-book`, `search.find-book`, none of which changed"), "{out}");
+    assert!(out.contains("Modes: files enforce, surfaces off."), "{out}");
     assert!(!out.contains("Helper.swift"));
-    // Updating one citing entry's area file covers it.
+    // An enforced gate judges entries, not area files: changing a different entry in the
+    // same area file does not cover it.
+    f.mutate("reader", |v| v[1]["notes"] = json!(["Unrelated."]));
+    let unrelated = f.commit("Touch another reader entry");
+    let output = gate(&base, &unrelated);
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output));
+    // Updating a citing entry covers it.
     f.mutate("reader", |v| v[0]["notes"] = json!(["Title copy changed."]));
     let covered = f.commit("Record the reader change");
     let output = gate(&base, &covered);
     assert_eq!(output.status.code(), Some(0), "{}", text(&output));
-    // An uncited user-visible file needs some catalog change, or a trailer.
+    // An uncited user-visible file needs a trailer, even when the catalog changed.
     fs::write(f.0.join("native/NewScreen.swift"), "struct NewScreen {}\n").expect("new");
+    f.mutate("search", |v| v[0]["notes"] = json!(["Unrelated."]));
     let uncited = f.commit("Add a screen");
-    assert_eq!(gate(&covered, &uncited).status.code(), Some(1));
+    let output = gate(&covered, &uncited);
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output));
+    assert!(text(&output).contains("`NewScreen.swift`: not cited by any entry"));
+    // Report mode lists the same finding and passes; the loose area rule applies there.
+    let output = f.cli(
+        "gate",
+        &[
+            "--platform",
+            "ios",
+            "--base",
+            &covered,
+            "--head",
+            &uncited,
+            "--files",
+            "report",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output));
+    assert!(text(&output).contains("not cited; catalog entries changed in range"));
+    f.config("[gate.ios]\nfiles = 'report'\n");
+    let output = gate(&base, &head);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output));
+    assert!(
+        text(&output).contains("**Report only:**"),
+        "{}",
+        text(&output)
+    );
+    let config = fs::read_to_string(f.0.join("catalog.toml")).expect("config");
+    fs::write(
+        f.0.join("catalog.toml"),
+        config.replace("[gate.ios]\nfiles = 'report'\n", ""),
+    )
+    .expect("config");
+    let uncited = f.commit("Restore enforced gating");
     let waived = f.commit("Tidy\n\nCatalog: none — internal preview only");
     let output = gate(&covered, &waived);
     assert_eq!(output.status.code(), Some(0));

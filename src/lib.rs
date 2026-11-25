@@ -151,6 +151,7 @@ impl Catalog {
             ),
             ("baselines", config.baselines.keys().collect()),
             ("source_globs", config.source_globs.keys().collect()),
+            ("gate", config.gate.keys().collect()),
         ] {
             for name in names {
                 if !config.platforms.contains_key(name) {

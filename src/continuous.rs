@@ -2,7 +2,7 @@
 use crate::drift::{git, glob, Precision};
 use crate::edit::edit_file;
 use crate::set::{key, record_mut, split_target, surface_of};
-use crate::{fail, Catalog, DetailKind, Result, RootOptions, Status};
+use crate::{fail, Catalog, DetailKind, GateMode, GateModes, Result, RootOptions, Status};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -123,6 +123,9 @@ pub struct GateReport {
     /// declarations the catalog still claims); empty without `[surface_scan]`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub surfaces: Vec<crate::Finding>,
+    pub modes: GateModes,
+    /// A `report`-mode check found something that `enforce` would fail.
+    pub would_fail: bool,
     pub passed: bool,
 }
 impl GateReport {
@@ -139,6 +142,14 @@ impl GateReport {
             unmatched.len(),
             self.catalog_changed.len()
         );
+        out.push_str(&format!(
+            "\nModes: files {}, surfaces {}.\n",
+            self.modes.files.as_str(),
+            self.modes.surfaces.as_str()
+        ));
+        if self.would_fail {
+            out.push_str("\n**Report only:** an enforced gate would fail on the findings below.\n");
+        }
         if let Some(reason) = &self.waiver {
             out.push_str(&format!(
                 "\nWaived by commit trailer: `Catalog: none — {reason}`.\n"
@@ -332,21 +343,40 @@ impl Catalog {
         platform: &str,
         input: &GateInput,
     ) -> Result<GateReport> {
-        self.gate_scoped(options, platform, input, false)
+        self.gate_scoped(options, platform, input, None)
     }
 
-    /// `gate_input`; with `surfaces_only`, only declared surfaces are checked (user-visible
-    /// files are not), and the platform must have a `[surface_scan]` section.
+    /// The modes `gate` applies on a platform: `[gate.<platform>]` over the defaults.
+    pub fn gate_modes(&self, platform: &str) -> GateModes {
+        let configured = self.config.gate.get(platform).copied().unwrap_or_default();
+        let files_default = match self.config.source_globs.get(platform) {
+            Some(crate::SourceGlobs::All(all)) if !all.is_empty() => GateMode::Enforce,
+            Some(g) if !g.user_visible().is_empty() || !g.strings().is_empty() => GateMode::Enforce,
+            _ => GateMode::Off,
+        };
+        let surfaces_default = if self.config.surface_scan.contains_key(platform) {
+            GateMode::Enforce
+        } else {
+            GateMode::Off
+        };
+        GateModes {
+            files: configured.files.unwrap_or(files_default),
+            surfaces: configured.surfaces.unwrap_or(surfaces_default),
+        }
+    }
+
+    /// `gate_input` with explicit modes (default: `gate_modes`).
     pub fn gate_scoped(
         &self,
         options: &RootOptions,
         platform: &str,
         input: &GateInput,
-        surfaces_only: bool,
+        modes: Option<GateModes>,
     ) -> Result<GateReport> {
-        if surfaces_only && !self.config.surface_scan.contains_key(platform) {
+        let modes = modes.unwrap_or_else(|| self.gate_modes(platform));
+        if modes.surfaces != GateMode::Off && !self.config.surface_scan.contains_key(platform) {
             return fail(format!(
-                "{platform}: --surfaces-only needs [surface_scan.{platform}] in catalog.toml"
+                "{platform}: checking surfaces needs [surface_scan.{platform}] in catalog.toml"
             ));
         }
         let root = self.platform_root(platform, options)?.ok_or_else(|| {
@@ -462,9 +492,18 @@ impl Catalog {
             .map(|(area, _)| area)
             .collect();
         let any_area = !changed_areas.is_empty();
-        if surfaces_only {
+        if modes.files == GateMode::Off {
             patterns.clear();
         }
+        // Enforced file checks are judged per entry (range mode): a cited file needs one of
+        // its entries to change, and an uncited one needs a trailer.
+        let strict = modes.files == GateMode::Enforce;
+        let changed_entries = match input {
+            GateInput::Range { .. } if strict => {
+                Some(self.changed_entries(&catalog_changed, &base, &head))
+            }
+            _ => None,
+        };
         let mut user_visible = Vec::new();
         for file in &changed {
             if !patterns.iter().any(|g| glob(g.as_bytes(), file.as_bytes())) {
@@ -476,13 +515,20 @@ impl Catalog {
                 .unwrap_or_default();
             let touched: Vec<&String> = entries
                 .iter()
-                .filter(|e| {
-                    self.areas
+                .filter(|e| match &changed_entries {
+                    Some(changed) => changed.contains(*e),
+                    None => self
+                        .areas
                         .get(*e)
-                        .is_some_and(|a| changed_areas.contains(a))
+                        .is_some_and(|a| changed_areas.contains(a)),
                 })
                 .collect();
             let (covered, reason) = match (entries.is_empty(), touched.is_empty()) {
+                (true, _) if strict => (
+                    false,
+                    "not cited by any entry; cite it from an entry or add a `Catalog: none` trailer"
+                        .to_owned(),
+                ),
                 (true, _) if any_area => (
                     true,
                     "not cited; catalog entries changed in range".to_owned(),
@@ -496,6 +542,17 @@ impl Catalog {
                     format!(
                         "catalog updated for {}",
                         touched
+                            .iter()
+                            .map(|e| format!("`{e}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ),
+                (false, true) if changed_entries.is_some() => (
+                    false,
+                    format!(
+                        "cited by {}, none of which changed",
+                        entries
                             .iter()
                             .map(|e| format!("`{e}`"))
                             .collect::<Vec<_>>()
@@ -527,7 +584,7 @@ impl Catalog {
             let rest = rest.trim_start_matches(['—', '–', '-', ':']).trim();
             (!rest.is_empty()).then(|| rest.to_owned())
         });
-        let surfaces = if self.config.surface_scan.contains_key(platform) {
+        let surfaces = if modes.surfaces != GateMode::Off {
             let (head_rev, base_rev, touched) = match input {
                 GateInput::Range { .. } => (Some(head.as_str()), base.as_str(), None),
                 GateInput::Patch { .. } => (None, "HEAD", Some(changed.as_slice())),
@@ -536,8 +593,12 @@ impl Catalog {
         } else {
             Vec::new()
         };
-        let passed =
-            waiver.is_some() || (user_visible.iter().all(|f| f.covered) && surfaces.is_empty());
+        let files_ok = waiver.is_some() || user_visible.iter().all(|f| f.covered);
+        let surfaces_ok = waiver.is_some() || surfaces.is_empty();
+        let fails = |mode: GateMode, ok: bool| !ok && mode == GateMode::Enforce;
+        let reports = |mode: GateMode, ok: bool| !ok && mode == GateMode::Report;
+        let passed = !fails(modes.files, files_ok) && !fails(modes.surfaces, surfaces_ok);
+        let would_fail = reports(modes.files, files_ok) || reports(modes.surfaces, surfaces_ok);
         Ok(GateReport {
             platform: platform.into(),
             base,
@@ -547,8 +608,39 @@ impl Catalog {
             catalog_changed,
             waiver,
             surfaces,
+            modes,
+            would_fail,
             passed,
         })
+    }
+
+    /// IDs of entries whose content differs between two revisions of the changed area files
+    /// (catalog-relative paths), including added and removed entries.
+    fn changed_entries(&self, changed: &[String], base: &str, head: &str) -> BTreeSet<String> {
+        let read = |rev: &str, file: &str| -> BTreeMap<String, serde_json::Value> {
+            git(&self.directory, &["show", &format!("{rev}:./{file}")])
+                .ok()
+                .and_then(|bytes| serde_yaml::from_slice::<serde_yaml::Value>(&bytes).ok())
+                .and_then(|v| serde_json::to_value(v).ok())
+                .and_then(|v| v.as_array().cloned())
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|e| Some((e.get("id")?.as_str()?.to_owned(), e)))
+                .collect()
+        };
+        let mut out = BTreeSet::new();
+        for file in changed
+            .iter()
+            .filter(|f| self.area_files.values().any(|a| a == *f))
+        {
+            let (before, after) = (read(base, file), read(head, file));
+            for id in before.keys().chain(after.keys()) {
+                if before.get(id) != after.get(id) {
+                    out.insert(id.clone());
+                }
+            }
+        }
+        out
     }
 
     /// Surface findings that a change introduces: declarations new at head that are

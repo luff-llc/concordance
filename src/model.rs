@@ -544,6 +544,45 @@ pub struct Config {
     /// `[surface_scan.<platform>]`: where `surfaces scan` and `gate` read declarations.
     #[serde(default)]
     pub surface_scan: BTreeMap<String, SurfaceScanConfig>,
+    /// `[gate.<platform>]`: what `gate` enforces, reports or skips on each platform.
+    #[serde(default)]
+    pub gate: BTreeMap<String, GateConfig>,
+}
+
+/// How `gate` treats one kind of finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GateMode {
+    /// Findings fail the gate.
+    Enforce,
+    /// Findings are listed and the gate still passes.
+    Report,
+    /// Not checked.
+    Off,
+}
+impl GateMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enforce => "enforce",
+            Self::Report => "report",
+            Self::Off => "off",
+        }
+    }
+}
+/// `[gate.<platform>]`. Defaults: `files` enforce when the platform's source globs name
+/// user-visible files or string catalogs (or are a plain list), otherwise off; `surfaces`
+/// enforce when the platform has `[surface_scan]`, otherwise off.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GateConfig {
+    pub files: Option<GateMode>,
+    pub surfaces: Option<GateMode>,
+}
+/// The modes `gate` applies on a platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct GateModes {
+    pub files: GateMode,
+    pub surfaces: GateMode,
 }
 
 /// One system surface a feature can reach.

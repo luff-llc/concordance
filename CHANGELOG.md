@@ -9,7 +9,14 @@
   parent's stale bookkeeping (`previous_status`, `since_commit`, `since_date`). Surface
   records are inherited only for surfaces that list the inheriting platform, and merge
   per surface. A platform outside `applies_to` inherits nothing.
-- `gate --surfaces-only` checks declared surfaces without user-visible files.
+- Gate modes: `[gate.<platform>] files` and `surfaces` set `enforce`, `report` or `off`
+  (`--files`, `--surfaces` for one run). `files` now defaults to `off` for platforms whose
+  `source_globs` name neither `user_visible` nor `strings` files, so globs kept for
+  `inventory` no longer gate.
+- An enforced file check judges coverage per entry: a cited file needs an entry that
+  cites it to change, and an uncited file needs a `Catalog: none` trailer. This is
+  stricter than 0.3 for `user_visible` platforms; use `files = "report"` for the old,
+  area-level rule.
 
 ## 0.3.0 (2026-11-25)
 

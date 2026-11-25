@@ -217,9 +217,12 @@ enum Command {
         /// Also write the Markdown summary here (for example $GITHUB_STEP_SUMMARY).
         #[arg(long)]
         summary: Option<PathBuf>,
-        /// Check only declared surfaces ([surface_scan]), not user-visible files.
-        #[arg(long)]
-        surfaces_only: bool,
+        /// Override `[gate.<platform>] files`: enforce, report or off.
+        #[arg(long, value_parser = parse_gate_mode)]
+        files: Option<concordance::GateMode>,
+        /// Override `[gate.<platform>] surfaces`: enforce, report or off.
+        #[arg(long, value_parser = parse_gate_mode)]
+        surfaces: Option<concordance::GateMode>,
     },
     /// Mark target records stale where the source baseline changed; tasks, issues, new pin.
     Sync {
@@ -563,6 +566,14 @@ struct Roots {
     /// Fail when a declared external checkout has not been supplied.
     #[arg(long)]
     require_roots: bool,
+}
+fn parse_gate_mode(value: &str) -> std::result::Result<concordance::GateMode, String> {
+    match value {
+        "enforce" => Ok(concordance::GateMode::Enforce),
+        "report" => Ok(concordance::GateMode::Report),
+        "off" => Ok(concordance::GateMode::Off),
+        _ => Err("expected enforce, report or off".into()),
+    }
 }
 fn parse_root(value: &str) -> std::result::Result<(String, PathBuf), String> {
     match value.split_once('=') {
@@ -936,7 +947,8 @@ fn run(cli: Cli) -> Result<()> {
             message_file,
             repo,
             summary,
-            surfaces_only,
+            files,
+            surfaces,
         } => {
             let outcome = (|| -> Result<concordance::GateReport> {
                 let catalog = Catalog::load(&dir)?;
@@ -953,7 +965,14 @@ fn run(cli: Cli) -> Result<()> {
                     },
                     _ => return Err("pass --base and --head, or --patch".into()),
                 };
-                catalog.gate_scoped(&options, &platform, &input, surfaces_only)
+                {
+                    let defaults = catalog.gate_modes(&platform);
+                    let modes = concordance::GateModes {
+                        files: files.unwrap_or(defaults.files),
+                        surfaces: surfaces.unwrap_or(defaults.surfaces),
+                    };
+                    catalog.gate_scoped(&options, &platform, &input, Some(modes))
+                }
             })();
             match outcome {
                 Ok(report) => {

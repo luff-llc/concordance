@@ -1,5 +1,5 @@
 //! Platform scope (`applies_to`), inheritance of stale bookkeeping and surface records,
-//! and `gate --surfaces-only`.
+//! and per-platform gate modes.
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -311,7 +311,7 @@ fn screens_take_a_scope_for_captures_and_plans() {
 }
 
 #[test]
-fn surfaces_only_gate_ignores_user_visible_files() {
+fn gate_modes_separate_files_from_surfaces() {
     let f = Fixture::new("tests/surface-fixtures");
     f.config(|c| {
         c + "\n[source_globs.android]\nall = [\"**/*.kt\"]\nuser_visible = [\"**/*.kt\"]\n"
@@ -327,14 +327,32 @@ fn surfaces_only_gate_ignores_user_visible_files() {
     };
     let output = gate(&[]);
     assert_eq!(output.status.code(), Some(1), "{}", text(&output));
-    let output = gate(&["--surfaces-only"]);
+    let output = gate(&["--files", "off"]);
     assert_eq!(output.status.code(), Some(0), "{}", text(&output));
     assert!(
         text(&output).contains("0 user-visible"),
         "{}",
         text(&output)
     );
-    // A platform without [surface_scan] cannot be gated surfaces-only.
+    // Source globs kept only for inventory: an `all`-only table no longer gates files.
+    f.config(|c| c.replace("user_visible = [\"**/*.kt\"]\n", ""));
+    let output = gate(&[]);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output));
+    assert!(
+        text(&output).contains("Modes: files off, surfaces enforce."),
+        "{}",
+        text(&output)
+    );
+    // [gate.<platform>] sets the modes.
+    f.config(|c| c + "\n[gate.android]\nfiles = \"enforce\"\nsurfaces = \"report\"\n");
+    let output = gate(&[]);
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output));
+    assert!(
+        text(&output).contains("Modes: files enforce, surfaces report."),
+        "{}",
+        text(&output)
+    );
+    // Checking surfaces needs a [surface_scan] section.
     f.config(|c| {
         c.replace(
             "android = \"android\"",
@@ -350,7 +368,8 @@ fn surfaces_only_gate_ignores_user_visible_files() {
             &base,
             "--head",
             &head,
-            "--surfaces-only",
+            "--surfaces",
+            "enforce",
         ],
     );
     assert_eq!(output.status.code(), Some(2), "{}", text(&output));
