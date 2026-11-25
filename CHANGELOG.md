@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.3.0-dev
+## 0.4.0-dev
+
+## 0.3.0 (2026-11-25)
 
 - Surfaces: a features × platforms × surfaces dimension. `[surfaces.<id>]` declares
   system surfaces (widget sizes, Lock Screen, controls, quick actions, app shortcuts,
