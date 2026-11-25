@@ -195,6 +195,89 @@ impl GateReport {
         out
     }
 }
+/// The reason in the first `Catalog: none — <reason>` trailer of a commit message.
+pub fn waiver_reason(message: &str) -> Option<String> {
+    message.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("Catalog:")?.trim_start();
+        let rest = rest.strip_prefix("none")?.trim_start();
+        let rest = rest.trim_start_matches(['—', '–', '-', ':']).trim();
+        (!rest.is_empty()).then(|| rest.to_owned())
+    })
+}
+
+/// One commit that waived the catalog gate.
+#[derive(Debug, Clone, Serialize)]
+pub struct Waiver {
+    pub commit: String,
+    pub date: String,
+    pub subject: String,
+    pub reason: String,
+}
+
+/// Every `Catalog: none` trailer in `base..head` of the repository at `root`, oldest first.
+pub fn waivers(root: &Path, base: &str, head: &str) -> Result<Vec<Waiver>> {
+    let (base, head) = (resolve(root, base)?, resolve(root, head)?);
+    let log = git(
+        root,
+        &[
+            "log",
+            "--reverse",
+            "--format=%H%x1f%cs%x1f%s%x1f%B%x1e",
+            &format!("{base}..{head}"),
+        ],
+    )?;
+    Ok(String::from_utf8_lossy(&log)
+        .split('\x1e')
+        .filter_map(|record| {
+            let mut fields = record.trim_start_matches('\n').splitn(4, '\x1f');
+            let commit = fields.next()?.to_owned();
+            let date = fields.next()?.to_owned();
+            let subject = fields.next()?.to_owned();
+            let reason = waiver_reason(fields.next()?)?;
+            Some(Waiver {
+                commit,
+                date,
+                subject,
+                reason,
+            })
+        })
+        .collect())
+}
+
+/// Markdown: the waivers, then how often each reason (case-insensitive) recurs.
+pub fn waivers_markdown(list: &[Waiver]) -> String {
+    let mut out = format!(
+        "## Catalog gate waivers\n\n{} commit(s) carry a `Catalog: none` trailer.\n",
+        list.len()
+    );
+    if list.is_empty() {
+        return out;
+    }
+    out.push_str("\n| Commit | Date | Subject | Reason |\n| --- | --- | --- | --- |\n");
+    for w in list {
+        out.push_str(&format!(
+            "| `{}` | {} | {} | {} |\n",
+            short(&w.commit),
+            w.date,
+            w.subject.replace('|', "\\|"),
+            w.reason.replace('|', "\\|")
+        ));
+    }
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for w in list {
+        *counts.entry(w.reason.to_lowercase()).or_default() += 1;
+    }
+    let mut recurring: Vec<(String, usize)> = counts.into_iter().filter(|(_, n)| *n > 1).collect();
+    recurring.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    if !recurring.is_empty() {
+        out.push_str("\n### Recurring reasons\n\n");
+        for (reason, n) in recurring {
+            out.push_str(&format!("- {n}× {reason}\n"));
+        }
+    }
+    out
+}
+
 fn short(sha: &str) -> &str {
     &sha[..sha.len().min(12)]
 }
@@ -578,12 +661,7 @@ impl Catalog {
                 reason,
             });
         }
-        let waiver = messages.lines().find_map(|line| {
-            let rest = line.trim().strip_prefix("Catalog:")?.trim_start();
-            let rest = rest.strip_prefix("none")?.trim_start();
-            let rest = rest.trim_start_matches(['—', '–', '-', ':']).trim();
-            (!rest.is_empty()).then(|| rest.to_owned())
-        });
+        let waiver = waiver_reason(&messages);
         let surfaces = if modes.surfaces != GateMode::Off {
             let (head_rev, base_rev, touched) = match input {
                 GateInput::Range { .. } => (Some(head.as_str()), base.as_str(), None),
@@ -823,6 +901,10 @@ impl Catalog {
             let Some(entry) = self.entries.get(entry_id) else {
                 continue;
             };
+            // Only the platform that leads an entry makes it stale elsewhere.
+            if self.lead(entry) != from {
+                continue;
+            }
             let record = match detail_id {
                 None if surface.is_some() => entry
                     .platforms

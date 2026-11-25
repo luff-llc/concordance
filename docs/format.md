@@ -270,6 +270,11 @@ one that applies to the target but not the baseline is listed as a target-specif
 adaptation. `entry --format json` leaves the stand-in records out. Screens take the same
 key (see [UI contracts](ui.md)). Unscoped entries behave exactly as before.
 
+An entry led by a platform other than the report baseline (an e-ink-only page turn, an
+Android-first feature that iOS follows) names it with `lead: android`; the lead must be
+in `applies_to`. `sync --platform-from P` marks other platforms stale only for entries
+that `P` leads, so run it once per leading platform (each needs a `[baselines.P]` pin).
+
 ## Flavour platforms
 
 A platform that shares another's code can inherit its records:
@@ -376,6 +381,10 @@ and the gate fails, unless a commit message in the range (or `--message-file`) c
 from a unified diff whose paths are relative to the repository top. The catalog must be
 in the same repository as the range. Exit codes: 0 passed, 1 failed, 2 error. The
 Markdown summary goes to stdout and, with `--summary <file>`, is appended to that file.
+
+`concordance waivers <dir> --base <sha> [--head <sha>] [--platform P] [--format json]`
+lists every `Catalog: none` trailer in a range (commit, date, subject, reason) and the
+reasons that recur, for a periodic review of what the gate is being asked to let through.
 
 Each platform's gate checks two things, each in a mode: `enforce` (findings fail),
 `report` (findings are listed, marked as a would-be failure, and the gate passes) or

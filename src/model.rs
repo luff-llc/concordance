@@ -217,6 +217,10 @@ pub struct Entry {
     /// outside it need no record and count nowhere (they read as not-applicable).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applies_to: Option<Vec<String>>,
+    /// The platform whose implementation defines this feature (default: the report
+    /// baseline). `sync --platform-from` follows only entries it leads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead: Option<String>,
     #[serde(serialize_with = "scoped_records")]
     pub platforms: BTreeMap<String, Platform>,
     pub acceptance: Vec<Acceptance>,

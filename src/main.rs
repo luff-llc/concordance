@@ -224,6 +224,23 @@ enum Command {
         #[arg(long, value_parser = parse_gate_mode)]
         surfaces: Option<concordance::GateMode>,
     },
+    /// List every `Catalog: none` trailer in a commit range, with recurring reasons.
+    Waivers {
+        dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
+        /// Read commits from this platform's root (default: the catalog's repository).
+        #[arg(long)]
+        platform: Option<String>,
+        #[arg(long)]
+        base: String,
+        #[arg(long, default_value = "HEAD")]
+        head: String,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: ScanFormat,
+    },
     /// Mark target records stale where the source baseline changed; tasks, issues, new pin.
     Sync {
         dir: PathBuf,
@@ -1122,6 +1139,30 @@ fn run(cli: Cli) -> Result<()> {
             }
             if !findings.is_empty() || version_failed || !surface_gaps.is_empty() {
                 std::process::exit(1);
+            }
+        }
+        Command::Waivers {
+            dir,
+            roots,
+            platform,
+            base,
+            head,
+            repo,
+            format,
+        } => {
+            let catalog = Catalog::load(&dir)?;
+            let mut options = roots.options(&catalog)?;
+            options.repo = repo;
+            let root = match &platform {
+                Some(p) => catalog
+                    .platform_root(p, &options)?
+                    .ok_or_else(|| format!("{p}: root not supplied; use --root {p}=<path>"))?,
+                None => dir.clone(),
+            };
+            let list = concordance::waivers(&root, &base, &head)?;
+            match format {
+                ScanFormat::Markdown => print!("{}", concordance::waivers_markdown(&list)),
+                ScanFormat::Json => println!("{}", serde_json::to_string_pretty(&list)?),
             }
         }
         Command::Surfaces {

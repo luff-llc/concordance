@@ -295,6 +295,10 @@
           "$ref": "#/$defs/nonemptyTexts",
           "description": "Platforms the feature exists on (default: every configured platform). Others need no record and read as not-applicable."
         },
+        "lead": {
+          "$ref": "#/$defs/text",
+          "description": "The platform whose implementation defines the feature (default: [report] baseline); sync follows it."
+        },
         "platforms": {
           "type": "object",
           "minProperties": 1,

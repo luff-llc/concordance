@@ -6,8 +6,8 @@ mod rebase;
 pub mod strings;
 mod version;
 pub use continuous::{
-    parse_date, patch_paths, today, GateFile, GateInput, GateReport, ReleaseFinding, SyncChange,
-    SyncOptions, SyncReport,
+    parse_date, patch_paths, today, waiver_reason, waivers, waivers_markdown, GateFile, GateInput,
+    GateReport, ReleaseFinding, SyncChange, SyncOptions, SyncReport, Waiver,
 };
 pub use version::{VersionReport, VersionResult};
 pub mod log;
@@ -341,6 +341,14 @@ impl Catalog {
         catalog.load_tracker(&mut report);
         report.sort();
         Ok((catalog, report))
+    }
+
+    /// The platform an entry follows: its `lead`, or the report baseline.
+    pub fn lead<'a>(&'a self, entry: &'a Entry) -> &'a str {
+        entry
+            .lead
+            .as_deref()
+            .unwrap_or(&self.config.report.baseline)
     }
 
     pub fn entry(&self, id: &str) -> Result<&Entry> {

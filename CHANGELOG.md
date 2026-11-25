@@ -5,6 +5,8 @@
 - Platform scope: `applies_to` on entries and screens names the platforms a feature or
   screen exists on. Platforms outside it need no record or capture and read as
   not-applicable everywhere; entries outside the report target get no report row.
+- `lead` names the platform that defines an entry (default: the report baseline);
+  `sync --platform-from P` now follows only entries that `P` leads.
 - Inheritance: a record whose status differs from its parent's no longer inherits the
   parent's stale bookkeeping (`previous_status`, `since_commit`, `since_date`). Surface
   records are inherited only for surfaces that list the inheriting platform, and merge
@@ -13,6 +15,8 @@
   (`--files`, `--surfaces` for one run). `files` now defaults to `off` for platforms whose
   `source_globs` name neither `user_visible` nor `strings` files, so globs kept for
   `inventory` no longer gate.
+- `concordance waivers` lists every `Catalog: none` trailer in a range, with recurring
+  reasons.
 - An enforced file check judges coverage per entry: a cited file needs an entry that
   cites it to change, and an uncited file needs a `Catalog: none` trailer. This is
   stricter than 0.3 for `user_visible` platforms; use `files = "report"` for the old,

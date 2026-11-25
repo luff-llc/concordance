@@ -210,6 +210,16 @@ fn gate_requires_catalog_changes_for_user_visible_files_or_a_trailer() {
         .code(),
         Some(2)
     );
+    // `waivers` lists every trailer in the range.
+    let output = f.cli(
+        "waivers",
+        &["--base", &base, "--head", &waived, "--format", "json"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output));
+    let list: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    assert_eq!(list.as_array().map(Vec::len), Some(1));
+    assert_eq!(list[0]["reason"], "internal preview only");
+    assert_eq!(list[0]["subject"], "Tidy");
     let names = concordance::patch_paths("diff --git a/x/A.swift b/x/B.swift\nrename from x/A.swift\nrename to x/B.swift\n--- a/x/A.swift\n+++ b/x/B.swift\n");
     assert_eq!(names, ["x/A.swift", "x/B.swift"]);
 }
@@ -262,6 +272,12 @@ fn sync_marks_precise_hits_stale_and_queues_file_level_hits_for_review() {
         "{out}"
     );
     assert!(!tasks.exists());
+    // An entry that Android leads is not made stale by iOS changes.
+    let reader = fs::read_to_string(f.0.join("catalog/reader.yaml")).expect("reader");
+    f.mutate("reader", |v| v[0]["lead"] = json!("android"));
+    let led = text(&f.cli("sync", &args));
+    assert!(!led.contains("reader.open-book"), "{led}");
+    fs::write(f.0.join("catalog/reader.yaml"), reader).expect("restore");
     let all_stale = text(&f.cli("sync", &[&args[..], &["--coarse-as", "stale"]].concat()));
     assert!(
         all_stale.contains("| `reader.open-book` | implemented | stale |"),
