@@ -255,6 +255,7 @@ impl UiCatalog {
         Ok(self
             .screens
             .values()
+            .filter(|screen| screen.applies(platform))
             .flat_map(|screen| {
                 screen
                     .states
@@ -274,7 +275,7 @@ impl UiCatalog {
         self.require_platform(platform)?;
         fs::create_dir_all(out)?;
         let mut result = JourneyResult::default();
-        for screen in self.screens.values() {
+        for screen in self.screens.values().filter(|s| s.applies(platform)) {
             for state in screen.states.keys() {
                 let stem = format!("{}.{state}.{platform}", screen.id);
                 if super::capture_file(captures, platform, &stem, "png")?.is_file()

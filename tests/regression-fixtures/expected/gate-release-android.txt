@@ -1,0 +1,10 @@
+exit 1
+## Release gate: android
+
+Passed: no stale records beyond their limit.
+
+Failed: 1 gap(s) on surfaces with `release = "required"`.
+
+| Record | Surface | Status |
+| --- | --- | --- |
+| `car.browse@car` | `car` | partial |

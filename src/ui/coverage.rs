@@ -277,7 +277,7 @@ impl UiCatalog {
                 },
             );
             for state in screen.states.keys() {
-                for platform in platforms {
+                for platform in platforms.iter().filter(|p| screen.applies(p)) {
                     let stem = format!("{}.{state}.{platform}", screen.id);
                     let png = capture_file(captures, platform, &stem, "png")?.is_file();
                     let json = capture_file(captures, platform, &stem, "json")?.is_file();

@@ -1,0 +1,220 @@
+exit 0
+[
+  {
+    "platform": "android",
+    "declarations": [
+      {
+        "signal": "android.app-action",
+        "id": "actions.intent.PLAY_MEDIA",
+        "file": "app/src/main/res/xml/shortcuts.xml",
+        "line": 4,
+        "surfaces": [
+          "app-shortcut"
+        ]
+      },
+      {
+        "signal": "android.car",
+        "detail": "media",
+        "id": "media",
+        "file": "app/src/main/res/xml/automotive_app_desc.xml",
+        "line": 3,
+        "surfaces": [
+          "car"
+        ]
+      },
+      {
+        "signal": "android.media-library",
+        "id": ".playback.PlaybackService",
+        "file": "app/src/main/AndroidManifest.xml",
+        "line": 21,
+        "surfaces": [
+          "car"
+        ]
+      },
+      {
+        "signal": "android.qs-tile",
+        "id": ".tile.PlayPauseTile",
+        "file": "app/src/main/AndroidManifest.xml",
+        "line": 27,
+        "surfaces": [
+          "control"
+        ]
+      },
+      {
+        "signal": "android.shortcut",
+        "id": "resume",
+        "file": "app/src/main/res/xml/shortcuts.xml",
+        "line": 3,
+        "surfaces": [
+          "quick-action"
+        ]
+      },
+      {
+        "signal": "android.widget",
+        "detail": "4x2",
+        "id": ".widget.NowPlayingWidgetReceiver",
+        "file": "app/src/main/AndroidManifest.xml",
+        "line": 15,
+        "surfaces": [
+          "widget.medium"
+        ]
+      }
+    ],
+    "findings": []
+  },
+  {
+    "platform": "ios",
+    "declarations": [
+      {
+        "signal": "apple.app-shortcut",
+        "id": "ResumeIntent",
+        "file": "App/Shortcuts.swift",
+        "line": 5,
+        "surfaces": [
+          "app-shortcut"
+        ]
+      },
+      {
+        "signal": "apple.carplay",
+        "id": "CarSceneDelegate",
+        "file": "App/CarScene.swift",
+        "line": 3,
+        "surfaces": [
+          "car"
+        ]
+      },
+      {
+        "signal": "apple.control",
+        "id": "com.example.play-pause",
+        "file": "Widgets/PlayControl.swift",
+        "line": 4,
+        "surfaces": [
+          "control"
+        ]
+      },
+      {
+        "signal": "apple.quick-action",
+        "id": "com.example.resume",
+        "file": "App/Info.plist",
+        "line": 11,
+        "surfaces": [
+          "quick-action"
+        ]
+      },
+      {
+        "signal": "apple.quick-action",
+        "id": "com.example.search",
+        "file": "App/Info.plist",
+        "line": 17,
+        "surfaces": [
+          "quick-action"
+        ]
+      },
+      {
+        "signal": "apple.widget",
+        "detail": "accessoryCircular",
+        "id": "com.example.now-playing",
+        "file": "Widgets/NowPlayingWidget.swift",
+        "line": 8,
+        "surfaces": [
+          "lock-screen"
+        ]
+      },
+      {
+        "signal": "apple.widget",
+        "detail": "systemMedium",
+        "id": "com.example.now-playing",
+        "file": "Widgets/NowPlayingWidget.swift",
+        "line": 8,
+        "surfaces": [
+          "widget.medium"
+        ]
+      },
+      {
+        "signal": "apple.widget",
+        "detail": "systemSmall",
+        "id": "com.example.now-playing",
+        "file": "Widgets/NowPlayingWidget.swift",
+        "line": 8,
+        "surfaces": [
+          "widget.small"
+        ]
+      }
+    ],
+    "findings": []
+  },
+  {
+    "platform": "watchos",
+    "declarations": [
+      {
+        "signal": "apple.watch-app",
+        "context": "watch",
+        "id": "com.example.player.watchkitapp",
+        "file": "Watch/Info.plist",
+        "line": 7,
+        "surfaces": [
+          "watch-app"
+        ]
+      },
+      {
+        "signal": "apple.widget",
+        "detail": "accessoryCircular",
+        "context": "watch",
+        "id": "com.example.watch-now-playing",
+        "file": "Watch/WatchComplication.swift",
+        "line": 4,
+        "surfaces": [
+          "complication"
+        ]
+      },
+      {
+        "signal": "apple.widget",
+        "detail": "accessoryCorner",
+        "context": "watch",
+        "id": "com.example.watch-now-playing",
+        "file": "Watch/WatchComplication.swift",
+        "line": 4,
+        "surfaces": [
+          "complication"
+        ]
+      }
+    ],
+    "findings": []
+  },
+  {
+    "platform": "wearos",
+    "declarations": [
+      {
+        "signal": "android.complication",
+        "context": "wear",
+        "id": ".complication.ProgressComplication",
+        "file": "wear/src/main/AndroidManifest.xml",
+        "line": 11,
+        "surfaces": [
+          "complication"
+        ]
+      },
+      {
+        "signal": "android.wear-app",
+        "context": "wear",
+        "id": "com.example.player.wear",
+        "file": "wear/src/main/AndroidManifest.xml",
+        "line": 2,
+        "surfaces": [
+          "watch-app"
+        ]
+      },
+      {
+        "signal": "android.wear-tile",
+        "context": "wear",
+        "id": ".tile.NowPlayingTile",
+        "file": "wear/src/main/AndroidManifest.xml",
+        "line": 5,
+        "surfaces": [
+          "wear-tile"
+        ]
+      }
+    ],
+    "findings": []
+  }
+]

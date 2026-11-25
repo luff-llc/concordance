@@ -1,0 +1,4 @@
+exit 0
+## Release gate: wearos
+
+Passed: no stale records beyond their limit.

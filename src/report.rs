@@ -172,7 +172,8 @@ impl Catalog {
         let baseline: Vec<_> = self
             .entries
             .values()
-            .filter(|e| e.platforms[base].status == Status::Implemented)
+            // An entry that does not apply to the target has no parity to report.
+            .filter(|e| e.platforms[base].status == Status::Implemented && e.applies(target))
             .collect();
         // [implemented, verified, partial, missing, not-applicable, stale]
         let counts = |entries: &[&Entry]| -> [usize; 6] {
@@ -263,8 +264,12 @@ impl Catalog {
             let group: Vec<_> = self
                 .entries
                 .values()
-                .filter(|e| self.areas[&e.id] == *area)
+                .filter(|e| self.areas[&e.id] == *area && e.applies(target))
                 .collect();
+            // An area whose entries all leave out the target has no row.
+            if group.is_empty() && self.entries.values().any(|e| self.areas[&e.id] == *area) {
+                continue;
+            }
             let included: Vec<_> = group
                 .iter()
                 .copied()
@@ -291,7 +296,7 @@ impl Catalog {
         }
         lines.extend([format!(
             "| **Total** | **{}** | **{}** | **{}** | **{}** | **{}** | **{}** |{}",
-            self.entries.len(),
+            self.entries.values().filter(|e| e.applies(target)).count(),
             baseline.len(),
             totals[0],
             totals[1],
@@ -610,7 +615,7 @@ impl Catalog {
         let extras: Vec<_> = self
             .entries
             .values()
-            .filter(|e| e.platforms[base].status != Status::Implemented)
+            .filter(|e| e.platforms[base].status != Status::Implemented && e.applies(target))
             .collect();
         if !extras.is_empty() {
             // A partial baseline is not an adaptation; keep that distinction visible.

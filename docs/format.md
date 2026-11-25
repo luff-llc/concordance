@@ -250,6 +250,32 @@ Blocked column to the area table and a **Blockers** table (key, title, kind, own
 status, entries and details held back, highest impact, link) ranked by how much each
 unblocks. Briefs print the blocker title, link and status.
 
+## Platform scope
+
+By default an entry concerns every configured platform. A feature that exists on only
+some of them names them:
+
+```yaml
+- id: eink.page-turn-buttons
+  applies_to: [eink]
+  platforms:
+    eink: {status: implemented}
+```
+
+Platforms outside `applies_to` need no record, and a record for one is a validation
+error. Everywhere else they read as `not-applicable`: no gap, no `next` item, no detail
+or surface obligation, no release finding, and `set` refuses to add a record there. An
+entry that does not apply to the report target has no row in the report or its totals;
+one that applies to the target but not the baseline is listed as a target-specific
+adaptation. `entry --format json` leaves the stand-in records out. Screens take the same
+key (see [UI contracts](ui.md)). Unscoped entries behave exactly as before.
+
+An entry led by a platform other than the report baseline (an e-ink-only page turn, an
+Android-first feature that iOS follows) names it with `lead: android`; the lead must be
+in `applies_to`. An entry with a `lead` is followed only by `sync --platform-from` its
+lead; entries without one are followed from any platform, as before. Run `sync` once per
+leading platform (each needs a `[baselines.P]` pin).
+
 ## Flavour platforms
 
 A platform that shares another's code can inherit its records:
@@ -263,7 +289,11 @@ horizon = { root = "apps/android", inherits = "android" }
 An entry (or detail) without a `horizon` record gets a copy of its `android` record;
 a `horizon` record that is present carries only its differences and is merged over the
 parent (its keys win; when it sets a different `status`, the parent's `verification`,
-`gap` and `blocked_by` are not inherited). To drop a parent value, set the key to
+`gap`, `blocked_by` and stale bookkeeping (`previous_status`, `since_commit`,
+`since_date`) are not inherited). Surface records are inherited only for surfaces whose
+`platforms` list the inheriting platform, and merge surface by surface with the same
+rules; `surfaces: null` drops them all, `surfaces: {car: null}` one. A platform outside
+an entry's `applies_to` inherits nothing. To drop a parent value, set the key to
 `null` in the inheriting record, for example `horizon: {gap: null}`; `null` is accepted
 only in records of inheriting platforms and means "unset". Whole copies are not validated separately,
 so a broken parent path is reported once. Unknown parents and cycles are errors.
@@ -344,13 +374,41 @@ tests = ["Tests/**/*.swift"]                  # test files, for `inventory` only
 
 (The plain list form `ios = [...]` is still accepted; with no `user_visible` or
 `strings`, every `all` glob counts as user-visible.) A changed user-visible file is
-**covered** when the area file of an entry citing it changed in the same range, or, for
-a file no entry cites, when any area file changed. Otherwise it is listed as unmatched
+**covered** when an entry citing it changed in the same range; a file no entry cites
+needs a trailer (the per-entry rule of `enforce` mode; `report` mode and `--patch` judge
+by area file, see the modes below). Otherwise it is listed as unmatched
 and the gate fails, unless a commit message in the range (or `--message-file`) carries a
 `Catalog: none — <reason>` trailer (`-`, `–` and `—` all work). `--patch` reads the paths
 from a unified diff whose paths are relative to the repository top. The catalog must be
 in the same repository as the range. Exit codes: 0 passed, 1 failed, 2 error. The
 Markdown summary goes to stdout and, with `--summary <file>`, is appended to that file.
+
+`concordance waivers <dir> --base <sha> [--head <sha>] [--platform P] [--format json]`
+lists every `Catalog: none` trailer in a range (commit, date, subject, reason) and the
+reasons that recur, for a periodic review of what the gate is being asked to let through.
+
+Each platform's gate checks two things, each in a mode: `enforce` (findings fail),
+`report` (findings are listed, marked as a would-be failure, and the gate passes) or
+`off`:
+
+```toml
+[gate.android]
+files = "report"     # user-visible files and string catalogs
+surfaces = "enforce" # declared surfaces ([surface_scan])
+```
+
+Defaults: `files` is `enforce` when the platform's `source_globs` name `user_visible` or
+`strings` files (or are a plain list), and `off` otherwise, so globs kept for
+`inventory` or `drift` alone do not gate; `surfaces` is `enforce` with a
+`[surface_scan]` section and `off` without. `--files` and `--surfaces` override them for
+one run.
+
+Under `files = "enforce"` coverage is judged per entry: a changed user-visible file is
+covered when an entry that cites it changed in the range (its YAML differs between
+`--base` and `--head`), and an uncited file is covered only by a `Catalog: none` trailer.
+`report` keeps the looser area rule: a cited file is covered when its entry's area file
+changed, and an uncited one when any area file changed. With `--patch` the area rule
+applies in both modes, since the catalog's previous state is not in the patch.
 
 With a `[surface_scan.<platform>]` section, `gate` also compares declared surfaces at
 `--base` and `--head` (with `--patch`, the working tree against `HEAD`) and fails on a new

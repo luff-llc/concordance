@@ -2,7 +2,7 @@
 use crate::drift::{git, glob, Precision};
 use crate::edit::edit_file;
 use crate::set::{key, record_mut, split_target, surface_of};
-use crate::{fail, Catalog, DetailKind, Result, RootOptions, Status};
+use crate::{fail, Catalog, DetailKind, GateMode, GateModes, Result, RootOptions, Status};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -123,6 +123,9 @@ pub struct GateReport {
     /// declarations the catalog still claims); empty without `[surface_scan]`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub surfaces: Vec<crate::Finding>,
+    pub modes: GateModes,
+    /// A `report`-mode check found something that `enforce` would fail.
+    pub would_fail: bool,
     pub passed: bool,
 }
 impl GateReport {
@@ -139,6 +142,14 @@ impl GateReport {
             unmatched.len(),
             self.catalog_changed.len()
         );
+        out.push_str(&format!(
+            "\nModes: files {}, surfaces {}.\n",
+            self.modes.files.as_str(),
+            self.modes.surfaces.as_str()
+        ));
+        if self.would_fail {
+            out.push_str("\n**Report only:** an enforced gate would fail on the findings below.\n");
+        }
         if let Some(reason) = &self.waiver {
             out.push_str(&format!(
                 "\nWaived by commit trailer: `Catalog: none — {reason}`.\n"
@@ -184,6 +195,89 @@ impl GateReport {
         out
     }
 }
+/// The reason in the first `Catalog: none — <reason>` trailer of a commit message.
+pub fn waiver_reason(message: &str) -> Option<String> {
+    message.lines().find_map(|line| {
+        let rest = line.trim().strip_prefix("Catalog:")?.trim_start();
+        let rest = rest.strip_prefix("none")?.trim_start();
+        let rest = rest.trim_start_matches(['—', '–', '-', ':']).trim();
+        (!rest.is_empty()).then(|| rest.to_owned())
+    })
+}
+
+/// One commit that waived the catalog gate.
+#[derive(Debug, Clone, Serialize)]
+pub struct Waiver {
+    pub commit: String,
+    pub date: String,
+    pub subject: String,
+    pub reason: String,
+}
+
+/// Every `Catalog: none` trailer in `base..head` of the repository at `root`, oldest first.
+pub fn waivers(root: &Path, base: &str, head: &str) -> Result<Vec<Waiver>> {
+    let (base, head) = (resolve(root, base)?, resolve(root, head)?);
+    let log = git(
+        root,
+        &[
+            "log",
+            "--reverse",
+            "--format=%H%x1f%cs%x1f%s%x1f%B%x1e",
+            &format!("{base}..{head}"),
+        ],
+    )?;
+    Ok(String::from_utf8_lossy(&log)
+        .split('\x1e')
+        .filter_map(|record| {
+            let mut fields = record.trim_start_matches('\n').splitn(4, '\x1f');
+            let commit = fields.next()?.to_owned();
+            let date = fields.next()?.to_owned();
+            let subject = fields.next()?.to_owned();
+            let reason = waiver_reason(fields.next()?)?;
+            Some(Waiver {
+                commit,
+                date,
+                subject,
+                reason,
+            })
+        })
+        .collect())
+}
+
+/// Markdown: the waivers, then how often each reason (case-insensitive) recurs.
+pub fn waivers_markdown(list: &[Waiver]) -> String {
+    let mut out = format!(
+        "## Catalog gate waivers\n\n{} commit(s) carry a `Catalog: none` trailer.\n",
+        list.len()
+    );
+    if list.is_empty() {
+        return out;
+    }
+    out.push_str("\n| Commit | Date | Subject | Reason |\n| --- | --- | --- | --- |\n");
+    for w in list {
+        out.push_str(&format!(
+            "| `{}` | {} | {} | {} |\n",
+            short(&w.commit),
+            w.date,
+            w.subject.replace('|', "\\|"),
+            w.reason.replace('|', "\\|")
+        ));
+    }
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for w in list {
+        *counts.entry(w.reason.to_lowercase()).or_default() += 1;
+    }
+    let mut recurring: Vec<(String, usize)> = counts.into_iter().filter(|(_, n)| *n > 1).collect();
+    recurring.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    if !recurring.is_empty() {
+        out.push_str("\n### Recurring reasons\n\n");
+        for (reason, n) in recurring {
+            out.push_str(&format!("- {n}× {reason}\n"));
+        }
+    }
+    out
+}
+
 fn short(sha: &str) -> &str {
     &sha[..sha.len().min(12)]
 }
@@ -332,6 +426,42 @@ impl Catalog {
         platform: &str,
         input: &GateInput,
     ) -> Result<GateReport> {
+        self.gate_scoped(options, platform, input, None)
+    }
+
+    /// The modes `gate` applies on a platform: `[gate.<platform>]` over the defaults.
+    pub fn gate_modes(&self, platform: &str) -> GateModes {
+        let configured = self.config.gate.get(platform).copied().unwrap_or_default();
+        let files_default = match self.config.source_globs.get(platform) {
+            Some(crate::SourceGlobs::All(all)) if !all.is_empty() => GateMode::Enforce,
+            Some(g) if !g.user_visible().is_empty() || !g.strings().is_empty() => GateMode::Enforce,
+            _ => GateMode::Off,
+        };
+        let surfaces_default = if self.config.surface_scan.contains_key(platform) {
+            GateMode::Enforce
+        } else {
+            GateMode::Off
+        };
+        GateModes {
+            files: configured.files.unwrap_or(files_default),
+            surfaces: configured.surfaces.unwrap_or(surfaces_default),
+        }
+    }
+
+    /// `gate_input` with explicit modes (default: `gate_modes`).
+    pub fn gate_scoped(
+        &self,
+        options: &RootOptions,
+        platform: &str,
+        input: &GateInput,
+        modes: Option<GateModes>,
+    ) -> Result<GateReport> {
+        let modes = modes.unwrap_or_else(|| self.gate_modes(platform));
+        if modes.surfaces != GateMode::Off && !self.config.surface_scan.contains_key(platform) {
+            return fail(format!(
+                "{platform}: checking surfaces needs [surface_scan.{platform}] in catalog.toml"
+            ));
+        }
         let root = self.platform_root(platform, options)?.ok_or_else(|| {
             format!("{platform}: root not supplied; use --root {platform}=<path>")
         })?;
@@ -429,13 +559,27 @@ impl Catalog {
             patterns = globs.map(|g| g.all().iter().collect()).unwrap_or_default();
         }
         let mut cited: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for (label, p, reference) in self.evidence_items() {
-            if p == platform {
+        // Inherited copies count: a flavour's file is cited through its parent's record.
+        for (label, p, record) in self.records() {
+            if p != platform || record.out_of_scope {
+                continue;
+            }
+            for reference in crate::validation::evidence_refs(record) {
                 let path = self.evidence_relative(platform, reference)?.to_owned();
                 cited
                     .entry(path)
                     .or_default()
                     .insert(split_target(&label).0.to_owned());
+            }
+        }
+        if platform == self.config.report.baseline {
+            for entry in self.entries.values() {
+                for detail in &entry.details {
+                    for reference in &detail.baseline {
+                        let path = self.evidence_relative(platform, reference)?.to_owned();
+                        cited.entry(path).or_default().insert(entry.id.clone());
+                    }
+                }
             }
         }
         let changed_areas: BTreeSet<&String> = self
@@ -445,6 +589,18 @@ impl Catalog {
             .map(|(area, _)| area)
             .collect();
         let any_area = !changed_areas.is_empty();
+        if modes.files == GateMode::Off {
+            patterns.clear();
+        }
+        // Enforced file checks are judged per entry (range mode): a cited file needs one of
+        // its entries to change, and an uncited one needs a trailer.
+        let strict = modes.files == GateMode::Enforce;
+        let changed_entries = match input {
+            GateInput::Range { .. } if strict => {
+                Some(self.changed_entries(&catalog_changed, &base, &head))
+            }
+            _ => None,
+        };
         let mut user_visible = Vec::new();
         for file in &changed {
             if !patterns.iter().any(|g| glob(g.as_bytes(), file.as_bytes())) {
@@ -456,13 +612,20 @@ impl Catalog {
                 .unwrap_or_default();
             let touched: Vec<&String> = entries
                 .iter()
-                .filter(|e| {
-                    self.areas
+                .filter(|e| match &changed_entries {
+                    Some(changed) => changed.contains(*e),
+                    None => self
+                        .areas
                         .get(*e)
-                        .is_some_and(|a| changed_areas.contains(a))
+                        .is_some_and(|a| changed_areas.contains(a)),
                 })
                 .collect();
             let (covered, reason) = match (entries.is_empty(), touched.is_empty()) {
+                (true, _) if changed_entries.is_some() => (
+                    false,
+                    "not cited by any entry; cite it from an entry or add a `Catalog: none` trailer"
+                        .to_owned(),
+                ),
                 (true, _) if any_area => (
                     true,
                     "not cited; catalog entries changed in range".to_owned(),
@@ -476,6 +639,17 @@ impl Catalog {
                     format!(
                         "catalog updated for {}",
                         touched
+                            .iter()
+                            .map(|e| format!("`{e}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ),
+                (false, true) if changed_entries.is_some() => (
+                    false,
+                    format!(
+                        "cited by {}, none of which changed",
+                        entries
                             .iter()
                             .map(|e| format!("`{e}`"))
                             .collect::<Vec<_>>()
@@ -501,13 +675,8 @@ impl Catalog {
                 reason,
             });
         }
-        let waiver = messages.lines().find_map(|line| {
-            let rest = line.trim().strip_prefix("Catalog:")?.trim_start();
-            let rest = rest.strip_prefix("none")?.trim_start();
-            let rest = rest.trim_start_matches(['—', '–', '-', ':']).trim();
-            (!rest.is_empty()).then(|| rest.to_owned())
-        });
-        let surfaces = if self.config.surface_scan.contains_key(platform) {
+        let waiver = waiver_reason(&messages);
+        let surfaces = if modes.surfaces != GateMode::Off {
             let (head_rev, base_rev, touched) = match input {
                 GateInput::Range { .. } => (Some(head.as_str()), base.as_str(), None),
                 GateInput::Patch { .. } => (None, "HEAD", Some(changed.as_slice())),
@@ -516,8 +685,12 @@ impl Catalog {
         } else {
             Vec::new()
         };
-        let passed =
-            waiver.is_some() || (user_visible.iter().all(|f| f.covered) && surfaces.is_empty());
+        let files_ok = waiver.is_some() || user_visible.iter().all(|f| f.covered);
+        let surfaces_ok = waiver.is_some() || surfaces.is_empty();
+        let fails = |mode: GateMode, ok: bool| !ok && mode == GateMode::Enforce;
+        let reports = |mode: GateMode, ok: bool| !ok && mode == GateMode::Report;
+        let passed = !fails(modes.files, files_ok) && !fails(modes.surfaces, surfaces_ok);
+        let would_fail = reports(modes.files, files_ok) || reports(modes.surfaces, surfaces_ok);
         Ok(GateReport {
             platform: platform.into(),
             base,
@@ -527,8 +700,39 @@ impl Catalog {
             catalog_changed,
             waiver,
             surfaces,
+            modes,
+            would_fail,
             passed,
         })
+    }
+
+    /// IDs of entries whose content differs between two revisions of the changed area files
+    /// (catalog-relative paths), including added and removed entries.
+    fn changed_entries(&self, changed: &[String], base: &str, head: &str) -> BTreeSet<String> {
+        let read = |rev: &str, file: &str| -> BTreeMap<String, serde_json::Value> {
+            git(&self.directory, &["show", &format!("{rev}:./{file}")])
+                .ok()
+                .and_then(|bytes| serde_yaml::from_slice::<serde_yaml::Value>(&bytes).ok())
+                .and_then(|v| serde_json::to_value(v).ok())
+                .and_then(|v| v.as_array().cloned())
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|e| Some((e.get("id")?.as_str()?.to_owned(), e)))
+                .collect()
+        };
+        let mut out = BTreeSet::new();
+        for file in changed
+            .iter()
+            .filter(|f| self.area_files.values().any(|a| a == *f))
+        {
+            let (before, after) = (read(base, file), read(head, file));
+            for id in before.keys().chain(after.keys()) {
+                if before.get(id) != after.get(id) {
+                    out.insert(id.clone());
+                }
+            }
+        }
+        out
     }
 
     /// Surface findings that a change introduces: declarations new at head that are
@@ -711,6 +915,10 @@ impl Catalog {
             let Some(entry) = self.entries.get(entry_id) else {
                 continue;
             };
+            // An entry with an explicit lead is followed only from that platform.
+            if entry.lead.as_deref().is_some_and(|lead| lead != from) {
+                continue;
+            }
             let record = match detail_id {
                 None if surface.is_some() => entry
                     .platforms
@@ -723,6 +931,9 @@ impl Catalog {
                     .find(|x| x.id == d)
                     .and_then(|x| x.platforms.get(target)),
             };
+            if record.is_some_and(|r| r.out_of_scope) {
+                continue; // the feature does not exist on the target
+            }
             let before = record.map(|r| r.status);
             let stale = precise || sync.coarse_as_stale;
             let after = match before {

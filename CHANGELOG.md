@@ -2,6 +2,28 @@
 
 ## 0.4.0-dev
 
+- Platform scope: `applies_to` on entries and screens names the platforms a feature or
+  screen exists on. Platforms outside it need no record or capture and read as
+  not-applicable everywhere; entries outside the report target get no report row.
+- `lead` names the platform that defines an entry; `sync --platform-from P` skips entries
+  led by another platform. Entries without a lead are synced as before. `sync` also
+  skips targets outside an entry's `applies_to`.
+- Inheritance: a record whose status differs from its parent's no longer inherits the
+  parent's stale bookkeeping (`previous_status`, `since_commit`, `since_date`). Surface
+  records are inherited only for surfaces that list the inheriting platform, and merge
+  per surface. A platform outside `applies_to` inherits nothing.
+- Gate modes: `[gate.<platform>] files` and `surfaces` set `enforce`, `report` or `off`
+  (`--files`, `--surfaces` for one run). `files` now defaults to `off` for platforms whose
+  `source_globs` name neither `user_visible` nor `strings` files, so globs kept for
+  `inventory` no longer gate.
+- `concordance waivers` lists every `Catalog: none` trailer in a range, with recurring
+  reasons.
+- An enforced file check judges coverage per entry: a cited file needs an entry that
+  cites it to change, and an uncited file needs a `Catalog: none` trailer. This is
+  stricter than 0.3 for platforms with `user_visible` or `strings` globs and for the plain
+  list form; use `files = "report"` for the old, area-level rule. `--patch` keeps the
+  area-level rule. Files cited only through an inherited (flavour) record count as cited.
+
 ## 0.3.0 (2026-11-25)
 
 - Surfaces: a features × platforms × surfaces dimension. `[surfaces.<id>]` declares

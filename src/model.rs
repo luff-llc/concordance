@@ -121,6 +121,26 @@ pub struct Platform {
     /// True when the record was copied whole from an inherited platform.
     #[serde(skip)]
     pub inherited: bool,
+    /// True for the not-applicable record that stands in for a platform outside the
+    /// entry's `applies_to`; never written or serialized.
+    #[serde(skip)]
+    pub out_of_scope: bool,
+}
+
+/// Serialize platform records without the stand-ins for platforms outside `applies_to`.
+fn scoped_records<S: serde::Serializer>(
+    records: &BTreeMap<String, Platform>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeMap;
+    let mut map = serializer.serialize_map(None)?;
+    for (platform, record) in records.iter().filter(|(_, r)| !r.out_of_scope) {
+        map.serialize_entry(platform, record)?;
+    }
+    map.end()
+}
+fn all_scoped(records: &BTreeMap<String, Platform>) -> bool {
+    records.values().all(|r| r.out_of_scope)
 }
 
 /// A reviewer's record that an implementation was checked against the baseline.
@@ -193,6 +213,15 @@ pub struct Entry {
     pub impact: Impact,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<u16>,
+    /// The platforms this feature exists on. Absent: every configured platform. Platforms
+    /// outside it need no record and count nowhere (they read as not-applicable).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applies_to: Option<Vec<String>>,
+    /// The platform whose implementation defines this feature (default: the report
+    /// baseline). `sync --platform-from` follows only entries it leads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lead: Option<String>,
+    #[serde(serialize_with = "scoped_records")]
     pub platforms: BTreeMap<String, Platform>,
     pub acceptance: Vec<Acceptance>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -216,6 +245,12 @@ pub enum VerifyEvidence {
     Journey,
 }
 impl Entry {
+    /// Whether the feature exists on a platform (`applies_to`, or every platform).
+    pub fn applies(&self, platform: &str) -> bool {
+        self.applies_to
+            .as_ref()
+            .is_none_or(|scope| scope.iter().any(|p| p == platform))
+    }
     /// Explicit `verify_requires`, or the inferred default: purely visual entries need a
     /// capture; entries whose interactions write state need a capture and a journey.
     pub fn verification_requirements(&self) -> Vec<VerifyEvidence> {
@@ -278,7 +313,11 @@ pub struct Detail {
     /// Evidence on the report baseline platform, usually `path:line` or `path#Symbol`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub baseline: Vec<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "all_scoped",
+        serialize_with = "scoped_records"
+    )]
     pub platforms: BTreeMap<String, Platform>,
     /// Evidence a verification must include. Default: a journey for motion, haptic and
     /// gesture details (a still capture cannot prove them); a capture or journey otherwise.
@@ -509,6 +548,45 @@ pub struct Config {
     /// `[surface_scan.<platform>]`: where `surfaces scan` and `gate` read declarations.
     #[serde(default)]
     pub surface_scan: BTreeMap<String, SurfaceScanConfig>,
+    /// `[gate.<platform>]`: what `gate` enforces, reports or skips on each platform.
+    #[serde(default)]
+    pub gate: BTreeMap<String, GateConfig>,
+}
+
+/// How `gate` treats one kind of finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GateMode {
+    /// Findings fail the gate.
+    Enforce,
+    /// Findings are listed and the gate still passes.
+    Report,
+    /// Not checked.
+    Off,
+}
+impl GateMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enforce => "enforce",
+            Self::Report => "report",
+            Self::Off => "off",
+        }
+    }
+}
+/// `[gate.<platform>]`. Defaults: `files` enforce when the platform's source globs name
+/// user-visible files or string catalogs (or are a plain list), otherwise off; `surfaces`
+/// enforce when the platform has `[surface_scan]`, otherwise off.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GateConfig {
+    pub files: Option<GateMode>,
+    pub surfaces: Option<GateMode>,
+}
+/// The modes `gate` applies on a platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct GateModes {
+    pub files: GateMode,
+    pub surfaces: GateMode,
 }
 
 /// One system surface a feature can reach.

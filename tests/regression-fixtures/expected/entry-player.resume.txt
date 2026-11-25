@@ -1,0 +1,115 @@
+exit 0
+{
+  "id": "player.resume",
+  "title": "Resume playback",
+  "summary": "Resume playback.",
+  "surfaces": [
+    "now-playing",
+    "quick-action",
+    "app-shortcut",
+    "control",
+    "notification"
+  ],
+  "interactions": [
+    {
+      "trigger": "Open",
+      "result": "Resume playback"
+    }
+  ],
+  "states": [
+    "ready"
+  ],
+  "settings": [],
+  "data": {
+    "reads": [
+      "playback"
+    ],
+    "writes": []
+  },
+  "copy": [
+    "Resume playback"
+  ],
+  "accessibility": {
+    "label": "Resume playback",
+    "identifier": "",
+    "notes": []
+  },
+  "design": [],
+  "depends_on": [],
+  "impact": "medium",
+  "applies_to": [
+    "ios",
+    "android",
+    "eink",
+    "macos"
+  ],
+  "platforms": {
+    "android": {
+      "status": "implemented",
+      "surfaces": {
+        "app-shortcut": {
+          "status": "implemented",
+          "declared": [
+            "actions.intent.PLAY_MEDIA"
+          ]
+        },
+        "control": {
+          "status": "implemented",
+          "declared": [
+            ".tile.PlayPauseTile"
+          ]
+        },
+        "notification": {
+          "status": "partial",
+          "gap": "No chapter title in the notification."
+        },
+        "quick-action": {
+          "status": "implemented",
+          "declared": [
+            "resume"
+          ]
+        }
+      }
+    },
+    "eink": {
+      "status": "implemented"
+    },
+    "ios": {
+      "status": "implemented",
+      "surfaces": {
+        "app-shortcut": {
+          "status": "implemented",
+          "declared": [
+            "ResumeIntent"
+          ]
+        },
+        "control": {
+          "status": "implemented",
+          "declared": [
+            "com.example.play-pause"
+          ]
+        },
+        "notification": {
+          "status": "implemented"
+        },
+        "quick-action": {
+          "status": "implemented",
+          "declared": [
+            "com.example.resume",
+            "com.example.search"
+          ]
+        }
+      }
+    },
+    "macos": {
+      "status": "implemented"
+    }
+  },
+  "acceptance": [
+    {
+      "given": "a show is playing",
+      "when": "the user looks",
+      "then": "Resume playback"
+    }
+  ]
+}

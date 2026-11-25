@@ -217,6 +217,29 @@ enum Command {
         /// Also write the Markdown summary here (for example $GITHUB_STEP_SUMMARY).
         #[arg(long)]
         summary: Option<PathBuf>,
+        /// Override `[gate.<platform>] files`: enforce, report or off.
+        #[arg(long, value_parser = parse_gate_mode)]
+        files: Option<concordance::GateMode>,
+        /// Override `[gate.<platform>] surfaces`: enforce, report or off.
+        #[arg(long, value_parser = parse_gate_mode)]
+        surfaces: Option<concordance::GateMode>,
+    },
+    /// List every `Catalog: none` trailer in a commit range, with recurring reasons.
+    Waivers {
+        dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
+        /// Read commits from this platform's root (default: the catalog's repository).
+        #[arg(long)]
+        platform: Option<String>,
+        #[arg(long)]
+        base: String,
+        #[arg(long, default_value = "HEAD")]
+        head: String,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: ScanFormat,
     },
     /// Mark target records stale where the source baseline changed; tasks, issues, new pin.
     Sync {
@@ -560,6 +583,14 @@ struct Roots {
     /// Fail when a declared external checkout has not been supplied.
     #[arg(long)]
     require_roots: bool,
+}
+fn parse_gate_mode(value: &str) -> std::result::Result<concordance::GateMode, String> {
+    match value {
+        "enforce" => Ok(concordance::GateMode::Enforce),
+        "report" => Ok(concordance::GateMode::Report),
+        "off" => Ok(concordance::GateMode::Off),
+        _ => Err("expected enforce, report or off".into()),
+    }
 }
 fn parse_root(value: &str) -> std::result::Result<(String, PathBuf), String> {
     match value.split_once('=') {
@@ -933,6 +964,8 @@ fn run(cli: Cli) -> Result<()> {
             message_file,
             repo,
             summary,
+            files,
+            surfaces,
         } => {
             let outcome = (|| -> Result<concordance::GateReport> {
                 let catalog = Catalog::load(&dir)?;
@@ -949,7 +982,14 @@ fn run(cli: Cli) -> Result<()> {
                     },
                     _ => return Err("pass --base and --head, or --patch".into()),
                 };
-                catalog.gate_input(&options, &platform, &input)
+                {
+                    let defaults = catalog.gate_modes(&platform);
+                    let modes = concordance::GateModes {
+                        files: files.unwrap_or(defaults.files),
+                        surfaces: surfaces.unwrap_or(defaults.surfaces),
+                    };
+                    catalog.gate_scoped(&options, &platform, &input, Some(modes))
+                }
             })();
             match outcome {
                 Ok(report) => {
@@ -1099,6 +1139,30 @@ fn run(cli: Cli) -> Result<()> {
             }
             if !findings.is_empty() || version_failed || !surface_gaps.is_empty() {
                 std::process::exit(1);
+            }
+        }
+        Command::Waivers {
+            dir,
+            roots,
+            platform,
+            base,
+            head,
+            repo,
+            format,
+        } => {
+            let catalog = Catalog::load(&dir)?;
+            let mut options = roots.options(&catalog)?;
+            options.repo = repo;
+            let root = match &platform {
+                Some(p) => catalog
+                    .platform_root(p, &options)?
+                    .ok_or_else(|| format!("{p}: root not supplied; use --root {p}=<path>"))?,
+                None => dir.clone(),
+            };
+            let list = concordance::waivers(&root, &base, &head)?;
+            match format {
+                ScanFormat::Markdown => print!("{}", concordance::waivers_markdown(&list)),
+                ScanFormat::Json => println!("{}", serde_json::to_string_pretty(&list)?),
             }
         }
         Command::Surfaces {
