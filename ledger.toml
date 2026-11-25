@@ -22,3 +22,23 @@ steps = [
   "create release/0.3 at 526566fd6a: exit 0",
   "publish release/0.3: exit 0",
 ]
+
+[[entry]]
+id = "2026-11-25T19:52:00Z/push-tag/50e8e7a16e/59335f10"
+at = "2026-11-25T19:52:00Z"
+by = "Xinchen Liu"
+action = "push-tag"
+product = "concordance"
+ref = "v0.3.0"
+commit = "50e8e7a16e7db53ffcc449e1d23aa24620a5e305"
+tree = "5fcf4f985a00370d07fc68bb99026da51b7787fb"
+result = "ok"
+prev = "3a996449c4407a5676e74c0fd3150ce5fb1a7914619e524eaa2a56a414f40369"
+receipt = "59335f1009459b443fddc6f3668c7410"
+command = [
+  "publish v0.3.0: git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c protocol.ext.allow=never push --atomic --force-with-lease=refs/tags/v0.3.0: https://github.com/luff-llc/concordance.git refs/tags/v0.3.0",
+]
+steps = [
+  "tag 50e8e7a16e as v0.3.0: exit 0",
+  "publish v0.3.0: exit 0",
+]
