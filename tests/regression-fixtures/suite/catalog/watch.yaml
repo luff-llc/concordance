@@ -1,0 +1,80 @@
+[
+  {
+    "id": "watch.remote",
+    "title": "Control playback from the watch",
+    "summary": "Control playback from the watch.",
+    "surfaces": [
+      "watch-app",
+      "wear-tile"
+    ],
+    "interactions": [
+      {
+        "trigger": "Open",
+        "result": "Control playback from the watch"
+      }
+    ],
+    "states": [
+      "ready"
+    ],
+    "settings": [],
+    "data": {
+      "reads": [
+        "playback"
+      ],
+      "writes": []
+    },
+    "copy": [
+      "Control playback from the watch"
+    ],
+    "accessibility": {
+      "label": "Control playback from the watch",
+      "identifier": "",
+      "notes": []
+    },
+    "design": [],
+    "depends_on": [],
+    "impact": "medium",
+    "applies_to": [
+      "watchos",
+      "wearos"
+    ],
+    "lead": "watchos",
+    "platforms": {
+      "watchos": {
+        "status": "implemented",
+        "surfaces": {
+          "watch-app": {
+            "status": "implemented",
+            "declared": [
+              "com.example.player.watchkitapp"
+            ]
+          }
+        }
+      },
+      "wearos": {
+        "status": "partial",
+        "surfaces": {
+          "watch-app": {
+            "status": "implemented",
+            "declared": [
+              "com.example.player.wear"
+            ]
+          },
+          "wear-tile": {
+            "status": "implemented",
+            "declared": [
+              ".tile.NowPlayingTile"
+            ]
+          }
+        }
+      }
+    },
+    "acceptance": [
+      {
+        "given": "a show is playing",
+        "when": "the user looks",
+        "then": "Control playback from the watch"
+      }
+    ]
+  }
+]

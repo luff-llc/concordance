@@ -1,0 +1,74 @@
+[
+  {
+    "id": "car.browse",
+    "title": "Browse the library in the car",
+    "summary": "Browse the library in the car.",
+    "surfaces": [
+      "car"
+    ],
+    "interactions": [
+      {
+        "trigger": "Open",
+        "result": "Browse the library in the car"
+      }
+    ],
+    "states": [
+      "ready"
+    ],
+    "settings": [],
+    "data": {
+      "reads": [
+        "playback"
+      ],
+      "writes": []
+    },
+    "copy": [
+      "Browse the library in the car"
+    ],
+    "accessibility": {
+      "label": "Browse the library in the car",
+      "identifier": "",
+      "notes": []
+    },
+    "design": [],
+    "depends_on": [],
+    "impact": "medium",
+    "applies_to": [
+      "ios",
+      "android"
+    ],
+    "platforms": {
+      "ios": {
+        "status": "implemented",
+        "surfaces": {
+          "car": {
+            "status": "implemented",
+            "declared": [
+              "CarSceneDelegate"
+            ]
+          }
+        }
+      },
+      "android": {
+        "status": "implemented",
+        "surfaces": {
+          "car": {
+            "status": "partial",
+            "declared": [
+              "media",
+              ".playback.PlaybackService"
+            ],
+            "gap": "No search."
+          }
+        }
+      }
+    },
+    "acceptance": [
+      {
+        "given": "a show is playing",
+        "when": "the user looks",
+        "then": "Browse the library in the car"
+      }
+    ]
+  }
+]

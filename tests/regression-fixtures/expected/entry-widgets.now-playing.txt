@@ -1,0 +1,134 @@
+exit 0
+{
+  "id": "widgets.now-playing",
+  "title": "Show the playing episode in widgets",
+  "summary": "Show the playing episode in widgets.",
+  "surfaces": [
+    "home",
+    "widget.small",
+    "widget.medium",
+    "lock-screen",
+    "complication"
+  ],
+  "interactions": [
+    {
+      "trigger": "Open",
+      "result": "Show the playing episode in widgets"
+    }
+  ],
+  "states": [
+    "ready"
+  ],
+  "settings": [],
+  "data": {
+    "reads": [
+      "playback"
+    ],
+    "writes": []
+  },
+  "copy": [
+    "Show the playing episode in widgets"
+  ],
+  "accessibility": {
+    "label": "Show the playing episode in widgets",
+    "identifier": "",
+    "notes": []
+  },
+  "design": [],
+  "depends_on": [],
+  "impact": "high",
+  "platforms": {
+    "android": {
+      "status": "stale",
+      "gap": "The iOS widget changed.",
+      "previous_status": "implemented",
+      "since_commit": "0123456789abcdef0123456789abcdef01234567",
+      "since_date": "2026-11-20",
+      "surfaces": {
+        "widget.medium": {
+          "status": "implemented",
+          "declared": [
+            ".widget.NowPlayingWidgetReceiver"
+          ]
+        },
+        "widget.small": {
+          "status": "missing",
+          "gap": "No 2×2 provider."
+        }
+      }
+    },
+    "eink": {
+      "status": "partial",
+      "notes": "Static rendering only."
+    },
+    "ios": {
+      "status": "implemented",
+      "surfaces": {
+        "lock-screen": {
+          "status": "implemented",
+          "declared": [
+            "com.example.now-playing"
+          ]
+        },
+        "widget.medium": {
+          "status": "implemented",
+          "declared": [
+            "com.example.now-playing"
+          ]
+        },
+        "widget.small": {
+          "status": "implemented",
+          "declared": [
+            "com.example.now-playing"
+          ]
+        }
+      }
+    },
+    "macos": {
+      "status": "implemented",
+      "surfaces": {
+        "widget.medium": {
+          "status": "implemented",
+          "declared": [
+            "com.example.now-playing"
+          ]
+        },
+        "widget.small": {
+          "status": "implemented",
+          "declared": [
+            "com.example.now-playing"
+          ]
+        }
+      }
+    },
+    "watchos": {
+      "status": "implemented",
+      "surfaces": {
+        "complication": {
+          "status": "implemented",
+          "declared": [
+            "com.example.watch-now-playing"
+          ]
+        }
+      }
+    },
+    "wearos": {
+      "status": "implemented",
+      "surfaces": {
+        "complication": {
+          "status": "implemented",
+          "declared": [
+            ".complication.ProgressComplication"
+          ]
+        }
+      }
+    }
+  },
+  "acceptance": [
+    {
+      "given": "a show is playing",
+      "when": "the user looks",
+      "then": "Show the playing episode in widgets"
+    }
+  ]
+}

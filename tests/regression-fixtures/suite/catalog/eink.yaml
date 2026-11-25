@@ -1,0 +1,53 @@
+[
+  {
+    "id": "eink.page-turn",
+    "title": "Turn pages with the hardware buttons",
+    "summary": "Turn pages with the hardware buttons.",
+    "surfaces": [
+      "now-playing"
+    ],
+    "interactions": [
+      {
+        "trigger": "Open",
+        "result": "Turn pages with the hardware buttons"
+      }
+    ],
+    "states": [
+      "ready"
+    ],
+    "settings": [],
+    "data": {
+      "reads": [
+        "playback"
+      ],
+      "writes": []
+    },
+    "copy": [
+      "Turn pages with the hardware buttons"
+    ],
+    "accessibility": {
+      "label": "Turn pages with the hardware buttons",
+      "identifier": "",
+      "notes": []
+    },
+    "design": [],
+    "depends_on": [],
+    "impact": "low",
+    "applies_to": [
+      "eink"
+    ],
+    "lead": "eink",
+    "platforms": {
+      "eink": {
+        "status": "implemented"
+      }
+    },
+    "acceptance": [
+      {
+        "given": "a show is playing",
+        "when": "the user looks",
+        "then": "Turn pages with the hardware buttons"
+      }
+    ]
+  }
+]

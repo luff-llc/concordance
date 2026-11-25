@@ -1,0 +1,2 @@
+exit 0
+widgets.now-playing	high	partial	Show the playing episode in widgets

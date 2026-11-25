@@ -1,0 +1,7 @@
+exit 0
+widgets.now-playing	high	stale	Show the playing episode in widgets
+widgets.now-playing@widget.small	surface	missing	Small widget
+player.resume	medium	implemented	Resume playback
+player.resume@notification	surface	partial	Notification
+car.browse	medium	implemented	Browse the library in the car
+car.browse@car	surface	partial	CarPlay and Android Auto

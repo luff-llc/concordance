@@ -1,0 +1,92 @@
+# Regression suite: one product on seven platforms, with flavours that inherit, platforms
+# that only some features reach, system surfaces and declared-surface scans. The expected
+# outputs live in ../expected; tests/regression.rs compares every run against them.
+[platforms]
+ios = "apple"
+android = "android"
+# Flavours: e-ink is a mode of the Android app; the Mac app shares the iOS target.
+eink = { root = "android", inherits = "android" }
+macos = { root = "apple", inherits = "ios" }
+# Separate binaries with their own screens.
+watchos = "apple"
+wearos = "android"
+
+[report]
+title = "Suite parity"
+area_order = ["widgets", "player", "car", "watch", "eink"]
+
+[report.labels]
+ios = "iOS"
+android = "Android"
+eink = "E-ink"
+macos = "macOS"
+watchos = "watchOS"
+wearos = "Wear OS"
+
+# Kept for inventory and drift only: does not gate files (gate defaults).
+[source_globs.android]
+all = ["**/*.kt"]
+
+[surfaces."widget.small"]
+title = "Small widget"
+platforms = ["ios", "android", "macos"]
+
+[surfaces."widget.medium"]
+title = "Medium widget"
+platforms = ["ios", "android", "macos"]
+
+[surfaces."lock-screen"]
+title = "Lock Screen widget"
+platforms = ["ios"]
+
+[surfaces.control]
+title = "Controls and Quick Settings"
+platforms = ["ios", "android"]
+
+[surfaces."quick-action"]
+title = "Quick actions"
+platforms = ["ios", "android"]
+
+[surfaces."app-shortcut"]
+title = "App shortcuts and App Actions"
+platforms = ["ios", "android"]
+
+[surfaces.car]
+title = "CarPlay and Android Auto"
+platforms = ["ios", "android"]
+release = "required"
+
+[surfaces.notification]
+title = "Notification"
+platforms = ["ios", "android"]
+signals = []
+
+[surfaces."watch-app"]
+title = "Watch app"
+platforms = ["watchos", "wearos"]
+
+[surfaces.complication]
+title = "Complication"
+platforms = ["watchos", "wearos"]
+
+[surfaces."wear-tile"]
+title = "Wear OS tile"
+platforms = ["wearos"]
+
+[surface_scan.ios]
+swift = ["**/*.swift"]
+plist = ["App/Info.plist"]
+exclude = ["Watch/**"]
+ignore = ["DebugWidget"]
+
+[surface_scan.watchos]
+swift = ["Watch/**/*.swift"]
+plist = ["Watch/Info.plist"]
+contexts = { watch = ["Watch/**"] }
+
+[surface_scan.android]
+manifests = ["app/src/main/AndroidManifest.xml"]
+
+[surface_scan.wearos]
+manifests = ["wear/src/main/AndroidManifest.xml"]
+contexts = { wear = ["wear/**"] }

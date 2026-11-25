@@ -264,8 +264,12 @@ impl Catalog {
             let group: Vec<_> = self
                 .entries
                 .values()
-                .filter(|e| self.areas[&e.id] == *area)
+                .filter(|e| self.areas[&e.id] == *area && e.applies(target))
                 .collect();
+            // An area whose entries all leave out the target has no row.
+            if group.is_empty() && self.entries.values().any(|e| self.areas[&e.id] == *area) {
+                continue;
+            }
             let included: Vec<_> = group
                 .iter()
                 .copied()
@@ -292,7 +296,7 @@ impl Catalog {
         }
         lines.extend([format!(
             "| **Total** | **{}** | **{}** | **{}** | **{}** | **{}** | **{}** |{}",
-            self.entries.len(),
+            self.entries.values().filter(|e| e.applies(target)).count(),
             baseline.len(),
             totals[0],
             totals[1],
