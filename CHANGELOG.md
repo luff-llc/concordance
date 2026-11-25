@@ -2,6 +2,28 @@
 
 ## 0.3.0-dev
 
+- Surfaces: a features × platforms × surfaces dimension. `[surfaces.<id>]` declares
+  system surfaces (widget sizes, Lock Screen, controls, quick actions, app shortcuts,
+  watch apps, complications, Wear OS tiles, the car, the menu bar, Live Activities,
+  notifications) and the platforms that can have each. Entries opt in by naming a
+  declared ID in `surfaces`; platform records carry `surfaces.<id>` records with the
+  usual status, evidence, verification and blockers, plus `declared` IDs. An unrecorded
+  surface counts as a gap. Catalogs and entries without surfaces are unchanged.
+- `report` and `ui-report` add a Surfaces table and gap list; `next` queues surface gaps
+  (`--surface <id>`, `--no-surfaces`); `gate-release` fails on stale surface records past
+  their limit and on gaps on `release = "required"` surfaces; `set` and `sync` address
+  surface records as `entry@surface`.
+- `concordance surfaces scan` reads what each app declares, without building it:
+  WidgetKit widgets and families, controls, Live Activities, `AppShortcutsProvider`,
+  `MenuBarExtra`, CarPlay scene delegates, Info.plist quick actions, watch apps, CarPlay
+  scenes and notification extensions; Android widget receivers with their
+  `appwidget-provider` cell sizes, `shortcuts.xml` shortcuts and App Actions, Android Auto
+  descriptors, media library services, Quick Settings tiles, Wear OS apps, tiles and
+  complications. It lists uncatalogued, unmapped and no-longer-declared surfaces.
+  Parsers are configured per catalog in `[surface_scan.<platform>]`.
+- `gate` fails a change that adds a declared surface the catalog does not cover, or
+  removes one a record still claims.
+
 - Collect recoverable validation errors across documents, identities, dependency
   graphs, retirement records, and evidence paths, with structured library reports.
 - Resolve evidence in independent checkouts using repeatable platform roots or

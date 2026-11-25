@@ -1,7 +1,7 @@
 //! Continuous parity: `gate` on every merge, `sync` after baseline merges, and `gate-release`.
 use crate::drift::{git, glob, Precision};
 use crate::edit::edit_file;
-use crate::set::{key, record_mut, split_target};
+use crate::set::{key, record_mut, split_target, surface_of};
 use crate::{fail, Catalog, DetailKind, Result, RootOptions, Status};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -119,6 +119,10 @@ pub struct GateReport {
     pub user_visible: Vec<GateFile>,
     pub catalog_changed: Vec<String>,
     pub waiver: Option<String>,
+    /// Declared-surface findings (new uncatalogued or unmapped declarations, removed
+    /// declarations the catalog still claims); empty without `[surface_scan]`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub surfaces: Vec<crate::Finding>,
     pub passed: bool,
 }
 impl GateReport {
@@ -144,6 +148,30 @@ impl GateReport {
             out.push_str("\n### Unmatched user-visible files\n\nUpdate the catalog entries below in the same change, or add a `Catalog: none — <reason>` commit trailer.\n\n");
             for f in &unmatched {
                 out.push_str(&format!("- `{}`: {}\n", f.file, f.reason));
+            }
+        }
+        if !self.surfaces.is_empty() {
+            out.push_str("\n### Declared surfaces\n\nCatalog each new surface declaration (an entry that names the surface, with a surface record whose `declared` lists the ID), map it to a `[surfaces]` ID, or update the records that claim a removed one.\n\n");
+            for f in &self.surfaces {
+                out.push_str(&format!(
+                    "- {}: `{}`{}{}: {}\n",
+                    match f.kind {
+                        crate::FindingKind::Uncatalogued => "new, uncatalogued",
+                        crate::FindingKind::Unmapped => "new, unmapped",
+                        crate::FindingKind::StatusDisagrees => "new, but recorded as not there",
+                        _ => "removed",
+                    },
+                    f.subject,
+                    f.surface
+                        .as_ref()
+                        .map(|s| format!(" (`{s}`)"))
+                        .unwrap_or_default(),
+                    f.location
+                        .as_ref()
+                        .map(|l| format!(" at `{l}`"))
+                        .unwrap_or_default(),
+                    f.message
+                ));
             }
         }
         let covered: Vec<&GateFile> = self.user_visible.iter().filter(|f| f.covered).collect();
@@ -479,7 +507,17 @@ impl Catalog {
             let rest = rest.trim_start_matches(['—', '–', '-', ':']).trim();
             (!rest.is_empty()).then(|| rest.to_owned())
         });
-        let passed = waiver.is_some() || user_visible.iter().all(|f| f.covered);
+        let surfaces = if self.config.surface_scan.contains_key(platform) {
+            let (head_rev, base_rev, touched) = match input {
+                GateInput::Range { .. } => (Some(head.as_str()), base.as_str(), None),
+                GateInput::Patch { .. } => (None, "HEAD", Some(changed.as_slice())),
+            };
+            self.gate_surfaces(options, platform, head_rev, base_rev, touched)?
+        } else {
+            Vec::new()
+        };
+        let passed =
+            waiver.is_some() || (user_visible.iter().all(|f| f.covered) && surfaces.is_empty());
         Ok(GateReport {
             platform: platform.into(),
             base,
@@ -488,8 +526,89 @@ impl Catalog {
             user_visible,
             catalog_changed,
             waiver,
+            surfaces,
             passed,
         })
+    }
+
+    /// Surface findings that a change introduces: declarations new at head that are
+    /// uncatalogued or unmapped, and base declarations gone at head that a record claims.
+    fn gate_surfaces(
+        &self,
+        options: &RootOptions,
+        platform: &str,
+        head: Option<&str>,
+        base: &str,
+        touched: Option<&[String]>,
+    ) -> Result<Vec<crate::Finding>> {
+        use crate::FindingKind;
+        let config = &self.config.surface_scan[platform];
+        let head_decls =
+            crate::scan_platform(config, &self.surface_files(options, platform, head)?)?;
+        // With a patch the working tree may hold other work: only declarations from files the
+        // patch touches count as new.
+        let in_patch: BTreeSet<String> = head_decls
+            .iter()
+            .filter(|d| touched.is_none_or(|t| t.iter().any(|p| *p == d.file || *p == d.origin)))
+            .map(crate::Declaration::key)
+            .collect();
+        let base_decls =
+            crate::scan_platform(config, &self.surface_files(options, platform, Some(base))?)?;
+        let base_keys: BTreeSet<String> = base_decls.iter().map(crate::Declaration::key).collect();
+        let head_keys: BTreeSet<String> = head_decls.iter().map(crate::Declaration::key).collect();
+        let head_report = self.compare_surfaces(platform, head_decls);
+        let mut out: Vec<crate::Finding> = head_report
+            .findings
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f.kind,
+                    FindingKind::Uncatalogued
+                        | FindingKind::Unmapped
+                        | FindingKind::StatusDisagrees
+                )
+            })
+            .filter(|f| {
+                f.declaration
+                    .as_ref()
+                    .is_some_and(|d| !base_keys.contains(d) && in_patch.contains(d))
+            })
+            .cloned()
+            .collect();
+        // Removed declarations: claims that the base satisfied and the head does not.
+        let base_report = self.compare_surfaces(
+            platform,
+            base_decls
+                .into_iter()
+                .filter(|d| !head_keys.contains(&d.key()))
+                .collect(),
+        );
+        let removed_ids: BTreeSet<(String, String)> = base_report
+            .declarations
+            .iter()
+            .flat_map(|m| {
+                m.surfaces
+                    .iter()
+                    .map(|s| (s.clone(), m.declaration.id.clone()))
+            })
+            .collect();
+        for f in head_report
+            .findings
+            .iter()
+            .filter(|f| f.kind == FindingKind::NoLongerDeclared)
+        {
+            let surface = f.surface.clone().unwrap_or_default();
+            // An exact record: was this ID declared at base? A coarse one: did the change
+            // remove the surface's last declaration?
+            let was_there = match &f.declared_id {
+                Some(id) => removed_ids.contains(&(surface.clone(), id.clone())),
+                None => removed_ids.iter().any(|(s, _)| *s == surface),
+            };
+            if was_there {
+                out.push(f.clone());
+            }
+        }
+        Ok(out)
     }
 
     /// Mark target records stale where the source platform's baseline evidence changed,
@@ -529,7 +648,11 @@ impl Catalog {
             return fail(drift.unchecked.join("; "));
         };
         // Planned edits, grouped by area file.
-        let mut edits: BTreeMap<String, Vec<(String, Option<String>, Status)>> = BTreeMap::new();
+        #[allow(clippy::type_complexity)]
+        let mut edits: BTreeMap<
+            String,
+            Vec<(String, Option<String>, Option<String>, Status)>,
+        > = BTreeMap::new();
         // Interface copy whose old text disappeared in the range (code or string catalogs).
         let full = String::from_utf8_lossy(&git(
             &root,
@@ -584,10 +707,15 @@ impl Catalog {
         }
         for (label, (precise, hits)) in labels {
             let (entry_id, detail_id) = split_target(&label);
+            let surface = surface_of(&label);
             let Some(entry) = self.entries.get(entry_id) else {
                 continue;
             };
             let record = match detail_id {
+                None if surface.is_some() => entry
+                    .platforms
+                    .get(target)
+                    .and_then(|p| p.surfaces.get(surface.unwrap_or_default())),
                 None => entry.platforms.get(target),
                 Some(d) => entry
                     .details
@@ -617,6 +745,7 @@ impl Catalog {
                 edits.entry(file).or_default().push((
                     entry_id.to_owned(),
                     detail_id.map(str::to_owned),
+                    surface.map(str::to_owned),
                     previous,
                 ));
             }
@@ -686,10 +815,15 @@ impl Catalog {
         if sync.apply {
             for (file, list) in &edits {
                 edit_file(&self.directory.join(file), false, |value| {
-                    for (entry_id, detail_id, previous) in list {
-                        if let Some(record) =
-                            record_mut(value, entry_id, detail_id.as_deref(), target, None)?
-                        {
+                    for (entry_id, detail_id, surface, previous) in list {
+                        if let Some(record) = record_mut(
+                            value,
+                            entry_id,
+                            detail_id.as_deref(),
+                            surface.as_deref(),
+                            target,
+                            None,
+                        )? {
                             record.insert(key("status"), key("stale"));
                             record.insert(key("previous_status"), key(previous.as_str()));
                             record.insert(key("since_commit"), key(&to));
@@ -910,6 +1044,21 @@ impl Catalog {
             }
             if let Some(record) = stale(entry.platforms.get(platform)) {
                 check(entry.id.clone(), record, strictest.unwrap_or(default_days));
+            }
+            for (surface, inner) in entry
+                .platforms
+                .get(platform)
+                .map(|p| &p.surfaces)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(record) = stale(Some(inner)) {
+                    check(
+                        format!("{}@{surface}", entry.id),
+                        record,
+                        strictest.unwrap_or(default_days),
+                    );
+                }
             }
         }
         Ok(findings)

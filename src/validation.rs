@@ -153,12 +153,16 @@ pub(crate) fn evidence_refs(record: &Platform) -> impl Iterator<Item = &String> 
 }
 
 impl Catalog {
-    /// Every platform record with a display label: entry IDs, plus `entry#detail` for details.
+    /// Every platform record with a display label: entry IDs, `entry@surface` for surface
+    /// records and `entry#detail` for details.
     pub fn records(&self) -> Vec<(String, &str, &Platform)> {
         let mut out = Vec::new();
         for entry in self.entries.values() {
             for (platform, record) in &entry.platforms {
                 out.push((entry.id.clone(), platform.as_str(), record));
+                for (surface, record) in &record.surfaces {
+                    out.push((format!("{}@{surface}", entry.id), platform.as_str(), record));
+                }
             }
             for detail in &entry.details {
                 for (platform, record) in &detail.platforms {
@@ -494,6 +498,28 @@ pub(crate) fn check_platform(
 pub(crate) fn check_entry(entry: &Entry, report: &mut ValidationReport) {
     for (platform, record) in &entry.platforms {
         check_platform(&entry.id, platform, record, report);
+        if !record.declared.is_empty() {
+            report.error(
+                "surfaces",
+                &entry.id,
+                platform,
+                "declared",
+                "declared belongs on surface records",
+            );
+        }
+        for (surface, inner) in &record.surfaces {
+            let label = format!("{}@{surface}", entry.id);
+            check_platform(&label, platform, inner, report);
+            if !inner.surfaces.is_empty() {
+                report.error(
+                    "surfaces",
+                    &label,
+                    platform,
+                    "",
+                    "surface records cannot nest",
+                );
+            }
+        }
     }
     let mut seen = std::collections::BTreeSet::new();
     for detail in &entry.details {
@@ -503,6 +529,15 @@ pub(crate) fn check_entry(entry: &Entry, report: &mut ValidationReport) {
         }
         for (platform, record) in &detail.platforms {
             check_platform(&label, platform, record, report);
+            if !record.surfaces.is_empty() || !record.declared.is_empty() {
+                report.error(
+                    "surfaces",
+                    &label,
+                    platform,
+                    "",
+                    "surface records belong to entry platform records, not details",
+                );
+            }
         }
         if let Some(m) = &detail.spec.motion {
             let numbers = m.response.is_some()

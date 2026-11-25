@@ -210,6 +210,14 @@ Optional `shared_with` names the same feature in other apps of a suite, as
 checks only the syntax; `concordance suite` resolves the references. See
 [Tracker](tracker.md#shared-features).
 
+## Surfaces
+
+System surfaces outside the app (widget sizes, Control Center, quick actions, the watch,
+the car...) are declared in `[surfaces.<id>]` and recorded per platform under
+`platforms.<platform>.surfaces.<id>`; an entry opts in by naming a declared ID in its
+`surfaces` list. `[surface_scan.<platform>]` configures `concordance surfaces scan` and
+the surface checks in `gate`. See [Surfaces](surfaces.md).
+
 ## Blockers
 
 Work that waits on a decision or an outside dependency names it instead of hiding it in
@@ -343,6 +351,11 @@ and the gate fails, unless a commit message in the range (or `--message-file`) c
 from a unified diff whose paths are relative to the repository top. The catalog must be
 in the same repository as the range. Exit codes: 0 passed, 1 failed, 2 error. The
 Markdown summary goes to stdout and, with `--summary <file>`, is appended to that file.
+
+With a `[surface_scan.<platform>]` section, `gate` also compares declared surfaces at
+`--base` and `--head` (with `--patch`, the working tree against `HEAD`) and fails on a new
+declaration the catalog does not cover, or a removed one it still claims. See
+[Surfaces](surfaces.md#gate).
 
 ### `sync`
 

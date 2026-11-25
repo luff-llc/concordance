@@ -1,0 +1,98 @@
+[
+  {
+    "id": "widgets.now-playing",
+    "title": "Show the playing episode in widgets",
+    "summary": "Show the playing episode in widgets.",
+    "surfaces": [
+      "home",
+      "widget.small",
+      "widget.medium",
+      "lock-screen",
+      "complication"
+    ],
+    "interactions": [
+      {
+        "trigger": "Open",
+        "result": "Show the playing episode in widgets"
+      }
+    ],
+    "states": [
+      "ready"
+    ],
+    "settings": [],
+    "data": {
+      "reads": [
+        "playback"
+      ],
+      "writes": []
+    },
+    "copy": [
+      "Show the playing episode in widgets"
+    ],
+    "accessibility": {
+      "label": "Show the playing episode in widgets",
+      "identifier": "",
+      "notes": []
+    },
+    "design": [],
+    "depends_on": [],
+    "impact": "high",
+    "platforms": {
+      "ios": {
+        "status": "implemented",
+        "source": [
+          "Widgets/NowPlayingWidget.swift#NowPlayingWidget"
+        ],
+        "surfaces": {
+          "widget.small": {
+            "status": "implemented",
+            "declared": [
+              "com.example.now-playing"
+            ]
+          },
+          "widget.medium": {
+            "status": "implemented",
+            "declared": [
+              "com.example.now-playing"
+            ]
+          },
+          "lock-screen": {
+            "status": "implemented",
+            "declared": [
+              "com.example.gone"
+            ]
+          },
+          "complication": {
+            "status": "implemented",
+            "declared": [
+              "com.example.watch-now-playing"
+            ]
+          }
+        }
+      },
+      "android": {
+        "status": "partial",
+        "gap": "Only the medium widget exists.",
+        "surfaces": {
+          "widget.small": {
+            "status": "missing",
+            "gap": "No 2×2 provider."
+          },
+          "widget.medium": {
+            "status": "implemented",
+            "declared": [
+              ".widget.NowPlayingWidgetReceiver"
+            ]
+          }
+        }
+      }
+    },
+    "acceptance": [
+      {
+        "given": "a show is playing",
+        "when": "the user looks",
+        "then": "Show the playing episode in widgets"
+      }
+    ]
+  }
+]

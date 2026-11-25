@@ -277,6 +277,11 @@ enum Command {
         #[arg(long)]
         today: Option<String>,
     },
+    /// System surfaces: what each app declares (widgets, controls, watch, car...).
+    Surfaces {
+        #[command(subcommand)]
+        action: SurfacesAction,
+    },
     /// String resources from an Apple string catalog.
     Strings {
         #[command(subcommand)]
@@ -334,6 +339,12 @@ enum Command {
         /// Include work held back by open blockers (marked in the title column).
         #[arg(long)]
         include_blocked: bool,
+        /// Only surface gaps on this `[surfaces]` ID.
+        #[arg(long, conflicts_with = "no_surfaces")]
+        surface: Option<String>,
+        /// Leave surface gaps out (the queue before surfaces existed).
+        #[arg(long)]
+        no_surfaces: bool,
     },
     /// List entries with changed baseline evidence and uncatalogued source changes.
     Drift {
@@ -432,6 +443,33 @@ enum AnchorsAction {
         #[arg(long)]
         platform: Option<String>,
     },
+}
+#[derive(Subcommand)]
+enum SurfacesAction {
+    /// List declared surfaces and compare them with the catalog. Exit 0 pass, 1 findings, 2 error.
+    Scan {
+        dir: PathBuf,
+        #[command(flatten)]
+        roots: Roots,
+        /// Platforms to scan (repeatable; default: every `[surface_scan]` platform).
+        #[arg(long)]
+        platform: Vec<String>,
+        /// Read files from this Git revision of each platform root instead of the working tree.
+        #[arg(long)]
+        revision: Option<String>,
+        #[arg(long)]
+        repo: Option<PathBuf>,
+        #[arg(long, value_enum, default_value = "markdown")]
+        format: ScanFormat,
+        /// Also fail on status disagreements and coarse matches.
+        #[arg(long)]
+        strict: bool,
+    },
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum ScanFormat {
+    Markdown,
+    Json,
 }
 #[derive(Subcommand)]
 enum StringsAction {
@@ -1003,6 +1041,7 @@ fn run(cli: Cli) -> Result<()> {
             type Outcome = (
                 Vec<concordance::ReleaseFinding>,
                 Option<concordance::VersionReport>,
+                Vec<concordance::SurfaceReleaseFinding>,
             );
             let outcome = (|| -> Result<Outcome> {
                 let catalog = Catalog::load(&dir)?;
@@ -1020,9 +1059,10 @@ fn run(cli: Cli) -> Result<()> {
                     options.repo = repo;
                     Some(catalog.version_check(&options, Some(&platform))?)
                 };
-                Ok((findings, version))
+                let surfaces = catalog.gate_release_surfaces(&platform);
+                Ok((findings, version, surfaces))
             })();
-            let (findings, version) = match outcome {
+            let (findings, version, surface_gaps) = match outcome {
                 Ok(outcome) => outcome,
                 Err(error) => {
                     eprintln!("error: {error}");
@@ -1048,11 +1088,70 @@ fn run(cli: Cli) -> Result<()> {
                     );
                 }
             }
+            if !surface_gaps.is_empty() {
+                println!("\nFailed: {} gap(s) on surfaces with `release = \"required\"`.\n\n| Record | Surface | Status |\n| --- | --- | --- |", surface_gaps.len());
+                for g in &surface_gaps {
+                    println!("| `{}` | `{}` | {} |", g.label, g.surface, g.status);
+                }
+            }
             if let Some(version) = &version {
                 print!("\n{}", version.markdown());
             }
-            if !findings.is_empty() || version_failed {
+            if !findings.is_empty() || version_failed || !surface_gaps.is_empty() {
                 std::process::exit(1);
+            }
+        }
+        Command::Surfaces {
+            action:
+                SurfacesAction::Scan {
+                    dir,
+                    roots,
+                    platform,
+                    revision,
+                    repo,
+                    format,
+                    strict,
+                },
+        } => {
+            let outcome = (|| -> Result<Vec<concordance::ScanReport>> {
+                let catalog = Catalog::load(&dir)?;
+                let mut options = roots.options(&catalog)?;
+                options.repo = repo;
+                let platforms: Vec<String> = if platform.is_empty() {
+                    catalog.config.surface_scan.keys().cloned().collect()
+                } else {
+                    platform
+                };
+                if platforms.is_empty() {
+                    return Err("no [surface_scan.<platform>] sections in catalog.toml".into());
+                }
+                let mut reports = Vec::new();
+                for p in &platforms {
+                    reports.push(catalog.scan_surfaces(&options, p, revision.as_deref())?);
+                }
+                if matches!(format, ScanFormat::Markdown) {
+                    for (i, r) in reports.iter().enumerate() {
+                        if i > 0 {
+                            println!();
+                        }
+                        print!("{}", r.markdown(catalog.config.report.label(&r.platform)));
+                    }
+                }
+                Ok(reports)
+            })();
+            match outcome {
+                Ok(reports) => {
+                    if matches!(format, ScanFormat::Json) {
+                        println!("{}", serde_json::to_string_pretty(&reports)?);
+                    }
+                    if reports.iter().any(|r| r.failed(strict)) {
+                        std::process::exit(1);
+                    }
+                }
+                Err(error) => {
+                    eprintln!("error: {error}");
+                    std::process::exit(2);
+                }
             }
         }
         Command::Strings {
@@ -1299,6 +1398,7 @@ fn run(cli: Cli) -> Result<()> {
             let options = roots.options(&ui.catalog)?;
             let out = out.unwrap_or_else(|| dir.join("parity.md"));
             let report = ui.ui_report_at(&captures, baseline, Some(&out))?
+                + &ui.catalog.surfaces_section()
                 + &ui.catalog.evidence_roots_section(&options)?
                 + &ui.catalog.baseline_drift_section(&options)?
                 + &debt;
@@ -1338,9 +1438,16 @@ fn run(cli: Cli) -> Result<()> {
             limit,
             details,
             include_blocked,
+            surface,
+            no_surfaces,
         } => {
             let catalog = Catalog::load(dir)?;
             roots.options(&catalog)?;
+            let filter = match (surface, no_surfaces) {
+                (Some(s), _) => concordance::SurfaceFilter::Only(s),
+                (None, true) => concordance::SurfaceFilter::None,
+                (None, false) => concordance::SurfaceFilter::All,
+            };
             let blocked = catalog.blocked_entries(&platform);
             let mark = |keys: Option<&std::collections::BTreeSet<String>>| -> String {
                 keys.filter(|k| !k.is_empty())
@@ -1352,12 +1459,13 @@ fn run(cli: Cli) -> Result<()> {
                     })
                     .unwrap_or_default()
             };
-            for entry in catalog.next_filtered(
+            for entry in catalog.next_queue(
                 &platform,
                 area.as_deref(),
                 limit,
                 details,
                 include_blocked,
+                &filter,
             )? {
                 println!(
                     "{}\t{}\t{}\t{}{}",
@@ -1367,6 +1475,27 @@ fn run(cli: Cli) -> Result<()> {
                     entry.title,
                     mark(blocked.get(&entry.id))
                 );
+                // Same four columns: entry@surface, surface, status, surface title.
+                for cell in catalog.queued_surface_gaps(entry, &platform, &filter, include_blocked)
+                {
+                    let keys: std::collections::BTreeSet<String> = cell
+                        .record
+                        .map(|r| {
+                            catalog
+                                .open_blockers(r)
+                                .into_iter()
+                                .map(str::to_owned)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    println!(
+                        "{}\tsurface\t{}\t{}{}",
+                        cell.label(),
+                        cell.status(),
+                        catalog.config.surfaces[cell.surface].title(cell.surface),
+                        mark(Some(&keys))
+                    );
+                }
                 if details {
                     // Same four columns: entry#detail, detail:kind, status, spec with numbers.
                     for detail in catalog.open_details(entry, &platform) {

@@ -668,7 +668,14 @@ fn reviewed_unchanged_closes_a_stale_detail_back_to_its_previous_status() {
     f.config("[baselines.ios]\ncommit = 'abcdef1234567'\n");
     let dir = f.0.to_str().expect("path");
     let set = Command::new(env!("CARGO_BIN_EXE_concordance"))
-        .args(["set", dir, "reader.native-menu#title-copy", "--platform", "android", "--reviewed-unchanged"])
+        .args([
+            "set",
+            dir,
+            "reader.native-menu#title-copy",
+            "--platform",
+            "android",
+            "--reviewed-unchanged",
+        ])
         .output()
         .expect("CLI");
     assert!(set.status.success(), "{}", text(&set));

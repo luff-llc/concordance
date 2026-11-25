@@ -14,6 +14,13 @@ pub mod log;
 mod log_fold;
 pub use log_fold::Derivation;
 mod scan_git;
+mod surface_scan;
+mod surfaces;
+pub use surface_scan::{
+    parse_manifest, parse_plist, parse_swift, scan_platform, Declaration, Files, Finding,
+    FindingKind, Mapped, ScanReport,
+};
+pub use surfaces::{default_signals, SignalPattern, SurfaceCell, SurfaceReleaseFinding};
 mod set;
 mod suite;
 mod track;
@@ -45,6 +52,14 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+
+/// Which surface gaps `next_queue` adds to the work queue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SurfaceFilter {
+    None,
+    All,
+    Only(String),
+}
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 fn fail<T>(message: impl Into<String>) -> Result<T> {
@@ -320,6 +335,7 @@ impl Catalog {
         }
         catalog.validate_retired(&mut report)?;
         catalog.check_work_state(&mut report);
+        catalog.check_surfaces(&mut report);
         catalog.load_tracker(&mut report);
         report.sort();
         Ok((catalog, report))
@@ -535,7 +551,8 @@ impl Catalog {
         memo
     }
 
-    /// Like `next_with`; blocked work is skipped unless `include_blocked`.
+    /// Like `next_with`; blocked work is skipped unless `include_blocked`. Surface gaps are
+    /// not considered (see `next_queue`).
     pub fn next_filtered(
         &self,
         platform: &str,
@@ -544,12 +561,67 @@ impl Catalog {
         details: bool,
         include_blocked: bool,
     ) -> Result<Vec<&Entry>> {
+        self.next_queue(
+            platform,
+            area,
+            limit,
+            details,
+            include_blocked,
+            &SurfaceFilter::None,
+        )
+    }
+
+    /// Open surface records an entry contributes to the queue under `filter`.
+    pub fn queued_surface_gaps<'a>(
+        &'a self,
+        entry: &'a Entry,
+        platform: &'a str,
+        filter: &SurfaceFilter,
+        include_blocked: bool,
+    ) -> Vec<SurfaceCell<'a>> {
+        if matches!(filter, SurfaceFilter::None) {
+            return Vec::new();
+        }
+        self.surface_gaps(entry, platform)
+            .into_iter()
+            .filter(|c| match filter {
+                SurfaceFilter::Only(s) => c.surface == s,
+                _ => true,
+            })
+            .filter(|c| {
+                include_blocked || c.record.is_none_or(|r| self.open_blockers(r).is_empty())
+            })
+            .collect()
+    }
+
+    /// The work queue: entry gaps, open details with `details`, and surface gaps per
+    /// `surfaces`. With `SurfaceFilter::Only`, only entries with a gap on that surface.
+    pub fn next_queue(
+        &self,
+        platform: &str,
+        area: Option<&str>,
+        limit: usize,
+        details: bool,
+        include_blocked: bool,
+        surfaces: &SurfaceFilter,
+    ) -> Result<Vec<&Entry>> {
         if !self.config.platforms.contains_key(platform) {
             return fail(format!("unknown platform: {platform}"));
         }
         if area.is_some_and(|area| !self.area_files.contains_key(area)) {
             return fail(format!("unknown area: {}", area.unwrap_or_default()));
         }
+        if let SurfaceFilter::Only(s) = surfaces {
+            if !self.config.surfaces.contains_key(s) {
+                return fail(format!("unknown surface: {s}"));
+            }
+        }
+        let only = matches!(surfaces, SurfaceFilter::Only(_));
+        let surface_open = |e: &Entry, blocked_ok: bool| {
+            !self
+                .queued_surface_gaps(e, platform, surfaces, blocked_ok)
+                .is_empty()
+        };
         let mut selected = BTreeSet::new();
         let mut pending: Vec<_> = self
             .entries
@@ -557,10 +629,14 @@ impl Catalog {
             .filter(|e| {
                 area.is_none_or(|a| self.areas[&e.id] == a)
                     && e.platforms.get(platform).is_some_and(|p| {
+                        if only {
+                            return surface_open(e, true);
+                        }
                         p.status.is_gap()
                             || (details
                                 && p.status == Status::Implemented
                                 && !self.open_details(e, platform).is_empty())
+                            || surface_open(e, true)
                     })
             })
             .map(|e| e.id.clone())
@@ -584,7 +660,11 @@ impl Catalog {
         selected.retain(|id| {
             let entry = &self.entries[id];
             let status = entry.platforms[platform].status;
-            !blocked.contains_key(id)
+            if only {
+                // Prerequisites stay only if they have their own gap on the surface.
+                return surface_open(entry, include_blocked);
+            }
+            let own = !blocked.contains_key(id)
                 && (status.is_gap()
                     || (details
                         && status == Status::Implemented
@@ -593,7 +673,10 @@ impl Catalog {
                                 || d.platforms
                                     .get(platform)
                                     .is_none_or(|p| self.open_blockers(p).is_empty())
-                        })))
+                        })));
+            // An entry that is done in the app but open on a surface: the surface record's
+            // own blockers decide, not the entry's.
+            own || (status == Status::Implemented && surface_open(entry, include_blocked))
         });
         Ok(self
             .dependency_order(Some(&selected))?

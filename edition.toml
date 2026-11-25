@@ -1,0 +1,19 @@
+# Concordance releases with Edition (https://github.com/luff-llc/edition).
+product = "concordance"
+
+[[version_files]]
+path = "Cargo.toml"
+after = "[package]"
+pattern = 'version = "{version}"'
+
+[[version_files]]
+path = "Cargo.lock"
+after = 'name = "concordance"'
+pattern = 'version = "{version}"'
+
+[remotes.origin]
+public = true
+
+[content]
+# Capture fixtures are generated test images; they hold no text to scan.
+allow_paths = ["tests/ui-fixtures/captures/*.png"]

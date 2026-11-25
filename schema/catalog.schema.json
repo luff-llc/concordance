@@ -132,6 +132,17 @@
         "reviewed_commit": {
           "$ref": "#/$defs/text",
           "description": "Baseline commit at which a reviewer confirmed no change was needed after a file-level evidence change."
+        },
+        "surfaces": {
+          "type": "object",
+          "description": "Per-surface records keyed by a [surfaces] ID the entry names (docs/surfaces.md).",
+          "additionalProperties": {
+            "$ref": "#/$defs/platform"
+          }
+        },
+        "declared": {
+          "$ref": "#/$defs/texts",
+          "description": "On a surface record: declaration IDs reported by `surfaces scan`; empty means a coarse match."
         }
       }
     },
