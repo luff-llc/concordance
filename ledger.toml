@@ -1,0 +1,24 @@
+# Edition ledger: what went where. Append-only; written by `edition`, never by hand.
+# A correction is a new entry; see Edition's docs/design.md.
+format = 2
+
+[[entry]]
+id = "2026-11-25T19:50:37Z/push-branch/526566fd6a/71d8b575"
+at = "2026-11-25T19:50:37Z"
+by = "Xinchen Liu"
+action = "push-branch"
+product = "concordance"
+ref = "release/0.3"
+commit = "526566fd6a8658e37db4d04c7850183fdf4812c8"
+tree = "9e982192a031c21b27375c187ff613fc206d3a52"
+result = "ok"
+prev = "0000000000000000000000000000000000000000000000000000000000000000"
+receipt = "71d8b575ad4a672c1e0418cc137df212"
+note = "cut the 0.3 line"
+command = [
+  "publish release/0.3: git -c core.hooksPath=/dev/null -c core.fsmonitor=false -c protocol.ext.allow=never push --atomic --force-with-lease=refs/heads/release/0.3: https://github.com/luff-llc/concordance.git 526566fd6a8658e37db4d04c7850183fdf4812c8:refs/heads/release/0.3",
+]
+steps = [
+  "create release/0.3 at 526566fd6a: exit 0",
+  "publish release/0.3: exit 0",
+]
