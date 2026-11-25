@@ -145,6 +145,9 @@ plist = ["App/Info.plist", "Watch/Info.plist"]
 # Declarations from files under these globs carry a context (used by signal patterns):
 # accessory widgets in the watch target are complications, not Lock Screen widgets.
 contexts = { watch = ["Watch/**"] }
+# Families assumed for a widget without .supportedFamilies, per context (default: system
+# small, medium and large).
+default_families = { watch = ["accessoryCircular", "accessoryRectangular", "accessoryInline", "accessoryCorner"] }
 # Files to leave out, for example sources built only for another platform (globs).
 exclude = ["Widgets/Spatial/**"]
 # Declaration IDs to leave out (globs), for example debug-only widgets.
@@ -186,8 +189,15 @@ directory listed. Paths are relative to the platform root; the scan refuses `..`
 | `android.complication` | `<service>` handling `android.support.wearable.complications.ACTION_COMPLICATION_UPDATE_REQUEST` | service name | |
 
 The Swift parser is a lexical scan: it skips comments and string contents when matching
-braces and resolves a `kind:` given as an identifier from `let`/`static let` string
-constants in the scanned files. A kind built at run time falls back to the struct name.
+braces. A `kind:` or `.supportedFamilies(...)` given as an identifier is resolved from
+`let`/`static let` constants in the scanned files: `Type.name` and `Self.name` from that
+type's body or extensions, a bare name from the widget's own body, its type, or a name
+defined only once across the files. A kind that does not resolve falls back to the struct
+name; families that do not resolve give one `unknown` declaration, which no default
+pattern maps, so it is reported as unmapped rather than dropped.
+
+Contexts match the file that declared a surface: for shortcuts, App Actions and Android
+Auto descriptors, the manifest that references the resource, not the resource itself.
 
 ### Signals
 
@@ -246,7 +256,9 @@ both sides of the range (files are read from Git at `--base` and `--head`) and f
 - a declaration present at base is gone at head while a record still claims it (exact
   `declared` match, or a coarse record whose surface has no declaration left).
 
-With `--patch`, the working tree is scanned as head and `HEAD` as base. Declarations that
+With `--patch`, the working tree is scanned as head and `HEAD` as base, and only
+declarations from files the patch touches count as new, so other uncommitted work in a
+shared checkout is not blamed on the patch. Declarations that
 already existed are reported by `surfaces scan`, not the gate, so a catalog can adopt
 surfaces gradually. The `Catalog: none — <reason>` trailer waives surface findings too;
 the report still lists them.

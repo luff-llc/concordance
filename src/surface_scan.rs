@@ -37,12 +37,20 @@ impl Files {
                     found
                 }
                 Self::Git { root, revision } => {
-                    let mut args = vec!["ls-tree", "-r", "--name-only", revision.as_str(), "--"];
+                    let mut args = vec![
+                        "ls-tree",
+                        "-r",
+                        "-z",
+                        "--name-only",
+                        revision.as_str(),
+                        "--",
+                    ];
                     if !prefix.is_empty() {
                         args.push(prefix.as_str());
                     }
                     String::from_utf8_lossy(&git(root, &args)?)
-                        .lines()
+                        .split('\0')
+                        .filter(|p| !p.is_empty())
                         .map(str::to_owned)
                         .collect()
                 }
@@ -122,6 +130,12 @@ pub struct Declaration {
     pub id: String,
     pub file: String,
     pub line: usize,
+    /// The file that declared it (a manifest, for resources it references); contexts match it.
+    #[serde(skip)]
+    pub origin: String,
+    /// A widget family from the system defaults (no `.supportedFamilies`).
+    #[serde(skip)]
+    pub defaulted: bool,
 }
 impl Declaration {
     /// `signal[:detail][@context]#id`, stable across line moves.
@@ -148,6 +162,8 @@ fn decl(signal: &str, detail: Option<&str>, id: &str, file: &str, line: usize) -
         id: id.into(),
         file: file.into(),
         line,
+        origin: file.into(),
+        defaulted: false,
     }
 }
 
@@ -251,13 +267,106 @@ fn matching_brace(code: &str, open: usize) -> usize {
     b.len()
 }
 
-fn swift_constants(code: &str, out: &mut BTreeMap<String, String>) {
+/// String and widget-family constants from the scanned Swift files, by name and by
+/// `Type.name` (the enclosing type or extension).
+#[derive(Debug, Default)]
+pub struct SwiftSymbols {
+    /// Unqualified name -> value, `None` when files disagree.
+    strings: BTreeMap<String, Option<String>>,
+    qualified: BTreeMap<String, String>,
+    families: BTreeMap<String, Option<Vec<String>>>,
+    qualified_families: BTreeMap<String, Vec<String>>,
+}
+fn string_constants(code: &str) -> Vec<(String, String)> {
     re!(r#"\b(?:let|var)\s+([A-Za-z_]\w*)\s*(?::\s*String\s*)?=\s*"([^"\\]*)""#)
         .captures_iter(code)
-        .for_each(|c| {
-            out.entry(c[1].to_owned())
-                .or_insert_with(|| c[2].to_owned());
-        });
+        .map(|c| (c[1].to_owned(), c[2].to_owned()))
+        .collect()
+}
+fn family_constants(code: &str) -> Vec<(String, Vec<String>)> {
+    re!(r"\b(?:let|var)\s+([A-Za-z_]\w*)\s*(?::\s*\[\s*WidgetFamily\s*\]\s*)?=\s*\[([^\]]*)\]")
+        .captures_iter(code)
+        .filter_map(|c| {
+            let list = family_tokens(&c[2]);
+            (!list.is_empty()).then(|| (c[1].to_owned(), list))
+        })
+        .collect()
+}
+fn family_tokens(code: &str) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    re!(r"\.(system\w+|accessory\w+)\b")
+        .captures_iter(code)
+        .map(|c| c[1].to_owned())
+        .filter(|f| FAMILIES.contains(&f.as_str()) && seen.insert(f.clone()))
+        .collect()
+}
+fn unique<T: PartialEq + Clone>(map: &mut BTreeMap<String, Option<T>>, name: String, value: T) {
+    map.entry(name)
+        .and_modify(|v| {
+            if v.as_ref() != Some(&value) {
+                *v = None;
+            }
+        })
+        .or_insert(Some(value));
+}
+/// Type and extension blocks: (type name, body including braces, offset of the header).
+fn type_blocks(code: &str) -> Vec<(String, &str, usize)> {
+    re!(r"\b(?:struct|class|enum|actor|extension)\s+([A-Za-z_][\w.]*)[^{;=()]*\{")
+        .captures_iter(code)
+        .filter_map(|c| {
+            let whole = c.get(0)?;
+            let open = whole.end() - 1;
+            let name = c[1].rsplit('.').next().unwrap_or(&c[1]).to_owned();
+            Some((name, &code[open..matching_brace(code, open)], whole.start()))
+        })
+        .collect()
+}
+impl SwiftSymbols {
+    pub fn add(&mut self, text: &str) {
+        let code = strip_swift_comments(text);
+        for (name, value) in string_constants(&code) {
+            unique(&mut self.strings, name, value);
+        }
+        for (name, value) in family_constants(&code) {
+            unique(&mut self.families, name, value);
+        }
+        for (owner, body, _) in type_blocks(&code) {
+            for (name, value) in string_constants(body) {
+                self.qualified
+                    .entry(format!("{owner}.{name}"))
+                    .or_insert(value);
+            }
+            for (name, value) in family_constants(body) {
+                self.qualified_families
+                    .entry(format!("{owner}.{name}"))
+                    .or_insert(value);
+            }
+        }
+    }
+    /// Resolve an identifier (`name`, `Self.name`, `Type.name`) used inside `owner`'s body.
+    fn lookup<T: Clone>(
+        ident: &str,
+        owner: &str,
+        local: &BTreeMap<String, T>,
+        qualified: &BTreeMap<String, T>,
+        global: &BTreeMap<String, Option<T>>,
+    ) -> Option<T> {
+        let parts: Vec<&str> = ident.split('.').collect();
+        let name = *parts.last()?;
+        match parts.len() {
+            1 => local
+                .get(name)
+                .or_else(|| qualified.get(&format!("{owner}.{name}")))
+                .cloned()
+                .or_else(|| global.get(name).cloned().flatten()),
+            _ => {
+                let ty = parts[parts.len() - 2];
+                let ty = if ty == "Self" { owner } else { ty };
+                // A qualified name never falls back to another type's constant.
+                qualified.get(&format!("{ty}.{name}")).cloned()
+            }
+        }
+    }
 }
 
 const FAMILIES: &[&str] = &[
@@ -272,74 +381,75 @@ const FAMILIES: &[&str] = &[
     "accessoryCorner",
 ];
 
-/// The first `kind:` argument that resolves: a literal, or a string constant (from the
-/// type's own body first, then from every scanned file).
-fn resolve_kind(body: &str, constants: &BTreeMap<String, String>) -> Option<String> {
-    let mut local = BTreeMap::new();
-    swift_constants(body, &mut local);
+/// The first `kind:` argument that resolves: a literal, or a string constant.
+fn resolve_kind(body: &str, owner: &str, symbols: &SwiftSymbols) -> Option<String> {
+    let local: BTreeMap<String, String> = string_constants(body).into_iter().collect();
     re!(r#"\bkind\s*:\s*(?:"([^"\\]*)"|([A-Za-z_][\w.]*))"#)
         .captures_iter(body)
         .find_map(|c| {
             if let Some(literal) = c.get(1) {
                 return Some(literal.as_str().to_owned());
             }
-            let ident = c.get(2)?.as_str();
-            let last = ident.rsplit('.').next().unwrap_or(ident);
-            local.get(last).or_else(|| constants.get(last)).cloned()
+            SwiftSymbols::lookup(
+                c.get(2)?.as_str(),
+                owner,
+                &local,
+                &symbols.qualified,
+                &symbols.strings,
+            )
         })
 }
 
-fn families(body: &str) -> Vec<String> {
-    let token = re!(r"\.(system\w+|accessory\w+)\b");
-    let known = |s: &str| FAMILIES.contains(&s);
-    if let Some(m) = re!(r"\.supportedFamilies\s*\(").find(body) {
-        // The argument list up to the matching parenthesis.
-        let rest = &body[m.end()..];
-        let mut depth = 1;
-        let mut end = rest.len();
-        for (i, c) in rest.char_indices() {
-            match c {
-                '(' => depth += 1,
-                ')' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = i;
-                        break;
-                    }
+/// Families from `.supportedFamilies(...)`: listed tokens, a resolved constant, or tokens
+/// in the body; `unknown` when none resolve. `None` when the modifier is absent (defaults).
+fn families(body: &str, owner: &str, symbols: &SwiftSymbols) -> Option<Vec<String>> {
+    let m = re!(r"\.supportedFamilies\s*\(").find(body)?;
+    let rest = &body[m.end()..];
+    let mut depth = 1;
+    let mut end = rest.len();
+    for (i, c) in rest.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = i;
+                    break;
                 }
-                _ => {}
             }
+            _ => {}
         }
-        let mut list: Vec<String> = token
-            .captures_iter(&rest[..end])
-            .map(|c| c[1].to_owned())
-            .filter(|f| known(f))
-            .collect();
-        if list.is_empty() {
-            // A families constant: take every family token in the widget's body.
-            list = token
-                .captures_iter(body)
-                .map(|c| c[1].to_owned())
-                .filter(|f| known(f))
-                .collect();
-        }
-        let mut seen = BTreeSet::new();
-        list.retain(|f| seen.insert(f.clone()));
-        return list;
     }
-    vec![
-        "systemSmall".into(),
-        "systemMedium".into(),
-        "systemLarge".into(),
-    ]
+    let argument = rest[..end].trim();
+    let listed = family_tokens(argument);
+    if !listed.is_empty() {
+        return Some(listed);
+    }
+    let local: BTreeMap<String, Vec<String>> = family_constants(body).into_iter().collect();
+    let ident = argument.trim_start_matches('.');
+    if re!(r"^[A-Za-z_][\w.]*$").is_match(ident) {
+        if let Some(found) = SwiftSymbols::lookup(
+            ident,
+            owner,
+            &local,
+            &symbols.qualified_families,
+            &symbols.families,
+        ) {
+            return Some(found);
+        }
+    }
+    let tokens = family_tokens(body);
+    Some(if tokens.is_empty() {
+        vec!["unknown".into()]
+    } else {
+        tokens
+    })
 }
 
-/// Declarations in one Swift file. `constants` holds string constants from every file.
-pub fn parse_swift(
-    file: &str,
-    text: &str,
-    constants: &BTreeMap<String, String>,
-) -> Vec<Declaration> {
+const DEFAULT_FAMILIES: &[&str] = &["systemSmall", "systemMedium", "systemLarge"];
+
+/// Declarations in one Swift file. `symbols` holds constants from every scanned file.
+pub fn parse_swift(file: &str, text: &str, symbols: &SwiftSymbols) -> Vec<Declaration> {
     let code = strip_swift_comments(text);
     let mut out = Vec::new();
     let types = re!(
@@ -369,14 +479,23 @@ pub fn parse_swift(
             {
                 out.push(decl("apple.live-activity", None, &a[1], file, line));
             } else {
-                let kind = resolve_kind(body, constants).unwrap_or_else(|| name.to_owned());
-                for family in families(body) {
-                    out.push(decl("apple.widget", Some(&family), &kind, file, line));
+                let kind = resolve_kind(body, name, symbols).unwrap_or_else(|| name.to_owned());
+                let (list, defaulted) = match families(body, name, symbols) {
+                    Some(list) => (list, false),
+                    None => (
+                        DEFAULT_FAMILIES.iter().map(|f| (*f).to_owned()).collect(),
+                        true,
+                    ),
+                };
+                for family in list {
+                    let mut d = decl("apple.widget", Some(&family), &kind, file, line);
+                    d.defaulted = defaulted;
+                    out.push(d);
                 }
             }
         }
         if has("ControlWidget") {
-            let kind = resolve_kind(body, constants).unwrap_or_else(|| name.to_owned());
+            let kind = resolve_kind(body, name, symbols).unwrap_or_else(|| name.to_owned());
             out.push(decl("apple.control", None, &kind, file, line));
         }
         if has("AppShortcutsProvider") {
@@ -862,12 +981,16 @@ pub fn parse_manifest(file: &str, text: &str, res: &[String], files: &Files) -> 
                     let xml = parse_xml(&xml);
                     for s in xml.descendants("shortcut") {
                         if let Some(id) = s.attr("android:shortcutId") {
-                            out.push(decl("android.shortcut", None, id, &path, s.line));
+                            let mut d = decl("android.shortcut", None, id, &path, s.line);
+                            d.origin = file.to_owned();
+                            out.push(d);
                         }
                     }
                     for c in xml.descendants("capability") {
                         if let Some(id) = c.attr(ANDROID_NAME) {
-                            out.push(decl("android.app-action", None, id, &path, c.line));
+                            let mut d = decl("android.app-action", None, id, &path, c.line);
+                            d.origin = file.to_owned();
+                            out.push(d);
                         }
                     }
                 }
@@ -889,7 +1012,9 @@ pub fn parse_manifest(file: &str, text: &str, res: &[String], files: &Files) -> 
             out.push(decl("android.car", None, resource, file, application.line));
         }
         for (use_name, line, path) in uses {
-            out.push(decl("android.car", Some(&use_name), &use_name, &path, line));
+            let mut d = decl("android.car", Some(&use_name), &use_name, &path, line);
+            d.origin = file.to_owned();
+            out.push(d);
         }
     }
     out
@@ -915,15 +1040,15 @@ pub fn scan_platform(config: &SurfaceScanConfig, files: &Files) -> Result<Vec<De
     };
     let swift = list(&config.swift)?;
     let mut sources = Vec::new();
-    let mut constants = BTreeMap::new();
+    let mut symbols = SwiftSymbols::default();
     for path in &swift {
         if let Some(text) = files.read(path) {
-            swift_constants(&strip_swift_comments(&text), &mut constants);
+            symbols.add(&text);
             sources.push((path, text));
         }
     }
     for (path, text) in &sources {
-        out.extend(parse_swift(path, text, &constants));
+        out.extend(parse_swift(path, text, &symbols));
     }
     for path in list(&config.plist)? {
         if let Some(text) = files.read(&path) {
@@ -939,9 +1064,35 @@ pub fn scan_platform(config: &SurfaceScanConfig, files: &Files) -> Result<Vec<De
         d.context = config
             .contexts
             .iter()
-            .find(|(_, globs)| globs.iter().any(|g| glob(g.as_bytes(), d.file.as_bytes())))
+            .find(|(_, globs)| {
+                globs
+                    .iter()
+                    .any(|g| glob(g.as_bytes(), d.origin.as_bytes()))
+            })
             .map(|(name, _)| name.clone());
     }
+    // Widgets without `.supportedFamilies` in a context with its own defaults (watchOS).
+    let mut expanded = Vec::with_capacity(out.len());
+    for d in out {
+        let defaults = d
+            .context
+            .as_ref()
+            .filter(|_| d.defaulted)
+            .and_then(|c| config.default_families.get(c));
+        match defaults {
+            Some(families) => {
+                if d.detail.as_deref() == Some(DEFAULT_FAMILIES[0]) {
+                    for family in families {
+                        let mut copy = d.clone();
+                        copy.detail = Some(family.clone());
+                        expanded.push(copy);
+                    }
+                }
+            }
+            None => expanded.push(d),
+        }
+    }
+    let mut out = expanded;
     out.retain(|d| !config.ignore.iter().any(|g| wildcard(g, &d.id)));
     out.sort();
     out.dedup_by(|a, b| a.key() == b.key());
@@ -994,6 +1145,9 @@ pub struct Finding {
     /// The declaration key behind the finding, when there is one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub declaration: Option<String>,
+    /// For a no-longer-declared exact record: the `declared` ID that is gone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared_id: Option<String>,
     pub message: String,
 }
 
@@ -1146,6 +1300,7 @@ impl Catalog {
                     surface: None,
                     location,
                     declaration: Some(d.key()),
+                    declared_id: None,
                     message: "matches no declared surface; add one to [surfaces] (or a signals pattern), or ignore it".into(),
                 });
                 continue;
@@ -1184,6 +1339,7 @@ impl Catalog {
                         surface: Some(surface.clone()),
                         location: location.clone(),
                         declaration: Some(d.key()),
+                        declared_id: None,
                         message,
                     });
                     continue;
@@ -1195,6 +1351,7 @@ impl Catalog {
                         surface: Some(surface.clone()),
                         location: location.clone(),
                         declaration: Some(d.key()),
+                        declared_id: None,
                         message: format!(
                             "covered only by records without declared: {}",
                             coarse
@@ -1213,6 +1370,7 @@ impl Catalog {
                             surface: Some(surface.clone()),
                             location: location.clone(),
                             declaration: Some(d.key()),
+                            declared_id: None,
                             message: format!(
                                 "recorded {} on {platform}, but `{}` is declared",
                                 c.record.status.as_str(),
@@ -1251,6 +1409,7 @@ impl Catalog {
                         surface: Some(c.surface.to_owned()),
                         location: None,
                         declaration: None,
+                        declared_id: None,
                         message: format!(
                             "recorded {} on {platform}, but nothing declares `{}`",
                             c.record.status.as_str(),
@@ -1267,6 +1426,7 @@ impl Catalog {
                             surface: Some(c.surface.to_owned()),
                             location: None,
                             declaration: None,
+                            declared_id: Some(id.clone()),
                             message: format!(
                                 "declared `{id}` is not declared for `{}` on {platform}",
                                 c.surface
@@ -1358,9 +1518,9 @@ struct Shortcuts: AppShortcutsProvider {
 final class CarScene: UIResponder, CPTemplateApplicationSceneDelegate {}
 @main struct MacApp: App { var body: some Scene { MenuBarExtra("Player", systemImage: "play") { Text("x") } } }
 "#;
-        let mut constants = BTreeMap::new();
-        swift_constants(&strip_swift_comments(text), &mut constants);
-        let keys: Vec<String> = parse_swift("W.swift", text, &constants)
+        let mut symbols = SwiftSymbols::default();
+        symbols.add(text);
+        let keys: Vec<String> = parse_swift("W.swift", text, &symbols)
             .iter()
             .map(Declaration::key)
             .collect();
@@ -1379,6 +1539,49 @@ final class CarScene: UIResponder, CPTemplateApplicationSceneDelegate {}
             "apple.menu-bar#Player",
         ];
         assert_eq!(keys, expected);
+    }
+
+    #[test]
+    fn qualified_constants_and_family_constants() {
+        let other = r#"struct WatchNowPlaying: Widget {
+    static let kind = "com.example.watch"
+    var body: some WidgetConfiguration { StaticConfiguration(kind: Self.kind, provider: P()) { _ in V() }.supportedFamilies([.accessoryCircular]) }
+}"#;
+        let text = r#"struct UpNextWidget: Widget {
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: UpNextWidget.kind, provider: P()) { _ in V() }
+            .supportedFamilies(UpNextWidget.families)
+    }
+}
+extension UpNextWidget {
+    static let kind = "com.example.upnext"
+    static let families: [WidgetFamily] = [.systemSmall, .systemLarge]
+}
+struct Opaque: Widget {
+    var body: some WidgetConfiguration {
+        StaticConfiguration(kind: Elsewhere.kind, provider: P()) { _ in V() }.supportedFamilies(Elsewhere.families)
+    }
+}
+"#;
+        let mut symbols = SwiftSymbols::default();
+        symbols.add(other);
+        symbols.add(text);
+        let keys: Vec<String> = parse_swift("U.swift", text, &symbols)
+            .iter()
+            .map(Declaration::key)
+            .collect();
+        // Unresolvable names fall back to the struct name and an `unknown` family.
+        let expected = [
+            "apple.widget:systemSmall#com.example.upnext",
+            "apple.widget:systemLarge#com.example.upnext",
+            "apple.widget:unknown#Opaque",
+        ];
+        assert_eq!(keys, expected);
+        let watch: Vec<String> = parse_swift("W.swift", other, &symbols)
+            .iter()
+            .map(Declaration::key)
+            .collect();
+        assert_eq!(watch, ["apple.widget:accessoryCircular#com.example.watch"]);
     }
 
     #[test]

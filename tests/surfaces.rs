@@ -428,6 +428,27 @@ fn set_edits_surface_records() {
         value[0]["platforms"]["android"]["surfaces"]["complication"],
         json!({"status": "missing", "gap": "No Wear OS complication."})
     );
+    // A surface record never invents the entry's own platform record.
+    f.mutate("car", |v| {
+        v[0]["platforms"]
+            .as_object_mut()
+            .expect("platforms")
+            .remove("android");
+    });
+    let output = f.cli(&[
+        "set",
+        "car.browse@car",
+        "--platform",
+        "android",
+        "--status",
+        "implemented",
+    ]);
+    assert_ne!(output.status.code(), Some(0), "{}", text(&output));
+    assert!(
+        text(&output).contains("has no android record"),
+        "{}",
+        text(&output)
+    );
     // A surface the entry does not name is refused and the edit reverted.
     let output = f.cli(&[
         "set",
@@ -453,6 +474,10 @@ fn validation_rejects_misplaced_surface_records() {
             json!({"widget.small": {"status": "missing"}});
         android["declared"] = json!(["x"]);
         v[0]["platforms"]["ios"]["surfaces"]["car"] = json!({"status": "missing"});
+        v[0]["details"] = json!([{
+            "id": "artwork", "kind": "layout", "spec": {"text": "Artwork fills the widget"},
+            "platforms": {"ios": {"status": "implemented", "surfaces": {"widget.small": {"status": "implemented"}}}}
+        }]);
     });
     let out = text(&f.cli(&["validate"]));
     for message in [
@@ -461,6 +486,7 @@ fn validation_rejects_misplaced_surface_records() {
         "surface records cannot nest",
         "declared belongs on surface records",
         "the entry's surfaces list does not name this surface",
+        "surface records belong to entry platform records, not details",
     ] {
         assert!(out.contains(message), "missing {message:?} in\n{out}");
     }
@@ -505,8 +531,8 @@ fn gate_fails_new_uncatalogued_and_removed_declarations() {
     let output = gate("ios", &base, &unrelated);
     assert_eq!(output.status.code(), Some(0), "{}", text(&output));
 
-    // A new widget kind fails until it is catalogued.
-    f.write("apple/Widgets/QueueWidget.swift", QUEUE_WIDGET);
+    // A new widget kind fails until it is catalogued (a non-ASCII file name, read from Git).
+    f.write("apple/Widgets/QueueWidgét.swift", QUEUE_WIDGET);
     let added = f.commit("Add a queue widget");
     let output = gate("ios", &unrelated, &added);
     assert_eq!(output.status.code(), Some(1), "{}", text(&output));
@@ -581,6 +607,45 @@ fn gate_fails_new_uncatalogued_and_removed_declarations() {
             "new, but recorded as not there: `widgets.now-playing@widget.small` (`widget.small`)"
         ) && out.contains("`android.widget:2x2#.widget.SmallWidget` is declared"),
         "{out}"
+    );
+}
+
+#[test]
+fn watch_widgets_default_to_configured_families() {
+    let f = Fixture::new();
+    let config = fs::read_to_string(f.path("catalog.toml")).expect("config");
+    fs::write(
+        f.path("catalog.toml"),
+        config.replace(
+            "contexts = { watch = [\"Watch/**\"] }",
+            "contexts = { watch = [\"Watch/**\"] }\ndefault_families = { watch = [\"accessoryCircular\", \"accessoryRectangular\"] }",
+        ),
+    )
+    .expect("config");
+    f.write(
+        "apple/Watch/Queue.swift",
+        "struct WatchQueue: Widget {\n    var body: some WidgetConfiguration {\n        StaticConfiguration(kind: \"com.example.watch-queue\", provider: P()) { _ in V() }\n    }\n}\n",
+    );
+    let (_, ios) = f.scan("ios");
+    let keys: BTreeSet<String> = ios["declarations"]
+        .as_array()
+        .expect("declarations")
+        .iter()
+        .filter(|d| d["id"] == "com.example.watch-queue")
+        .map(|d| {
+            format!(
+                "{} {}",
+                d["detail"].as_str().unwrap_or_default(),
+                d["surfaces"]
+            )
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        set(&[
+            "accessoryCircular [\"complication\"]",
+            "accessoryRectangular [\"complication\"]",
+        ])
     );
 }
 

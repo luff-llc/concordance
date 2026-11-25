@@ -551,6 +551,10 @@ pub struct SurfaceScanConfig {
     pub res: Vec<String>,
     /// Context name -> globs; declarations from matching files carry the context.
     pub contexts: BTreeMap<String, Vec<String>>,
+    /// Context name -> widget families assumed when a widget has no `.supportedFamilies`
+    /// (for example accessory families in a watch target). Otherwise system small, medium
+    /// and large.
+    pub default_families: BTreeMap<String, Vec<String>>,
     /// File globs to leave out (for example sources built only for another platform).
     pub exclude: Vec<String>,
     /// Declaration ID globs to leave out.

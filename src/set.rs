@@ -94,6 +94,11 @@ pub(crate) fn record_mut<'a>(
         .and_then(Value::as_mapping_mut)
         .ok_or("platforms is not a mapping")?;
     if !platforms.contains_key(platform) {
+        if surface.is_some() {
+            return fail(format!(
+                "{entry_id} has no {platform} record; set the entry's own status first"
+            ));
+        }
         let Some(status) = create else {
             return Ok(None);
         };

@@ -529,6 +529,15 @@ pub(crate) fn check_entry(entry: &Entry, report: &mut ValidationReport) {
         }
         for (platform, record) in &detail.platforms {
             check_platform(&label, platform, record, report);
+            if !record.surfaces.is_empty() || !record.declared.is_empty() {
+                report.error(
+                    "surfaces",
+                    &label,
+                    platform,
+                    "",
+                    "surface records belong to entry platform records, not details",
+                );
+            }
         }
         if let Some(m) = &detail.spec.motion {
             let numbers = m.response.is_some()

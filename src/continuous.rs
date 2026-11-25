@@ -508,11 +508,11 @@ impl Catalog {
             (!rest.is_empty()).then(|| rest.to_owned())
         });
         let surfaces = if self.config.surface_scan.contains_key(platform) {
-            let (head_rev, base_rev) = match input {
-                GateInput::Range { .. } => (Some(head.as_str()), base.as_str()),
-                GateInput::Patch { .. } => (None, "HEAD"),
+            let (head_rev, base_rev, touched) = match input {
+                GateInput::Range { .. } => (Some(head.as_str()), base.as_str(), None),
+                GateInput::Patch { .. } => (None, "HEAD", Some(changed.as_slice())),
             };
-            self.gate_surfaces(options, platform, head_rev, base_rev)?
+            self.gate_surfaces(options, platform, head_rev, base_rev, touched)?
         } else {
             Vec::new()
         };
@@ -539,11 +539,19 @@ impl Catalog {
         platform: &str,
         head: Option<&str>,
         base: &str,
+        touched: Option<&[String]>,
     ) -> Result<Vec<crate::Finding>> {
         use crate::FindingKind;
         let config = &self.config.surface_scan[platform];
         let head_decls =
             crate::scan_platform(config, &self.surface_files(options, platform, head)?)?;
+        // With a patch the working tree may hold other work: only declarations from files the
+        // patch touches count as new.
+        let in_patch: BTreeSet<String> = head_decls
+            .iter()
+            .filter(|d| touched.is_none_or(|t| t.iter().any(|p| *p == d.file || *p == d.origin)))
+            .map(crate::Declaration::key)
+            .collect();
         let base_decls =
             crate::scan_platform(config, &self.surface_files(options, platform, Some(base))?)?;
         let base_keys: BTreeSet<String> = base_decls.iter().map(crate::Declaration::key).collect();
@@ -563,7 +571,7 @@ impl Catalog {
             .filter(|f| {
                 f.declaration
                     .as_ref()
-                    .is_some_and(|d| !base_keys.contains(d))
+                    .is_some_and(|d| !base_keys.contains(d) && in_patch.contains(d))
             })
             .cloned()
             .collect();
@@ -590,30 +598,17 @@ impl Catalog {
             .filter(|f| f.kind == FindingKind::NoLongerDeclared)
         {
             let surface = f.surface.clone().unwrap_or_default();
-            let entry_record = self.surface_record(&f.subject, platform);
-            let was_there = match entry_record {
-                Some(r) if !r.declared.is_empty() => r
-                    .declared
-                    .iter()
-                    .any(|id| removed_ids.contains(&(surface.clone(), id.clone()))),
-                _ => removed_ids.iter().any(|(s, _)| *s == surface),
+            // An exact record: was this ID declared at base? A coarse one: did the change
+            // remove the surface's last declaration?
+            let was_there = match &f.declared_id {
+                Some(id) => removed_ids.contains(&(surface.clone(), id.clone())),
+                None => removed_ids.iter().any(|(s, _)| *s == surface),
             };
             if was_there {
                 out.push(f.clone());
             }
         }
         Ok(out)
-    }
-
-    /// The record behind an `entry@surface` label on a platform.
-    pub(crate) fn surface_record(&self, label: &str, platform: &str) -> Option<&crate::Platform> {
-        let (entry, surface) = label.split_once('@')?;
-        self.entries
-            .get(entry)?
-            .platforms
-            .get(platform)?
-            .surfaces
-            .get(surface)
     }
 
     /// Mark target records stale where the source platform's baseline evidence changed,
@@ -1058,7 +1053,11 @@ impl Catalog {
                 .flatten()
             {
                 if let Some(record) = stale(Some(inner)) {
-                    check(format!("{}@{surface}", entry.id), record, default_days);
+                    check(
+                        format!("{}@{surface}", entry.id),
+                        record,
+                        strictest.unwrap_or(default_days),
+                    );
                 }
             }
         }
