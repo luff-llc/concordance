@@ -111,6 +111,13 @@ pub struct Platform {
     /// A recorded, intended difference from the baseline (set with `set --intended`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intended_difference: Option<String>,
+    /// Per-surface records (`[surfaces]` IDs this entry names), keyed by surface ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub surfaces: BTreeMap<String, Platform>,
+    /// On a surface record: the declaration IDs `surfaces scan` reports for it (widget
+    /// kinds, shortcut types, receiver classes...). Empty means a coarse match.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared: Vec<String>,
     /// True when the record was copied whole from an inherited platform.
     #[serde(skip)]
     pub inherited: bool,
@@ -495,6 +502,59 @@ pub struct Config {
     /// `[tracker]`: release tag patterns for `log scan-git`.
     #[serde(default)]
     pub tracker: Option<crate::log::TrackerConfig>,
+    /// `[surfaces.<id>]`: system surfaces (widgets, controls, watch, car...) and the
+    /// platforms that can have each. See docs/surfaces.md.
+    #[serde(default)]
+    pub surfaces: BTreeMap<String, SurfaceConfig>,
+    /// `[surface_scan.<platform>]`: where `surfaces scan` and `gate` read declarations.
+    #[serde(default)]
+    pub surface_scan: BTreeMap<String, SurfaceScanConfig>,
+}
+
+/// One system surface a feature can reach.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SurfaceConfig {
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Catalog platforms that can have this surface.
+    pub platforms: Vec<String>,
+    /// Scanner signal patterns (`signal[:detail][@context]`); defaults for well-known IDs.
+    #[serde(default)]
+    pub signals: Option<Vec<String>>,
+    #[serde(default)]
+    pub release: SurfaceRelease,
+}
+impl SurfaceConfig {
+    pub fn title<'a>(&'a self, id: &'a str) -> &'a str {
+        self.title.as_deref().unwrap_or(id)
+    }
+}
+/// Whether a gap on the surface fails `gate-release`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SurfaceRelease {
+    #[default]
+    Optional,
+    Required,
+}
+
+/// Source globs (relative to the platform root) read by the declared-surface parsers.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SurfaceScanConfig {
+    pub swift: Vec<String>,
+    pub plist: Vec<String>,
+    pub manifests: Vec<String>,
+    /// Extra Android `res` directories searched after the one beside each manifest (for
+    /// Gradle source sets that share resources).
+    pub res: Vec<String>,
+    /// Context name -> globs; declarations from matching files carry the context.
+    pub contexts: BTreeMap<String, Vec<String>>,
+    /// File globs to leave out (for example sources built only for another platform).
+    pub exclude: Vec<String>,
+    /// Declaration ID globs to leave out.
+    pub ignore: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

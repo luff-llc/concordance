@@ -38,6 +38,8 @@ concordance rebase-anchors path/to/catalog --root ios=../apple-reference --to <s
 concordance gate path/to/catalog --platform ios --base <sha> --head <sha>
 concordance sync path/to/catalog --root ios=../apple-reference --platform-from ios --platform-to android --tasks-dir tasks --apply
 concordance gate-release path/to/catalog --platform android --max-age-days 7 --max-age-days-for copy=0
+concordance surfaces scan path/to/catalog --platform android
+concordance next path/to/catalog --platform android --surface widget.small
 concordance strings export path/to/catalog --from Localizable.xcstrings --keys-from-catalog --platform android --out app/src/main/res
 concordance review set ui-report detail.dark --verdict differs --note "Title wraps"
 concordance verify path/to/catalog --review ui-report/review.json --out proposal.yaml
@@ -61,6 +63,14 @@ one sorted report. External checkouts can be supplied with repeatable
 Declared external roots are optional unless `--require-roots` is set. Git baseline
 pins let `drift` identify entries whose evidence changed and uncatalogued source
 changes; parity reports also flag baseline drift when the checkout is available.
+
+Surfaces add a third dimension for what reaches the user outside the app: widget sizes,
+controls, quick actions, Siri and App Actions, watch apps and complications, the car, the
+menu bar and Live Activities. The catalog declares them, entries record a status per
+platform and surface, reports and `next` count them, and `surfaces scan` reads what each
+app actually declares (WidgetKit kinds and families, Info.plist, `AndroidManifest.xml`,
+`appwidget-provider` sizes, `shortcuts.xml`...) so `gate` fails a change that adds a
+surface without cataloguing it. See [Surfaces](docs/surfaces.md).
 
 Status records what is `implemented` (`shipped` is a deprecated alias); an optional `verification` record (reviewer,
 date, commits, captures, journeys) records independent proof, and `verified` is

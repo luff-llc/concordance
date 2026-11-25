@@ -1,0 +1,63 @@
+[
+  {
+    "id": "car.browse",
+    "title": "Browse the library in the car",
+    "summary": "Browse the library in the car.",
+    "surfaces": [
+      "car"
+    ],
+    "interactions": [
+      {
+        "trigger": "Open",
+        "result": "Browse the library in the car"
+      }
+    ],
+    "states": [
+      "ready"
+    ],
+    "settings": [],
+    "data": {
+      "reads": [
+        "playback"
+      ],
+      "writes": []
+    },
+    "copy": [
+      "Browse the library in the car"
+    ],
+    "accessibility": {
+      "label": "Browse the library in the car",
+      "identifier": "",
+      "notes": []
+    },
+    "design": [],
+    "depends_on": [],
+    "impact": "medium",
+    "platforms": {
+      "ios": {
+        "status": "implemented",
+        "surfaces": {
+          "car": {
+            "status": "implemented"
+          }
+        }
+      },
+      "android": {
+        "status": "implemented",
+        "surfaces": {
+          "car": {
+            "status": "missing",
+            "gap": "Android Auto browsing is not wired."
+          }
+        }
+      }
+    },
+    "acceptance": [
+      {
+        "given": "a show is playing",
+        "when": "the user looks",
+        "then": "Browse the library in the car"
+      }
+    ]
+  }
+]

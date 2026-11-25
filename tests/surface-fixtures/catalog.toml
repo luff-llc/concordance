@@ -1,0 +1,59 @@
+# A small two-platform app with widgets, shortcuts, a watch and the car.
+[platforms]
+ios = "apple"
+android = "android"
+
+[report]
+title = "Player native parity"
+area_order = ["widgets", "player", "car"]
+
+[surfaces."widget.small"]
+title = "Small widget"
+platforms = ["ios", "android"]
+
+[surfaces."widget.medium"]
+title = "Medium widget"
+platforms = ["ios", "android"]
+
+[surfaces."lock-screen"]
+title = "Lock Screen widget"
+platforms = ["ios"]
+
+[surfaces.complication]
+title = "Complication"
+platforms = ["ios", "android"]
+
+[surfaces."quick-action"]
+title = "Quick action"
+platforms = ["ios", "android"]
+
+[surfaces."app-shortcut"]
+title = "App shortcut"
+platforms = ["ios", "android"]
+
+[surfaces."watch-app"]
+title = "Watch app"
+platforms = ["ios", "android"]
+
+[surfaces."wear-tile"]
+title = "Wear OS tile"
+platforms = ["android"]
+
+[surfaces.car]
+title = "CarPlay and Android Auto"
+platforms = ["ios", "android"]
+release = "required"
+
+[surfaces.notification]
+title = "Notification"
+platforms = ["ios", "android"]
+
+[surface_scan.ios]
+swift = ["**/*.swift"]
+plist = ["App/Info.plist", "Watch/Info.plist"]
+contexts = { watch = ["Watch/**"] }
+ignore = ["DebugWidget"]
+
+[surface_scan.android]
+manifests = ["app/src/main/AndroidManifest.xml", "wear/src/main/AndroidManifest.xml"]
+contexts = { wear = ["wear/**"] }

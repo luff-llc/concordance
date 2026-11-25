@@ -23,7 +23,7 @@ pub const CLEARABLE: &[&str] = &[
 
 #[derive(Debug, Default, Clone)]
 pub struct SetRequest {
-    /// `entry.id`, `entry.id#detail` or `entry.id/detail`.
+    /// `entry.id`, `entry.id#detail`, `entry.id/detail` or `entry.id@surface`.
     pub target: String,
     pub platform: String,
     pub status: Option<Status>,
@@ -74,6 +74,7 @@ pub(crate) fn record_mut<'a>(
     value: &'a mut Value,
     entry_id: &str,
     detail_id: Option<&str>,
+    surface: Option<&str>,
     platform: &str,
     create: Option<Status>,
 ) -> Result<Option<&'a mut Mapping>> {
@@ -100,11 +101,40 @@ pub(crate) fn record_mut<'a>(
         record.insert(key("status"), key(status.as_str()));
         platforms.insert(key(platform), Value::Mapping(record));
     }
-    Ok(platforms.get_mut(platform).and_then(Value::as_mapping_mut))
+    let record = platforms.get_mut(platform).and_then(Value::as_mapping_mut);
+    let Some(surface) = surface else {
+        return Ok(record);
+    };
+    let record = record.ok_or("platform record is not a mapping")?;
+    if !record.contains_key("surfaces") {
+        if create.is_none() {
+            return Ok(None);
+        }
+        record.insert(key("surfaces"), Value::Mapping(Mapping::new()));
+    }
+    let surfaces = record
+        .get_mut("surfaces")
+        .and_then(Value::as_mapping_mut)
+        .ok_or("surfaces is not a mapping")?;
+    if !surfaces.contains_key(surface) {
+        let Some(status) = create else {
+            return Ok(None);
+        };
+        let mut inner = Mapping::new();
+        inner.insert(key("status"), key(status.as_str()));
+        surfaces.insert(key(surface), Value::Mapping(inner));
+    }
+    Ok(surfaces.get_mut(surface).and_then(Value::as_mapping_mut))
+}
+
+/// The surface of an `entry@surface` target.
+pub(crate) fn surface_of(target: &str) -> Option<&str> {
+    target.split_once('@').map(|(_, surface)| surface)
 }
 
 /// Split `entry`, `entry#detail` or `entry/detail`.
 pub(crate) fn split_target(target: &str) -> (&str, Option<&str>) {
+    let target = target.split_once('@').map_or(target, |(entry, _)| entry);
     match target.split_once(['#', '/']) {
         Some((entry, detail)) => (entry, Some(detail)),
         None => (target, None),
@@ -124,9 +154,14 @@ impl Catalog {
             }
         }
         let (entry_id, detail_id) = split_target(&request.target);
-        let label = match detail_id {
-            Some(d) => format!("{entry_id}#{d}"),
-            None => entry_id.to_owned(),
+        let surface = surface_of(&request.target);
+        if surface.is_some() && detail_id.is_some() {
+            return fail("surface records belong to entries, not details");
+        }
+        let label = match (detail_id, surface) {
+            (Some(d), _) => format!("{entry_id}#{d}"),
+            (None, Some(s)) => format!("{entry_id}@{s}"),
+            (None, None) => entry_id.to_owned(),
         };
         let (catalog, before) = Catalog::load_collect(directory)?;
         let Some(platform_config) = catalog.config.platforms.get(&request.platform) else {
@@ -163,6 +198,7 @@ impl Catalog {
                 value,
                 entry_id,
                 detail_id,
+                surface,
                 &request.platform,
                 request.status,
             )?

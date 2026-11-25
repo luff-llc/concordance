@@ -1,0 +1,77 @@
+[
+  {
+    "id": "player.resume",
+    "title": "Resume playback",
+    "summary": "Resume playback.",
+    "surfaces": [
+      "now-playing",
+      "quick-action",
+      "app-shortcut"
+    ],
+    "interactions": [
+      {
+        "trigger": "Open",
+        "result": "Resume playback"
+      }
+    ],
+    "states": [
+      "ready"
+    ],
+    "settings": [],
+    "data": {
+      "reads": [
+        "playback"
+      ],
+      "writes": []
+    },
+    "copy": [
+      "Resume playback"
+    ],
+    "accessibility": {
+      "label": "Resume playback",
+      "identifier": "",
+      "notes": []
+    },
+    "design": [],
+    "depends_on": [],
+    "impact": "medium",
+    "platforms": {
+      "ios": {
+        "status": "implemented",
+        "surfaces": {
+          "quick-action": {
+            "status": "implemented",
+            "declared": [
+              "com.example.resume"
+            ]
+          },
+          "app-shortcut": {
+            "status": "implemented",
+            "declared": [
+              "ResumeIntent"
+            ]
+          }
+        }
+      },
+      "android": {
+        "status": "implemented",
+        "surfaces": {
+          "quick-action": {
+            "status": "implemented"
+          },
+          "app-shortcut": {
+            "status": "missing",
+            "gap": "No App Actions yet."
+          }
+        }
+      }
+    },
+    "acceptance": [
+      {
+        "given": "a show is playing",
+        "when": "the user looks",
+        "then": "Resume playback"
+      }
+    ]
+  }
+]

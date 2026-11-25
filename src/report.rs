@@ -643,6 +643,6 @@ impl Catalog {
             }
         }
         lines.extend([String::new(), "## Evidence limits".into(), String::new(), format!("- {bl} entries without linked tests: {}.", baseline.iter().filter(|e| e.platforms[base].tests.is_empty()).count()), format!("- {tl} implemented/partial entries without linked tests: {}.", baseline.iter().filter(|e| matches!(e.platforms[target].status, Status::Implemented | Status::Partial) && e.platforms[target].tests.is_empty()).count()), format!("- {}", config.evidence_note), format!("- See [README]({}) for status rules, exclusions, source roots, and audit limitations.", link("README.md")?), String::new()]);
-        Ok(lines.join("\n"))
+        Ok(lines.join("\n") + &self.surfaces_section())
     }
 }
