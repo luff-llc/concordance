@@ -495,6 +495,89 @@ pub(crate) fn check_platform(
     }
 }
 
+/// Check `applies_to` and stand in a not-applicable record for every configured platform
+/// outside it (on the entry and its details), so every command treats them alike.
+pub(crate) fn apply_scope(
+    entry: &mut Entry,
+    config: &crate::Config,
+    report: &mut ValidationReport,
+) {
+    let Some(scope) = entry.applies_to.clone() else {
+        return;
+    };
+    if scope.is_empty() {
+        report.error(
+            "scope",
+            &entry.id,
+            "",
+            "applies_to",
+            "applies_to must not be empty",
+        );
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for platform in &scope {
+        if !config.platforms.contains_key(platform) {
+            report.error(
+                "scope",
+                &entry.id,
+                platform,
+                "applies_to",
+                "unknown platform",
+            );
+        }
+        if !seen.insert(platform) {
+            report.error(
+                "scope",
+                &entry.id,
+                platform,
+                "applies_to",
+                "duplicate platform",
+            );
+        }
+    }
+    let outside = |p: &String| !scope.contains(p);
+    for platform in entry.platforms.keys().filter(|p| outside(p)) {
+        report.error(
+            "scope",
+            &entry.id,
+            platform,
+            "",
+            "record for a platform outside applies_to",
+        );
+    }
+    for detail in &entry.details {
+        for platform in detail.platforms.keys().filter(|p| outside(p)) {
+            report.error(
+                "scope",
+                &format!("{}#{}", entry.id, detail.id),
+                platform,
+                "",
+                "record for a platform outside applies_to",
+            );
+        }
+    }
+    let stand_in = || -> Option<Platform> {
+        let mut record: Platform =
+            serde_json::from_value(serde_json::json!({"status": "not-applicable"})).ok()?;
+        record.inherited = true;
+        record.out_of_scope = true;
+        Some(record)
+    };
+    for platform in config.platforms.keys().filter(|p| outside(p)) {
+        let Some(record) = stand_in() else { continue };
+        entry
+            .platforms
+            .entry(platform.clone())
+            .or_insert_with(|| record.clone());
+        for detail in &mut entry.details {
+            detail
+                .platforms
+                .entry(platform.clone())
+                .or_insert_with(|| record.clone());
+        }
+    }
+}
+
 pub(crate) fn check_entry(entry: &Entry, report: &mut ValidationReport) {
     for (platform, record) in &entry.platforms {
         check_platform(&entry.id, platform, record, report);

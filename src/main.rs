@@ -217,6 +217,9 @@ enum Command {
         /// Also write the Markdown summary here (for example $GITHUB_STEP_SUMMARY).
         #[arg(long)]
         summary: Option<PathBuf>,
+        /// Check only declared surfaces ([surface_scan]), not user-visible files.
+        #[arg(long)]
+        surfaces_only: bool,
     },
     /// Mark target records stale where the source baseline changed; tasks, issues, new pin.
     Sync {
@@ -933,6 +936,7 @@ fn run(cli: Cli) -> Result<()> {
             message_file,
             repo,
             summary,
+            surfaces_only,
         } => {
             let outcome = (|| -> Result<concordance::GateReport> {
                 let catalog = Catalog::load(&dir)?;
@@ -949,7 +953,7 @@ fn run(cli: Cli) -> Result<()> {
                     },
                     _ => return Err("pass --base and --head, or --patch".into()),
                 };
-                catalog.gate_input(&options, &platform, &input)
+                catalog.gate_scoped(&options, &platform, &input, surfaces_only)
             })();
             match outcome {
                 Ok(report) => {

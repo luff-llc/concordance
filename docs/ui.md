@@ -184,7 +184,9 @@ check spatial order. Overlapping layers can share a parent without a below const
 States are named fixtures, not a hard-coded enum. Declare the relevant empty,
 loading, populated, error, large-text, dark, compact and wide combinations for
 each screen, with `theme`, an optional `font_scale` (default 1), and reference
-capture paths for every configured platform. `absent: [region-id]` explicitly
+capture paths for every configured platform the screen applies to: a screen that exists
+on only some platforms says so with `applies_to: [ios, android]`, and the others need no
+captures and take no part in `compare`, coverage or capture plans. `absent: [region-id]` explicitly
 omits individual regions in a state; omit descendants explicitly too. Update layout
 relationships if their referenced region must remain present. Per-platform `notes`
 on screens and regions explain legitimate native differences; notes do not silently

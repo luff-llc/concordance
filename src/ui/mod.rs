@@ -120,6 +120,14 @@ impl UiCatalog {
             for entry in &screen.entries {
                 self.catalog.entry(entry)?;
             }
+            if let Some(scope) = &screen.applies_to {
+                if scope.is_empty() {
+                    return fail(format!("{}: applies_to must not be empty", screen.id));
+                }
+                for platform in scope {
+                    self.require_platform(platform)?;
+                }
+            }
             for platform in screen
                 .notes
                 .keys()
@@ -211,7 +219,13 @@ impl UiCatalog {
                         ));
                     }
                 }
-                for platform in self.catalog.config.platforms.keys() {
+                for platform in self
+                    .catalog
+                    .config
+                    .platforms
+                    .keys()
+                    .filter(|p| screen.applies(p))
+                {
                     let stem = format!("{}.{state_id}.{platform}", screen.id);
                     if !capture_stems.insert(stem.clone()) {
                         return fail(format!("ambiguous capture filename: {stem}"));
@@ -234,6 +248,12 @@ impl UiCatalog {
                 }
                 for platform in state.captures.keys() {
                     self.require_platform(platform)?;
+                    if !screen.applies(platform) {
+                        return fail(format!(
+                            "{}.{state_id}: capture for {platform}, outside applies_to",
+                            screen.id
+                        ));
+                    }
                 }
             }
         }

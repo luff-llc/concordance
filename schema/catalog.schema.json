@@ -291,6 +291,10 @@
           "maximum": 1000,
           "description": "Optional product ordering within an impact tier; lower numbers come first."
         },
+        "applies_to": {
+          "$ref": "#/$defs/nonemptyTexts",
+          "description": "Platforms the feature exists on (default: every configured platform). Others need no record and read as not-applicable."
+        },
         "platforms": {
           "type": "object",
           "minProperties": 1,

@@ -250,6 +250,26 @@ Blocked column to the area table and a **Blockers** table (key, title, kind, own
 status, entries and details held back, highest impact, link) ranked by how much each
 unblocks. Briefs print the blocker title, link and status.
 
+## Platform scope
+
+By default an entry concerns every configured platform. A feature that exists on only
+some of them names them:
+
+```yaml
+- id: eink.page-turn-buttons
+  applies_to: [eink]
+  platforms:
+    eink: {status: implemented}
+```
+
+Platforms outside `applies_to` need no record, and a record for one is a validation
+error. Everywhere else they read as `not-applicable`: no gap, no `next` item, no detail
+or surface obligation, no release finding, and `set` refuses to add a record there. An
+entry that does not apply to the report target has no row in the report or its totals;
+one that applies to the target but not the baseline is listed as a target-specific
+adaptation. `entry --format json` leaves the stand-in records out. Screens take the same
+key (see [UI contracts](ui.md)). Unscoped entries behave exactly as before.
+
 ## Flavour platforms
 
 A platform that shares another's code can inherit its records:
@@ -263,7 +283,11 @@ horizon = { root = "apps/android", inherits = "android" }
 An entry (or detail) without a `horizon` record gets a copy of its `android` record;
 a `horizon` record that is present carries only its differences and is merged over the
 parent (its keys win; when it sets a different `status`, the parent's `verification`,
-`gap` and `blocked_by` are not inherited). To drop a parent value, set the key to
+`gap`, `blocked_by` and stale bookkeeping (`previous_status`, `since_commit`,
+`since_date`) are not inherited). Surface records are inherited only for surfaces whose
+`platforms` list the inheriting platform, and merge surface by surface with the same
+rules; `surfaces: null` drops them all, `surfaces: {car: null}` one. A platform outside
+an entry's `applies_to` inherits nothing. To drop a parent value, set the key to
 `null` in the inheriting record, for example `horizon: {gap: null}`; `null` is accepted
 only in records of inheriting platforms and means "unset". Whole copies are not validated separately,
 so a broken parent path is reported once. Unknown parents and cycles are errors.
@@ -351,6 +375,10 @@ and the gate fails, unless a commit message in the range (or `--message-file`) c
 from a unified diff whose paths are relative to the repository top. The catalog must be
 in the same repository as the range. Exit codes: 0 passed, 1 failed, 2 error. The
 Markdown summary goes to stdout and, with `--summary <file>`, is appended to that file.
+
+`--surfaces-only` checks declared surfaces alone (no user-visible files), for platforms
+whose `source_globs` exist for `inventory` or `drift` but whose changes should not need a
+catalog update; the platform must have a `[surface_scan]` section.
 
 With a `[surface_scan.<platform>]` section, `gate` also compares declared surfaces at
 `--base` and `--head` (with `--patch`, the working tree against `HEAD`) and fails on a new

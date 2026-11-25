@@ -47,12 +47,23 @@ pub struct Motion {
 pub struct Screen {
     pub id: String,
     pub entries: Vec<String>,
+    /// Platforms the screen exists on (default: every configured platform). Others need no
+    /// captures and are left out of comparison and coverage.
+    #[serde(default)]
+    pub applies_to: Option<Vec<String>>,
     pub anatomy: Vec<Region>,
     pub states: BTreeMap<String, ScreenState>,
     #[serde(default)]
     pub tolerances: Tolerances,
     #[serde(default)]
     pub notes: BTreeMap<String, String>,
+}
+impl Screen {
+    pub fn applies(&self, platform: &str) -> bool {
+        self.applies_to
+            .as_ref()
+            .is_none_or(|scope| scope.iter().any(|p| p == platform))
+    }
 }
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

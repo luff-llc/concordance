@@ -241,7 +241,7 @@ impl Catalog {
             let order = inheritance_order(&catalog.config);
             for (index, value) in values.iter().enumerate() {
                 let mut value = value.clone();
-                let copied = inherit(&mut value, &order);
+                let copied = inherit(&mut value, &order, &catalog.config.surfaces);
                 let value = &value;
                 let id = value
                     .get("id")
@@ -274,6 +274,7 @@ impl Catalog {
                     }
                 }
                 validation::check_entry(&entry, &mut report);
+                validation::apply_scope(&mut entry, &catalog.config, &mut report);
                 let id = &entry.id;
                 let detail_platforms = entry.details.iter().flat_map(|d| {
                     d.platforms
@@ -909,62 +910,147 @@ fn inheritance_order(config: &Config) -> Vec<(String, String)> {
 
 /// Fill inherited platform records in a raw entry. A missing child record is copied whole
 /// from its parent; a present one is merged over the parent's (child keys win, and a key
-/// set to `null` removes the parent's value).
+/// set to `null` removes the parent's value). When the child's status differs, the parent's
+/// verification, gap, blockers and stale bookkeeping are not inherited. Surface records are
+/// inherited only for surfaces that list the child platform, and merge per surface. A child
+/// outside the entry's `applies_to` inherits nothing.
 /// Returns the whole copies as (detail index, platform).
 fn inherit(
     entry: &mut serde_json::Value,
     order: &[(String, String)],
+    surfaces: &BTreeMap<String, SurfaceConfig>,
 ) -> Vec<(Option<usize>, String)> {
+    use serde_json::{Map, Value};
+    /// Fields that describe the parent's own status, not the child's.
+    const STATUS_BOUND: &[&str] = &[
+        "verification",
+        "gap",
+        "blocked_by",
+        "previous_status",
+        "since_commit",
+        "since_date",
+    ];
+    fn merge(own: &mut Map<String, Value>, base: &Map<String, Value>) {
+        let own_status = own.get("status").cloned();
+        let differs = own_status.is_some() && own_status.as_ref() != base.get("status");
+        for (key, value) in base {
+            if differs && STATUS_BOUND.contains(&key.as_str()) {
+                continue;
+            }
+            if key == "surfaces" {
+                continue; // merged per surface by the caller
+            }
+            own.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    /// The parent's surface records the child may have.
+    fn surface_base(
+        base: &Map<String, Value>,
+        child: &str,
+        surfaces: &BTreeMap<String, SurfaceConfig>,
+    ) -> Option<Map<String, Value>> {
+        let records = base.get("surfaces")?.as_object()?;
+        let kept: Map<String, Value> = records
+            .iter()
+            .filter(|(id, _)| {
+                // Undeclared IDs pass through so validation can report them on the parent.
+                surfaces
+                    .get(*id)
+                    .is_none_or(|s| s.platforms.iter().any(|p| p == child))
+            })
+            .map(|(id, v)| (id.clone(), v.clone()))
+            .collect();
+        (!kept.is_empty()).then_some(kept)
+    }
     fn apply(
-        platforms: Option<&mut serde_json::Value>,
+        platforms: Option<&mut Value>,
         order: &[(String, String)],
+        scope: Option<&BTreeSet<String>>,
+        surfaces: &BTreeMap<String, SurfaceConfig>,
         copied: &mut Vec<String>,
     ) {
-        let Some(map) = platforms.and_then(serde_json::Value::as_object_mut) else {
+        let Some(map) = platforms.and_then(Value::as_object_mut) else {
             return;
         };
         for (child, parent) in order {
-            let Some(base) = map
-                .get(parent)
-                .and_then(serde_json::Value::as_object)
-                .cloned()
-            else {
+            if scope.is_some_and(|s| !s.contains(child)) {
+                continue;
+            }
+            let Some(base) = map.get(parent).and_then(Value::as_object).cloned() else {
                 continue;
             };
+            let base_surfaces = surface_base(&base, child, surfaces);
             if !map.contains_key(child) {
-                map.insert(child.clone(), serde_json::Value::Object(base));
-                copied.push(child.clone());
-            } else if let Some(own) = map
-                .get_mut(child)
-                .and_then(serde_json::Value::as_object_mut)
-            {
-                // A different status makes the parent's verification and gap irrelevant.
-                let own_status = own.get("status").cloned();
-                let differs = own_status.is_some() && own_status.as_ref() != base.get("status");
-                for (key, value) in base {
-                    if differs && matches!(key.as_str(), "verification" | "gap" | "blocked_by") {
-                        continue;
-                    }
-                    own.entry(key).or_insert(value);
+                let mut record = base.clone();
+                record.remove("surfaces");
+                if let Some(kept) = base_surfaces {
+                    record.insert("surfaces".into(), Value::Object(kept));
                 }
-                // An explicit null unsets a parent key.
-                own.retain(|_, value| !value.is_null());
+                map.insert(child.clone(), Value::Object(record));
+                copied.push(child.clone());
+                continue;
             }
+            let Some(own) = map.get_mut(child).and_then(Value::as_object_mut) else {
+                continue;
+            };
+            merge(own, &base);
+            // `surfaces: null` drops every inherited surface record.
+            let explicit_null = own.get("surfaces").is_some_and(Value::is_null);
+            if let (Some(kept), false) = (base_surfaces, explicit_null) {
+                let target = own
+                    .entry("surfaces")
+                    .or_insert_with(|| Value::Object(Map::new()));
+                if let Some(target) = target.as_object_mut() {
+                    for (id, parent_record) in kept {
+                        match target.get_mut(&id) {
+                            None => {
+                                target.insert(id, parent_record);
+                            }
+                            Some(Value::Object(own_record)) => {
+                                if let Value::Object(parent_record) = &parent_record {
+                                    merge(own_record, parent_record);
+                                }
+                                own_record.retain(|_, v| !v.is_null());
+                            }
+                            Some(_) => {} // null: this surface is not inherited
+                        }
+                    }
+                    target.retain(|_, v| !v.is_null());
+                }
+            }
+            // An explicit null unsets a parent key.
+            own.retain(|_, value| !value.is_null());
         }
     }
     let mut out = Vec::new();
     if order.is_empty() {
         return out;
     }
+    let scope: Option<BTreeSet<String>> =
+        entry.get("applies_to").and_then(Value::as_array).map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        });
     let mut copied = Vec::new();
-    apply(entry.get_mut("platforms"), order, &mut copied);
+    apply(
+        entry.get_mut("platforms"),
+        order,
+        scope.as_ref(),
+        surfaces,
+        &mut copied,
+    );
     out.extend(copied.drain(..).map(|p| (None, p)));
-    if let Some(details) = entry
-        .get_mut("details")
-        .and_then(serde_json::Value::as_array_mut)
-    {
+    if let Some(details) = entry.get_mut("details").and_then(Value::as_array_mut) {
         for (index, detail) in details.iter_mut().enumerate() {
-            apply(detail.get_mut("platforms"), order, &mut copied);
+            apply(
+                detail.get_mut("platforms"),
+                order,
+                scope.as_ref(),
+                surfaces,
+                &mut copied,
+            );
             out.extend(copied.drain(..).map(|p| (Some(index), p)));
         }
     }

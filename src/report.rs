@@ -172,7 +172,8 @@ impl Catalog {
         let baseline: Vec<_> = self
             .entries
             .values()
-            .filter(|e| e.platforms[base].status == Status::Implemented)
+            // An entry that does not apply to the target has no parity to report.
+            .filter(|e| e.platforms[base].status == Status::Implemented && e.applies(target))
             .collect();
         // [implemented, verified, partial, missing, not-applicable, stale]
         let counts = |entries: &[&Entry]| -> [usize; 6] {
@@ -610,7 +611,7 @@ impl Catalog {
         let extras: Vec<_> = self
             .entries
             .values()
-            .filter(|e| e.platforms[base].status != Status::Implemented)
+            .filter(|e| e.platforms[base].status != Status::Implemented && e.applies(target))
             .collect();
         if !extras.is_empty() {
             // A partial baseline is not an adaptation; keep that distinction visible.

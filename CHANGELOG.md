@@ -2,6 +2,15 @@
 
 ## 0.4.0-dev
 
+- Platform scope: `applies_to` on entries and screens names the platforms a feature or
+  screen exists on. Platforms outside it need no record or capture and read as
+  not-applicable everywhere; entries outside the report target get no report row.
+- Inheritance: a record whose status differs from its parent's no longer inherits the
+  parent's stale bookkeeping (`previous_status`, `since_commit`, `since_date`). Surface
+  records are inherited only for surfaces that list the inheriting platform, and merge
+  per surface. A platform outside `applies_to` inherits nothing.
+- `gate --surfaces-only` checks declared surfaces without user-visible files.
+
 ## 0.3.0 (2026-11-25)
 
 - Surfaces: a features × platforms × surfaces dimension. `[surfaces.<id>]` declares

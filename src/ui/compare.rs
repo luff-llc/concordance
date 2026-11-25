@@ -534,7 +534,12 @@ impl UiCatalog {
             "<datalist id=\"platform-categories\">{}</datalist><p>Verdicts: <b>same</b> and <b>platform</b> (an accepted platform difference, with a category and a note) count as equivalent; <b>fixture</b> (a capture-tooling difference, with a note) is tooling debt and does not count against the product.</p>",
             self.catalog.config.ui.platform_categories.iter().map(|c| format!("<option value=\"{}\">", escape(c))).collect::<String>()
         ));
-        for screen in self.screens.values() {
+        // A screen that does not exist on both platforms has no pair to compare.
+        for screen in self
+            .screens
+            .values()
+            .filter(|s| s.applies(baseline) && s.applies(target))
+        {
             for (state_id, state) in &screen.states {
                 let base = self.evidence(screen, state_id, state, baseline, captures)?;
                 let mut dest = self.evidence(screen, state_id, state, target, captures)?;

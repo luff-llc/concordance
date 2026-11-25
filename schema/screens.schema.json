@@ -17,6 +17,16 @@
       "minItems": 1,
       "uniqueItems": true
     },
+    "applies_to": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Platforms the screen exists on (default: every configured platform). Others need no captures."
+    },
     "anatomy": {
       "type": "array",
       "items": {

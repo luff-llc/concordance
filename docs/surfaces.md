@@ -97,8 +97,11 @@ Rules:
 - A record for a platform the surface does not list, for an undeclared surface, or for a
   surface the entry does not name is a validation error, as are nested `surfaces`.
 - `verified` is derived exactly as for platform records.
-- Flavour platforms (`inherits`) copy the whole `surfaces` map when they have no
-  `surfaces` of their own.
+- Flavour platforms (`inherits`) inherit the parent's surface records only for surfaces
+  that list them, merged surface by surface; `surfaces: null` (or `surfaces: {id: null}`)
+  drops them.
+- A surface with `signals = []` is never discovered, so coarse records on it are never
+  reported as no longer declared (for content posted at run time, such as notifications).
 - Surface records are addressed as `entry.id@surface`, for example
   `concordance set <dir> widgets.show-playing-episode@widget.small --platform android
   --status implemented`. `entry`, `drift`, `gate` and `sync` use the same label.

@@ -332,6 +332,23 @@ impl Catalog {
         platform: &str,
         input: &GateInput,
     ) -> Result<GateReport> {
+        self.gate_scoped(options, platform, input, false)
+    }
+
+    /// `gate_input`; with `surfaces_only`, only declared surfaces are checked (user-visible
+    /// files are not), and the platform must have a `[surface_scan]` section.
+    pub fn gate_scoped(
+        &self,
+        options: &RootOptions,
+        platform: &str,
+        input: &GateInput,
+        surfaces_only: bool,
+    ) -> Result<GateReport> {
+        if surfaces_only && !self.config.surface_scan.contains_key(platform) {
+            return fail(format!(
+                "{platform}: --surfaces-only needs [surface_scan.{platform}] in catalog.toml"
+            ));
+        }
         let root = self.platform_root(platform, options)?.ok_or_else(|| {
             format!("{platform}: root not supplied; use --root {platform}=<path>")
         })?;
@@ -445,6 +462,9 @@ impl Catalog {
             .map(|(area, _)| area)
             .collect();
         let any_area = !changed_areas.is_empty();
+        if surfaces_only {
+            patterns.clear();
+        }
         let mut user_visible = Vec::new();
         for file in &changed {
             if !patterns.iter().any(|g| glob(g.as_bytes(), file.as_bytes())) {
